@@ -34,6 +34,11 @@ from stt.app_data import DEFAULT_MIGRATION_ITEMS, removable_originals, tree_stat
 
 MARKER_NAME = ".migrated_from_repo"
 
+# `config` is never reclaimed: the checkout's config/ holds the tracked
+# *.default.json templates that BUNDLE_DIR seeds from, so deleting it would
+# break the app. Only the large/generated data is worth reclaiming anyway.
+CLEANUP_ITEMS = tuple(n for n in DEFAULT_MIGRATION_ITEMS if n != "config")
+
 
 def _human(nbytes: int) -> str:
     size = float(nbytes)
@@ -75,7 +80,7 @@ def main(argv: list[str] | None = None) -> int:
               "data is safely in the new location, re-run with --force.")
         return 1
 
-    removable = removable_originals(old_root, new_root, DEFAULT_MIGRATION_ITEMS)
+    removable = removable_originals(old_root, new_root, CLEANUP_ITEMS)
     if not removable:
         print("\nNothing to clean up: no originals have a verified complete copy "
               "in the new location.")
