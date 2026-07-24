@@ -44,6 +44,7 @@ module = [
     "stt.model_disk",
     "stt.nllb_catalog",
     "stt.tts_catalog",
+    "stt.calibration",
 ]
 disallow_untyped_defs = true
 
