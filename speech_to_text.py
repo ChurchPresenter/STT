@@ -57,6 +57,7 @@ for _mig_name in ("config.json", "custom_dictionary.json", "word_highlighting.js
 # safe_model_path is re-imported and safe_managed_path keeps its APP_DIR default.
 from stt import paths as _paths
 from stt.paths import safe_model_path  # noqa: F401
+from stt.model_disk import dir_has_weights, has_weight_file, is_weight_file  # noqa: F401
 
 
 def safe_managed_path(path, base_dir=None):
@@ -10424,15 +10425,7 @@ def list_faster_whisper_models():
         for model_name, details in available_models.items():
             model_path = os.path.join(models_dir, f"faster-whisper-{model_name}")
             # Check directory exists AND contains model weight files
-            downloaded = False
-            if os.path.exists(model_path):
-                model_files = os.listdir(model_path)
-                downloaded = any(
-                    f in ["model.safetensors", "pytorch_model.bin", "model.bin"] or
-                    (f.startswith("pytorch_model-") and f.endswith(".bin")) or
-                    (f.startswith("model-") and f.endswith(".safetensors"))
-                    for f in model_files
-                )
+            downloaded = dir_has_weights(model_path)
 
             models_list.append({
                 "name": model_name,
@@ -10638,6 +10631,14 @@ def list_models():
                     if item.startswith(".") or item in ("tts", "piper"):
                         continue
 
+                    # Only count directories that still hold a weight file: a
+                    # partial delete (or an interrupted download) leaves the
+                    # directory with just config/tokenizer files, and listing
+                    # that as downloaded is exactly what mismatched nllb-status
+                    # / faster-whisper/list (which both require a weight file).
+                    if not dir_has_weights(os.path.join(models_dir, item)):
+                        continue
+
                     # Detect if it's a HuggingFace model (contains --)
                     if "--" in item:
                         # HuggingFace model - convert back to original ID
@@ -10770,9 +10771,7 @@ def nllb_status():
                         for f in files:
                             file_path = os.path.join(root, f)
                             total_size += os.path.getsize(file_path)
-                            if (f in ["model.safetensors", "pytorch_model.bin"] or
-                                (f.startswith("pytorch_model-") and f.endswith(".bin")) or
-                                (f.startswith("model-") and f.endswith(".safetensors"))):
+                            if is_weight_file(f):
                                 has_model = True
 
                     if has_model:
@@ -10794,20 +10793,15 @@ def nllb_status():
             if os.path.exists(snapshots_dir):
                 for snapshot in os.listdir(snapshots_dir):
                     snapshot_path = os.path.join(snapshots_dir, snapshot)
-                    if os.path.isdir(snapshot_path):
-                        # Check for model file (single or sharded)
-                        for f in os.listdir(snapshot_path):
-                            if (f in ["model.safetensors", "pytorch_model.bin"] or
-                                (f.startswith("pytorch_model-") and f.endswith(".bin")) or
-                                (f.startswith("model-") and f.endswith(".safetensors"))):
-                                # Model exists in cache, offer to move it
-                                return jsonify({
-                                    "success": True,
-                                    "downloaded": False,
-                                    "in_cache": True,
-                                    "cache_path": hf_cache,
-                                    "message": "Model found in HuggingFace cache. Click download to move it to ./models/"
-                                })
+                    if os.path.isdir(snapshot_path) and has_weight_file(os.listdir(snapshot_path)):
+                        # Model exists in cache, offer to move it
+                        return jsonify({
+                            "success": True,
+                            "downloaded": False,
+                            "in_cache": True,
+                            "cache_path": hf_cache,
+                            "message": "Model found in HuggingFace cache. Click download to move it to ./models/"
+                        })
 
             # Partial download exists
             return jsonify({
@@ -10932,18 +10926,7 @@ def list_nllb_models():
     models_dir = MODELS_DIR
     for model in models:
         dir_name = model["model_id"].replace("/", "--")
-        model_path = os.path.join(models_dir, dir_name)
-        if os.path.exists(model_path):
-            model_files = os.listdir(model_path)
-            # Check for single model file or sharded weights (e.g. pytorch_model-00001-of-00003.bin)
-            model["downloaded"] = any(
-                f in ["model.safetensors", "pytorch_model.bin"] or
-                (f.startswith("pytorch_model-") and f.endswith(".bin")) or
-                (f.startswith("model-") and f.endswith(".safetensors"))
-                for f in model_files
-            )
-        else:
-            model["downloaded"] = False
+        model["downloaded"] = dir_has_weights(os.path.join(models_dir, dir_name))
 
     return jsonify({"success": True, "models": models})
 

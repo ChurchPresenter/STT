@@ -41,6 +41,7 @@ module = [
     "stt.downloads",
     "stt.paths",
     "stt.self_update",
+    "stt.model_disk",
 ]
 disallow_untyped_defs = true
 
