@@ -650,14 +650,17 @@ def _registry_path():
     the app to pick up PATH changes' ever."""
     if not IS_WINDOWS:
         return ""
-    import winreg
+    try:
+        import winreg
+    except ModuleNotFoundError:
+        return ""  # IS_WINDOWS forced on a POSIX host (tests)
     parts = []
-    for root, key in ((winreg.HKEY_LOCAL_MACHINE,
+    for root, key in ((winreg.HKEY_LOCAL_MACHINE,  # type: ignore[attr-defined]
                        r"SYSTEM\CurrentControlSet\Control\Session Manager\Environment"),
-                      (winreg.HKEY_CURRENT_USER, r"Environment")):
+                      (winreg.HKEY_CURRENT_USER, r"Environment")):  # type: ignore[attr-defined]
         try:
-            with winreg.OpenKey(root, key) as k:
-                val, _ = winreg.QueryValueEx(k, "Path")
+            with winreg.OpenKey(root, key) as k:  # type: ignore[attr-defined]
+                val, _ = winreg.QueryValueEx(k, "Path")  # type: ignore[attr-defined]
                 if val:
                     parts.append(os.path.expandvars(val))
         except OSError:
