@@ -15731,6 +15731,24 @@ if __name__ == "__main__":
     if sys.platform != "win32":
         signal.signal(signal.SIGTERM, signal_handler)
 
+    # Windows cannot deliver SIGTERM across processes, so a watchdog-managed
+    # worker used to be stopped with TerminateProcess — no cleanup, risking
+    # mid-write cuts to the transcription DB and backup files. The watchdog
+    # holds our stdin pipe and writes 'shutdown' to request the same graceful
+    # teardown the signals trigger. EOF alone is deliberately ignored (a dead
+    # watchdog must not stop the service; its replacement re-attaches).
+    if _is_watchdog_managed():
+        def _stdin_shutdown_watcher():
+            try:
+                for line in sys.stdin:
+                    if line.strip() == "shutdown":
+                        print("[SHUTDOWN] Graceful shutdown requested by watchdog")
+                        signal_handler(signal.SIGTERM, None)  # exits the process
+            except Exception:
+                pass  # stdin closed/unreadable: channel unavailable, signals still apply
+        threading.Thread(target=_stdin_shutdown_watcher, daemon=True,
+                         name="watchdog-shutdown").start()
+
     # Direct-run auto-update: fast-forward the checkout before anything spins up.
     # No-op (and no restart) under the watchdog, when disabled, or when there's
     # nothing to pull / the tree isn't safely fast-forwardable.
