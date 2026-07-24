@@ -1338,6 +1338,11 @@ class ProcessManager:
                 cmd,
                 cwd=SOURCE_DIR,
                 env=env,
+                # stdin pipe = graceful-shutdown channel: stop() writes
+                # 'shutdown' and the worker runs the same teardown its POSIX
+                # signal handler does. Windows offers no cross-process SIGTERM,
+                # so without this every stop was a TerminateProcess mid-write.
+                stdin=subprocess.PIPE,
                 stdout=self._log_fh,
                 stderr=self._log_fh,
                 close_fds=not IS_WINDOWS,
@@ -1351,7 +1356,7 @@ class ProcessManager:
             self.state.set(status="stopped")
             return False
 
-    def stop(self, timeout=15):
+    def stop(self, timeout=15, graceful_timeout=10):
         with self.state._lock:
             proc = self.state.process
 
@@ -1361,19 +1366,33 @@ class ProcessManager:
 
         self._no_restart.set()   # tell crash thread this stop is intentional
         logging.info(f"[PM] Stopping STT (PID {proc.pid})...")
+        # Graceful first: ask over the stdin channel (the only cross-process
+        # "signal" Windows has; the worker runs its normal shutdown handler and
+        # exits cleanly — no mid-write cuts to the DB/backup files). Escalate
+        # to terminate (SIGTERM on POSIX — same handler), then kill.
         try:
-            proc.terminate()
+            assert proc.stdin is not None  # stdin=PIPE in start()
+            proc.stdin.write(b"shutdown\n")
+            proc.stdin.flush()
+            proc.wait(timeout=graceful_timeout)
+            logging.info("[PM] STT shut down gracefully")
         except Exception:
-            pass
-        try:
-            proc.wait(timeout=timeout)
-        except subprocess.TimeoutExpired:
-            logging.warning("[PM] STT did not stop in time, killing...")
+            if proc.poll() is None:
+                logging.warning("[PM] Graceful shutdown not answered; terminating...")
+        if proc.poll() is None:
             try:
-                proc.kill()
-                proc.wait(timeout=5)
+                proc.terminate()
             except Exception:
                 pass
+            try:
+                proc.wait(timeout=timeout)
+            except subprocess.TimeoutExpired:
+                logging.warning("[PM] STT did not stop in time, killing...")
+                try:
+                    proc.kill()
+                    proc.wait(timeout=5)
+                except Exception:
+                    pass
 
         # Best-effort: clean up orphaned ffmpeg subprocesses
         try:
