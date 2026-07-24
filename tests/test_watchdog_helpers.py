@@ -342,7 +342,72 @@ class TestAugmentedPath:
 
     def test_existing_path_is_preserved(self, monkeypatch):
         monkeypatch.setenv("PATH", "/existing/entry")
+        monkeypatch.setattr(watchdog, "_registry_path", lambda: "")
         assert watchdog._augmented_path().endswith(os.pathsep + "/existing/entry")
+
+    def test_live_registry_path_is_appended(self, monkeypatch):
+        # A tool installed mid-setup lands on the *registry* PATH while the
+        # process copy stays frozen — Retry must see it without a restart.
+        monkeypatch.setenv("PATH", "/frozen/process/path")
+        monkeypatch.setattr(watchdog, "_registry_path", lambda: "/fresh/from/registry")
+        path = watchdog._augmented_path()
+        assert path.endswith(os.pathsep + "/fresh/from/registry")
+        assert (os.pathsep + "/frozen/process/path" + os.pathsep) in path
+
+    def test_registry_path_reads_real_registry_on_windows(self):
+        got = watchdog._registry_path()
+        if watchdog.IS_WINDOWS:
+            # %SystemRoot%\system32 is always on the machine PATH, and values
+            # must come back expanded.
+            assert "system32" in got.lower()
+            assert "%" not in got.split(os.pathsep)[0]
+        else:
+            assert got == ""
+
+
+class TestHeadlessProvisioningRetry:
+    """Headless = unattended: a transient failure must not exit the process —
+    it retries with backoff and resumes (steps are idempotent)."""
+
+    def _patch(self, monkeypatch, outcomes, sleeps):
+        class FakeProvisioner:
+            def __init__(self, log=None):
+                pass
+
+            def run(self):
+                result = outcomes.pop(0)
+                if isinstance(result, Exception):
+                    raise result
+
+        monkeypatch.setattr(watchdog, "Provisioner", FakeProvisioner)
+        monkeypatch.setattr(watchdog, "_sentry_capture", lambda e: None)
+        monkeypatch.setattr(watchdog.time, "sleep", sleeps.append)
+
+    def test_transient_failures_retry_with_backoff(self, monkeypatch):
+        sleeps = []
+        self._patch(monkeypatch,
+                    [watchdog.ProvisionError("net blip"),
+                     watchdog.ProvisionError("still down"), None],
+                    sleeps)
+        assert watchdog._run_provisioning_headless() is True
+        assert sleeps == [30, 60]
+
+    def test_bounded_attempts_give_up(self, monkeypatch):
+        sleeps = []
+        self._patch(monkeypatch,
+                    [watchdog.ProvisionError("x")] * 3,
+                    sleeps)
+        assert watchdog._run_provisioning_headless(max_attempts=3) is False
+        assert sleeps == [30, 60]  # no sleep after the final attempt
+
+    def test_backoff_is_capped(self, monkeypatch):
+        sleeps = []
+        self._patch(monkeypatch,
+                    [watchdog.ProvisionError("x")] * 8 + [None],
+                    sleeps)
+        assert watchdog._run_provisioning_headless() is True
+        assert max(sleeps) == 600
+        assert sleeps == [30, 60, 120, 240, 480, 600, 600, 600]
 
 
 class TestProgressNoiseFilter:

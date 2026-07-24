@@ -306,7 +306,9 @@ def test_provisioning_failure_is_captured_to_sentry(monkeypatch):
 
     monkeypatch.setattr(watchdog.Provisioner, "run", raise_boom)
 
-    assert watchdog._run_provisioning_headless() is False
+    # max_attempts bounds the retry loop (headless retries forever by default
+    # so unattended kiosks self-heal); sentry must be captured exactly once.
+    assert watchdog._run_provisioning_headless(max_attempts=1) is False
     assert captured == [boom, "flushed"], "failure must be captured then flushed"
 
 

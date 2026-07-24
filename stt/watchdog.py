@@ -640,6 +640,31 @@ def is_provisioned():
     )
 
 
+def _registry_path():
+    """Machine+user PATH read live from the registry (Windows; '' elsewhere).
+
+    The process copy of PATH is frozen at launch, so anything installed while
+    setup is running — git to a custom directory, a tool the user added after
+    a failed step — is invisible to it. Folding the current registry PATH in
+    makes the setup window's Retry button genuinely sufficient: no 'restart
+    the app to pick up PATH changes' ever."""
+    if not IS_WINDOWS:
+        return ""
+    import winreg
+    parts = []
+    for root, key in ((winreg.HKEY_LOCAL_MACHINE,
+                       r"SYSTEM\CurrentControlSet\Control\Session Manager\Environment"),
+                      (winreg.HKEY_CURRENT_USER, r"Environment")):
+        try:
+            with winreg.OpenKey(root, key) as k:
+                val, _ = winreg.QueryValueEx(k, "Path")
+                if val:
+                    parts.append(os.path.expandvars(val))
+        except OSError:
+            pass
+    return os.pathsep.join(parts)
+
+
 def _augmented_path():
     """PATH with the common uv/git/ffmpeg install locations prepended. A tool
     winget just installed is not on the running process's PATH (Windows never
@@ -647,7 +672,8 @@ def _augmented_path():
     explicitly — that lets _which() see it in the same provisioning run, and
     _run() hands this PATH to subprocesses, so uv can shell out to git for
     VCS requirements (seen in the field: `uv pip install` died on the whisper
-    git URL right after winget had installed git)."""
+    git URL right after winget had installed git). The live registry PATH is
+    appended as well, covering installs to non-canonical locations."""
     home = os.path.expanduser("~")
     extra = [
         os.path.join(home, ".local", "bin"),
@@ -669,7 +695,11 @@ def _augmented_path():
             # redundant static build was downloaded on top.
             os.path.join(local, "Microsoft", "WinGet", "Links"),
         ]
-    return os.pathsep.join(extra) + os.pathsep + os.environ.get("PATH", "")
+    tail = os.environ.get("PATH", "")
+    reg = _registry_path()
+    if reg:
+        tail = tail + os.pathsep + reg
+    return os.pathsep.join(extra) + os.pathsep + tail
 
 
 def _which(name):
@@ -1231,7 +1261,7 @@ class Provisioner:
             raise ProvisionError(
                 "requirements.txt contains git-based packages but git is not "
                 "available. Install Git (https://git-scm.com/downloads), then "
-                "restart the app to resume setup."
+                "press Retry — setup resumes where it left off."
             )
         py = venv_python()
         cmd = [self._uv, "pip", "install", "--python", py, "-r", req]
@@ -2693,14 +2723,28 @@ def _run_crash_report_test():
 # First-run setup UI
 # ---------------------------------------------------------------------------
 
-def _run_provisioning_headless():
-    try:
-        Provisioner(log=lambda m: logging.info(f"[SETUP] {m}")).run()
-        return True
-    except Exception as e:
-        logging.error(f"[SETUP] Provisioning failed: {e}")
-        _sentry_capture(e)
-        return False
+def _run_provisioning_headless(max_attempts=None):
+    """Provision with retry+backoff (30s doubling to 10min, unbounded by
+    default). Headless means unattended — an autostarted kiosk must self-heal
+    from a transient failure (network blip mid-download, a prerequisite
+    installed a minute later) instead of exiting and staying down until
+    someone logs in. Steps are idempotent, so a retry resumes where it
+    left off; the GUI path has its Retry button for the same purpose."""
+    delay, attempt = 30, 0
+    while True:
+        attempt += 1
+        try:
+            Provisioner(log=lambda m: logging.info(f"[SETUP] {m}")).run()
+            return True
+        except Exception as e:
+            logging.error(f"[SETUP] Provisioning failed (attempt {attempt}): {e}")
+            if attempt == 1:
+                _sentry_capture(e)  # once — a retry loop must not spam reports
+            if max_attempts is not None and attempt >= max_attempts:
+                return False
+            logging.info(f"[SETUP] Retrying in {delay}s...")
+            time.sleep(delay)
+            delay = min(delay * 2, 600)
 
 
 class ProvisionWindow:
