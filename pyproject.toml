@@ -42,7 +42,6 @@ module = [
     "stt.paths",
     "stt.self_update",
     "stt.model_disk",
-    "stt.app_data",
 ]
 disallow_untyped_defs = true
 

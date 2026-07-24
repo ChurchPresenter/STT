@@ -23,26 +23,6 @@ else:
 
 os.makedirs(APP_DIR, exist_ok=True)
 
-# One-time relocation: older run-from-repo installs kept their data inside the
-# checkout (APP_DIR used to be the script dir). Now that APP_DIR is ~/.stt, copy
-# that data across once so nothing is orphaned on upgrade. Copy — never move —
-# so the originals stay as a recoverable backup (important on a live server); a
-# marker makes it a no-op after the first pass. Skipped when frozen (the script
-# dir is the read-only bundle, never a data source) or when the data dir already
-# is the checkout (nothing to move).
-if not _is_frozen and _script_dir != APP_DIR:
-    _migrated_marker = os.path.join(APP_DIR, ".migrated_from_repo")
-    if not os.path.exists(_migrated_marker):
-        from stt.app_data import migrate_app_data as _migrate_app_data
-        _mig_results = _migrate_app_data(_script_dir, APP_DIR,
-                                         log=lambda m: print(f"[MIGRATE] {m}"))
-        try:
-            with open(_migrated_marker, "w", encoding="utf-8") as _mf:
-                _mf.write("copied from " + _script_dir + ": "
-                          + ", ".join(n for n, s in _mig_results if s == "copied") + "\n")
-        except OSError:
-            pass  # the marker is an optimization; migrate_app_data is idempotent
-
 MODELS_DIR = os.path.join(APP_DIR, "models")
 os.makedirs(MODELS_DIR, exist_ok=True)
 
