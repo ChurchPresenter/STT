@@ -4,7 +4,12 @@ import os
 
 import pytest
 
-from stt.app_data import DEFAULT_MIGRATION_ITEMS, migrate_app_data
+from stt.app_data import (
+    DEFAULT_MIGRATION_ITEMS,
+    migrate_app_data,
+    removable_originals,
+    tree_stats,
+)
 
 
 def _seed_old(old):
@@ -102,3 +107,48 @@ class TestMigrateAppData:
             os.chmod(secret, 0o700)
         assert status["logs"].startswith("error:")
         assert logged and "logs" in logged[0]
+
+
+class TestTreeStats:
+    def test_counts_files_and_bytes(self, tmp_path):
+        d = tmp_path / "m"
+        (d / "sub").mkdir(parents=True)
+        (d / "a.bin").write_bytes(b"1234")
+        (d / "sub" / "b.bin").write_bytes(b"56")
+        assert tree_stats(str(d)) == (2, 6)
+
+    def test_single_file(self, tmp_path):
+        f = tmp_path / "x.json"
+        f.write_bytes(b"abc")
+        assert tree_stats(str(f)) == (1, 3)
+
+    def test_missing_path(self, tmp_path):
+        assert tree_stats(str(tmp_path / "nope")) == (0, 0)
+
+
+class TestRemovableOriginals:
+    def test_returns_fully_mirrored_items(self, tmp_path):
+        old, new = tmp_path / "repo", tmp_path / "home.stt"
+        _seed_old(old)
+        migrate_app_data(str(old), str(new))  # full clean copy
+
+        removable = removable_originals(str(old), str(new))
+        assert set(removable) == {"config", "models", "_AUTOMATIC_BACKUP",
+                                  "download_progress.json"}
+
+    def test_excludes_partial_copy(self, tmp_path):
+        old, new = tmp_path / "repo", tmp_path / "home.stt"
+        _seed_old(old)
+        migrate_app_data(str(old), str(new))
+        # Simulate a target that lost a shard after migration (fewer bytes/files):
+        (new / "models" / "facebook--nllb" / "model.safetensors").unlink()
+
+        removable = removable_originals(str(old), str(new))
+        assert "models" not in removable          # not safe — target is short
+        assert "config" in removable              # still fully mirrored
+
+    def test_excludes_missing_target(self, tmp_path):
+        old, new = tmp_path / "repo", tmp_path / "home.stt"
+        _seed_old(old)
+        new.mkdir()  # nothing migrated
+        assert removable_originals(str(old), str(new)) == []

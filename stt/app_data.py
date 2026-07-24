@@ -67,3 +67,53 @@ def migrate_app_data(
             log(f"could not migrate {name}: {e}")
             results.append((name, f"error: {e}"))
     return results
+
+
+def tree_stats(path: str) -> Tuple[int, int]:
+    """Return ``(file_count, total_bytes)`` for a file or directory tree.
+
+    Unreadable entries are silently skipped (counted as absent), so the result
+    is a lower bound for a tree with permission holes.
+    """
+    if os.path.isfile(path):
+        try:
+            return 1, os.path.getsize(path)
+        except OSError:
+            return 0, 0
+    count = 0
+    size = 0
+    for root, _dirs, files in os.walk(path):
+        for f in files:
+            try:
+                size += os.path.getsize(os.path.join(root, f))
+                count += 1
+            except OSError:
+                pass
+    return count, size
+
+
+def removable_originals(
+    old_root: str,
+    new_root: str,
+    items: Iterable[str] = DEFAULT_MIGRATION_ITEMS,
+) -> List[str]:
+    """Names whose ``new_root`` copy is verified complete enough to delete the
+    ``old_root`` original and reclaim its space.
+
+    "Complete" means the target exists and its file count and total byte size
+    are **at least** the source's (equal for a clean copy; the migration never
+    shrinks data). Anything missing from either root, or whose target has fewer
+    files or bytes than the source (a partial/failed copy), is omitted — the
+    caller must never delete an original that has not been fully mirrored.
+    """
+    removable: List[str] = []
+    for name in items:
+        old = os.path.join(old_root, name)
+        new = os.path.join(new_root, name)
+        if not os.path.exists(old) or not os.path.exists(new):
+            continue
+        old_count, old_bytes = tree_stats(old)
+        new_count, new_bytes = tree_stats(new)
+        if new_count >= old_count and new_bytes >= old_bytes:
+            removable.append(name)
+    return removable
