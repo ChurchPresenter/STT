@@ -43,6 +43,7 @@ module = [
     "stt.self_update",
     "stt.model_disk",
     "stt.nllb_catalog",
+    "stt.tts_catalog",
 ]
 disallow_untyped_defs = true
 

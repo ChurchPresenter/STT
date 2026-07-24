@@ -1159,28 +1159,23 @@ def get_edge_tts_voices():
         return []
 
 
+# Piper catalog + pure voice-selection matching live in stt/tts_catalog.py; the
+# shims below inject the IO (live edge-tts voices, the downloaded-model check).
+from stt.tts_catalog import (  # noqa: F401
+    PIPER_MODELS_CATALOG as _PIPER_MODELS_CATALOG,
+    edge_voice_for_lang,
+    piper_model_for_lang,
+)
+
+
 def _pick_default_edge_voice(lang_code):
-    """Pick a default edge-tts voice for a language code (e.g., 'ru' -> 'ru-RU-DmitryNeural').
-    Returns ShortName string or None if no match found."""
-    voices = get_edge_tts_voices()
-    if not voices:
-        return None
-    lang_lower = lang_code.lower()
-    for v in voices:
-        locale = v.get("Locale", "").lower()
-        if locale.startswith(lang_lower):
-            return v.get("ShortName")
-    return None
+    """Default edge-tts voice ShortName for a language code, or None."""
+    return edge_voice_for_lang(lang_code, get_edge_tts_voices())
 
 
 def _pick_default_piper_model(lang_code):
-    """Pick a downloaded piper model matching a language code.
-    Returns model ID string or None if no match found."""
-    lang_lower = lang_code.lower()
-    for m in _PIPER_MODELS_CATALOG:
-        if m["language"].lower() == lang_lower and _is_piper_model_downloaded(m["id"]):
-            return m["id"]
-    return None
+    """A downloaded piper model id matching a language code, or None."""
+    return piper_model_for_lang(lang_code, _PIPER_MODELS_CATALOG, _is_piper_model_downloaded)
 
 
 def get_tts_model(use_gpu=False, model_name=None):
@@ -5851,19 +5846,6 @@ def save_tts_settings():
 
 
 # ─── Piper TTS model management ─────────────────────────────────────────────
-
-_PIPER_MODELS_CATALOG = [
-    {"id": "en_US-lessac-medium", "name": "Lessac (US English)", "language": "en", "quality": "medium", "size": "75MB"},
-    {"id": "en_US-amy-medium", "name": "Amy (US English)", "language": "en", "quality": "medium", "size": "75MB"},
-    {"id": "en_US-ryan-medium", "name": "Ryan (US English)", "language": "en", "quality": "medium", "size": "75MB"},
-    {"id": "en_GB-alba-medium", "name": "Alba (British English)", "language": "en", "quality": "medium", "size": "75MB"},
-    {"id": "de_DE-thorsten-medium", "name": "Thorsten (German)", "language": "de", "quality": "medium", "size": "75MB"},
-    {"id": "es_ES-davefx-medium", "name": "Davefx (Spanish)", "language": "es", "quality": "medium", "size": "75MB"},
-    {"id": "fr_FR-siwis-medium", "name": "Siwis (French)", "language": "fr", "quality": "medium", "size": "75MB"},
-    {"id": "ru_RU-ruslan-medium", "name": "Ruslan (Russian)", "language": "ru", "quality": "medium", "size": "75MB"},
-    {"id": "uk_UA-ukrainian_tts-medium", "name": "Ukrainian TTS", "language": "uk", "quality": "medium", "size": "75MB"},
-    {"id": "zh_CN-huayan-medium", "name": "Huayan (Chinese)", "language": "zh", "quality": "medium", "size": "75MB"},
-]
 
 _tts_download_status = {"status": "idle", "model": "", "error": ""}
 
