@@ -1291,12 +1291,12 @@
 
             // Image files
             if (['jpg', 'jpeg', 'png', 'gif', 'bmp', 'svg', 'webp', 'ico'].includes(ext)) {
-                previewContent.innerHTML = `<img src="/api/file-manager/download?path=${encodedPath}" alt="${name}" style="max-width: 100%;">`;
+                previewContent.innerHTML = `<img src="/api/file-manager/download?path=${encodedPath}" alt="${name}" style="max-width: 100%; border-radius: var(--radius-sm);">`;
             }
             // Video files
             else if (['mp4', 'webm', 'ogg', 'avi', 'mov', 'mkv'].includes(ext)) {
                 previewContent.innerHTML = `
-                    <video controls style="max-width: 100%;">
+                    <video controls style="max-width: 100%; border-radius: var(--radius-sm);">
                         <source src="/api/file-manager/download?path=${encodedPath}" type="video/${ext === 'mkv' ? 'webm' : ext}">
                         Your browser does not support the video tag.
                     </video>
@@ -1313,7 +1313,7 @@
             }
             // PDF files
             else if (ext === 'pdf') {
-                previewContent.innerHTML = `<iframe src="/api/file-manager/download?path=${encodedPath}" title="PDF Preview" style="width: 100%; height: 70vh;"></iframe>`;
+                previewContent.innerHTML = `<iframe src="/api/file-manager/download?path=${encodedPath}" title="PDF Preview" style="width: 100%; height: 70vh; border-radius: var(--radius-sm); border: 0;"></iframe>`;
             }
             // Text files and code (including subtitle files)
             else if (['txt', 'log', 'json', 'xml', 'html', 'css', 'js', 'py', 'java', 'c', 'cpp', 'h', 'cs', 'php', 'rb', 'go', 'rs', 'swift', 'kt', 'md', 'yaml', 'yml', 'ini', 'cfg', 'conf', 'sh', 'bash', 'sql', 'csv', 'srt', 'vtt'].includes(ext)) {
