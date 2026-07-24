@@ -232,10 +232,11 @@ def _source_head():
     Used to tell whether an auto-update has advanced the on-disk watchdog code
     past what the running process launched with (i.e. a restart would apply it).
     """
-    if not (shutil.which("git") and os.path.isdir(os.path.join(SOURCE_DIR, ".git"))):
+    git = _which("git")  # augmented path: finds MinGit/fresh installs too
+    if not (git and os.path.isdir(os.path.join(SOURCE_DIR, ".git"))):
         return ""
     try:
-        r = subprocess.run(["git", "-C", SOURCE_DIR, "rev-parse", "HEAD"],
+        r = subprocess.run([git, "-C", SOURCE_DIR, "rev-parse", "HEAD"],
                            capture_output=True, text=True, timeout=10,
                            creationflags=_CREATE_NO_WINDOW)
         return r.stdout.strip() if r.returncode == 0 else ""
@@ -329,7 +330,8 @@ def _sync_source_to_bundle():
     """
     if not _FROZEN or os.environ.get("STT_WD_FROMSOURCE"):
         return
-    if not (shutil.which("git") and os.path.isdir(os.path.join(SOURCE_DIR, ".git"))):
+    git = _which("git")  # augmented path: finds MinGit/fresh installs too
+    if not (git and os.path.isdir(os.path.join(SOURCE_DIR, ".git"))):
         return
     try:
         bundle = read_bundle_version()
@@ -337,21 +339,21 @@ def _sync_source_to_bundle():
         if parse_version(source) >= parse_version(bundle):
             return  # source already at least as new as the app
         logging.info(f"[WATCHDOG] Source ({source}) is behind the app ({bundle}); syncing…")
-        subprocess.run(["git", "-C", SOURCE_DIR, "fetch", "--depth", "1", "--force",
+        subprocess.run([git, "-C", SOURCE_DIR, "fetch", "--depth", "1", "--force",
                         "origin", "+refs/tags/*:refs/tags/*"],
                        capture_output=True, timeout=120, creationflags=_CREATE_NO_WINDOW)
         target = None
         for ref in (f"v{bundle}", bundle):
-            if subprocess.run(["git", "-C", SOURCE_DIR, "rev-parse", "--verify", "--quiet", ref],
+            if subprocess.run([git, "-C", SOURCE_DIR, "rev-parse", "--verify", "--quiet", ref],
                               capture_output=True, creationflags=_CREATE_NO_WINDOW).returncode == 0:
                 target = ref
                 break
         if not target:
             logging.warning(f"[WATCHDOG] No tag for {bundle}; leaving auto-update to catch up")
             return
-        subprocess.run(["git", "-C", SOURCE_DIR, "reset", "--hard", target],
+        subprocess.run([git, "-C", SOURCE_DIR, "reset", "--hard", target],
                        capture_output=True, timeout=60, creationflags=_CREATE_NO_WINDOW)
-        subprocess.run(["git", "-C", SOURCE_DIR, "clean", "-fd"], capture_output=True, timeout=60,
+        subprocess.run([git, "-C", SOURCE_DIR, "clean", "-fd"], capture_output=True, timeout=60,
                        creationflags=_CREATE_NO_WINDOW)
         try:
             Provisioner(log=lambda m: logging.info(f"[SYNC] {m}")).install_deps_only()
@@ -482,10 +484,11 @@ def read_version():
     # in historic tags can lag behind the tag itself. Fall back to
     # SOURCE/VERSION, then the bundled VERSION inside the frozen bootstrapper
     # before source is cloned.
-    if shutil.which("git") and os.path.isdir(os.path.join(SOURCE_DIR, ".git")):
+    git = _which("git")  # augmented path: finds MinGit/fresh installs too
+    if git and os.path.isdir(os.path.join(SOURCE_DIR, ".git")):
         try:
             r = subprocess.run(
-                ["git", "-C", SOURCE_DIR, "describe", "--tags", "--exact-match", "HEAD"],
+                [git, "-C", SOURCE_DIR, "describe", "--tags", "--exact-match", "HEAD"],
                 capture_output=True, text=True, timeout=10,
                 creationflags=_CREATE_NO_WINDOW,
             )
@@ -517,10 +520,11 @@ def read_display_version():
     Falls back to read_version() when the checkout has no git metadata.
     Display only — update comparisons must keep using read_version().
     """
-    if shutil.which("git") and os.path.isdir(os.path.join(SOURCE_DIR, ".git")):
+    git = _which("git")  # augmented path: finds MinGit/fresh installs too
+    if git and os.path.isdir(os.path.join(SOURCE_DIR, ".git")):
         try:
             r = subprocess.run(
-                ["git", "-C", SOURCE_DIR, "describe", "--tags", "--always"],
+                [git, "-C", SOURCE_DIR, "describe", "--tags", "--always"],
                 capture_output=True, text=True, timeout=10,
                 creationflags=_CREATE_NO_WINDOW,
             )
@@ -610,6 +614,10 @@ def acquire_gui_lock():
 
 PROVISION_MARKER = os.path.join(DATA_DIR, ".provisioned")
 _FFMPEG_BIN_DIR = os.path.join(DATA_DIR, "bin")
+# Portable MinGit install (Windows fallback when winget is absent/blocked —
+# clean installs often ship without a working winget). git.exe lands in
+# _MINGIT_DIR\cmd, which _augmented_path() lists.
+_MINGIT_DIR = os.path.join(DATA_DIR, "git")
 
 
 class ProvisionError(Exception):
@@ -654,6 +662,8 @@ def _augmented_path():
         extra += [
             # User-scope Git for Windows installer.
             os.path.join(local, "Programs", "Git", "cmd"),
+            # Our portable MinGit fallback (see _install_mingit).
+            os.path.join(_MINGIT_DIR, "cmd"),
             # winget's shims for portable packages (e.g. Gyan.FFmpeg) — without
             # this, a successful winget ffmpeg install went unseen and a
             # redundant static build was downloaded on top.
@@ -680,6 +690,23 @@ def _git_usable():
         except OSError:
             return False
     return True
+
+
+def _pick_mingit_asset(assets, machine):
+    """browser_download_url of the right MinGit zip from a git-for-windows
+    release asset list, or None. Prefers the standard build over busybox
+    (busybox is accepted as a last resort), matching the CPU architecture."""
+    arch = "arm64" if machine.lower() in ("arm64", "aarch64") else "64-bit"
+    fallback = None
+    for a in assets:
+        name = a.get("name", "")
+        if not (name.startswith("MinGit-") and name.endswith(".zip") and arch in name):
+            continue
+        if "busybox" in name.lower():
+            fallback = fallback or a.get("browser_download_url")
+        else:
+            return a.get("browser_download_url")
+    return fallback
 
 
 def _is_untrusted_mount_error(msg):
@@ -768,6 +795,12 @@ class Provisioner:
         env["PATH"] = _augmented_path()
         if extra_env:
             env.update(extra_env)
+        # Windows resolves a bare program name against *this* process's PATH,
+        # not the env passed to the child — so a tool installed moments ago
+        # (winget git, MinGit, static ffmpeg) is visible to _which() yet not
+        # spawnable by name (verified: CreateProcess ignores the child env for
+        # lookup). Resolve through the augmented path up front.
+        cmd = [_which(str(cmd[0])) or cmd[0], *cmd[1:]]
         try:
             proc = subprocess.Popen(
                 cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
@@ -967,10 +1000,41 @@ class Provisioner:
                           desc="apt-get install git", check=False)
         except ProvisionError as e:
             self.log(f"  [WARN] git install failed: {e}")
-        # Not fatal: source can still be fetched via zipball fallback.
+        if IS_WINDOWS and not _git_usable():
+            # Clean Windows installs often have no working winget (missing App
+            # Installer, store agreements, elevation). MinGit is a portable zip
+            # — no installer, no admin — mirroring the uv-zip and static-ffmpeg
+            # fallbacks. Without git, deps fail on the whisper VCS requirement.
+            try:
+                self._install_mingit()
+            except Exception as e:
+                self.log(f"  [WARN] MinGit fallback failed: {e}")
+        # Not fatal here: source can still be fetched via zipball fallback
+        # (_step_deps re-checks and fails with instructions if git is needed).
         if not _git_usable():
             self.log("  [WARN] git unavailable; will fetch source as an archive "
                      "(auto-updates will use archive fallback).")
+
+    def _install_mingit(self):
+        """Provision portable MinGit from the latest git-for-windows release
+        into DATA_DIR/git (its cmd/ dir is on the augmented path)."""
+        self.log("  downloading MinGit (portable git)...")
+        data = json.loads(self._download_text(
+            "https://api.github.com/repos/git-for-windows/git/releases/latest"))
+        url = _pick_mingit_asset(data.get("assets", []), platform.machine())
+        if not url:
+            raise ProvisionError("no MinGit asset in the latest git-for-windows release")
+        tmp = os.path.join(tempfile.gettempdir(), "mingit.zip")
+        self._download_file(url, tmp)
+        if os.path.isdir(_MINGIT_DIR):
+            shutil.rmtree(_MINGIT_DIR, ignore_errors=True)  # broken previous attempt
+        os.makedirs(_MINGIT_DIR, exist_ok=True)
+        with zipfile.ZipFile(tmp) as zf:
+            zf.extractall(_MINGIT_DIR)  # zip root holds cmd/, mingw64/, etc.
+        os.remove(tmp)
+        if not _git_usable():
+            raise ProvisionError(f"MinGit extracted to {_MINGIT_DIR} but git is still not runnable")
+        self.log(f"  MinGit installed to {_MINGIT_DIR}")
 
     def _step_ffmpeg(self):
         if _which("ffmpeg"):
@@ -1062,7 +1126,7 @@ class Provisioner:
         self._run(["git", "-C", SOURCE_DIR, "fetch", "--depth", "1", "--force",
                    "origin", "+refs/tags/*:refs/tags/*"],
                   desc="git fetch --tags", check=False)
-        r = subprocess.run(["git", "-C", SOURCE_DIR, "tag", "--list"],
+        r = subprocess.run([_which("git") or "git", "-C", SOURCE_DIR, "tag", "--list"],
                            capture_output=True, text=True, creationflags=_CREATE_NO_WINDOW)
         tags = [t.strip() for t in r.stdout.splitlines() if t.strip()] if r.returncode == 0 else []
         if not tags:
@@ -1253,9 +1317,11 @@ class ProcessManager:
             # a latent UnicodeEncodeError for any printed Cyrillic caption).
             # stt.log is opened as UTF-8 above, so worker output stays coherent.
             env["PYTHONUTF8"] = "1"
-            _ffbin = os.path.join(DATA_DIR, "bin")
-            if os.path.isdir(_ffbin):
-                env["PATH"] = _ffbin + os.pathsep + env.get("PATH", "")
+            # Full augmented PATH (not just DATA_DIR/bin): the worker starts
+            # with this as its own environment, so provisioned ffmpeg AND
+            # git (MinGit / fresh installs) resolve inside it — git_describe
+            # display and any VCS pip installs need git on the worker's PATH.
+            env["PATH"] = _augmented_path()
             proc = subprocess.Popen(
                 cmd,
                 cwd=SOURCE_DIR,
@@ -1532,7 +1598,9 @@ class AutoUpdater:
         self.apply_pending_update()
 
     def _git(self, *args, check=True):
-        return subprocess.run(["git", "-C", SOURCE_DIR, *args],
+        # _which: bare 'git' won't spawn when git was installed (MinGit,
+        # winget) after this process started — see _run for the semantics.
+        return subprocess.run([_which("git") or "git", "-C", SOURCE_DIR, *args],
                               capture_output=True, text=True,
                               check=check, creationflags=_CREATE_NO_WINDOW)
 
