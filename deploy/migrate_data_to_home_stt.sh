@@ -75,6 +75,13 @@ for f in download_progress.json server.log; do
     mv "$OLD_DIR/$f" "$NEW_DIR/$f"; echo "      moved $f"
   fi
 done
+# Some moved dirs (notably panns_data) hold a git-TRACKED bundled file
+# (class_labels_indices.csv) alongside the gitignored runtime blobs. The move
+# takes those tracked files out of the checkout — restore them so BUNDLE_DIR
+# keeps its bundled assets and the checkout stays clean for the next ff-only
+# pull. `git checkout` only restores tracked files, never the runtime blobs we
+# just relocated.
+git -C "$OLD_DIR" checkout -- . 2>/dev/null && echo "      restored tracked bundled files in checkout" || true
 
 # --- 4. copy live config; keep the checkout's tracked defaults --------------
 echo "[4/5] copying live config (checkout keeps its *.default.json) ..."
