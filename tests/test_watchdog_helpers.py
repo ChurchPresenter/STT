@@ -345,6 +345,91 @@ class TestAugmentedPath:
         assert watchdog._augmented_path().endswith(os.pathsep + "/existing/entry")
 
 
+class TestPickMingitAsset:
+    """Asset selection from a git-for-windows release (fallback git install
+    for Windows machines without a working winget)."""
+
+    ASSETS = [
+        {"name": "Git-2.55.0.3-64-bit.exe", "browser_download_url": "u/installer"},
+        {"name": "MinGit-2.55.0.3-32-bit.zip", "browser_download_url": "u/32"},
+        {"name": "MinGit-2.55.0.3-busybox-64-bit.zip", "browser_download_url": "u/busy64"},
+        {"name": "MinGit-2.55.0.3-64-bit.zip", "browser_download_url": "u/64"},
+        {"name": "MinGit-2.55.0.3-arm64.zip", "browser_download_url": "u/arm64"},
+    ]
+
+    def test_x64_prefers_standard_over_busybox(self):
+        assert watchdog._pick_mingit_asset(self.ASSETS, "AMD64") == "u/64"
+
+    def test_arm64(self):
+        assert watchdog._pick_mingit_asset(self.ASSETS, "ARM64") == "u/arm64"
+
+    def test_busybox_is_last_resort(self):
+        assets = [a for a in self.ASSETS if a["name"] != "MinGit-2.55.0.3-64-bit.zip"]
+        assert watchdog._pick_mingit_asset(assets, "AMD64") == "u/busy64"
+
+    def test_no_match_returns_none(self):
+        assert watchdog._pick_mingit_asset([{"name": "Git-2.55.0.3-64-bit.exe"}], "AMD64") is None
+
+
+class TestStepGitMingitFallback:
+    def test_windows_without_winget_falls_back_to_mingit(self, monkeypatch):
+        # git stays unusable until MinGit "installs" it.
+        state = {"mingit": False}
+        monkeypatch.setattr(watchdog, "IS_WINDOWS", True)
+        monkeypatch.setattr(watchdog, "_git_usable", lambda: state["mingit"])
+        monkeypatch.setattr(watchdog, "_which", lambda name: None)  # no winget
+        p = watchdog.Provisioner(log=lambda m: None)
+        p._install_mingit = lambda: state.update(mingit=True)
+        p._run = lambda *a, **kw: (_ for _ in ()).throw(AssertionError("no package manager should run"))
+        p._step_git()
+        assert state["mingit"]
+
+    def test_non_windows_never_tries_mingit(self, monkeypatch):
+        monkeypatch.setattr(watchdog, "IS_WINDOWS", False)
+        monkeypatch.setattr(watchdog, "_git_usable", lambda: False)
+        monkeypatch.setattr(watchdog, "_which", lambda name: None)
+        p = watchdog.Provisioner(log=lambda m: None)
+        p._install_mingit = lambda: (_ for _ in ()).throw(AssertionError("mingit on posix"))
+        p._step_git()  # ends in the archive-fallback warning, no raise
+
+
+class TestRunResolvesAugmentedPath:
+    """CreateProcess looks up bare names in the *parent's* PATH, so _run must
+    resolve through the augmented path itself (verified on Windows: the
+    child-env PATH is ignored for lookup)."""
+
+    @staticmethod
+    def _spawn_recorder(monkeypatch, seen):
+        class FakeProc:
+            stdout = iter(())
+
+            def wait(self, timeout=None):
+                return 0
+
+        def fake_popen(cmd, **kw):
+            seen["cmd"] = list(cmd)
+            return FakeProc()
+
+        monkeypatch.setattr(watchdog.subprocess, "Popen", fake_popen)
+
+    def test_bare_name_is_resolved_before_spawn(self, monkeypatch):
+        seen = {}
+        self._spawn_recorder(monkeypatch, seen)
+        monkeypatch.setattr(watchdog, "_which",
+                            lambda name: r"C:\resolved\git.exe" if name == "git" else None)
+        p = watchdog.Provisioner(log=lambda m: None)
+        p._run(["git", "--version"])
+        assert seen["cmd"] == [r"C:\resolved\git.exe", "--version"]
+
+    def test_unresolvable_name_is_left_as_is(self, monkeypatch):
+        seen = {}
+        self._spawn_recorder(monkeypatch, seen)
+        monkeypatch.setattr(watchdog, "_which", lambda name: None)
+        p = watchdog.Provisioner(log=lambda m: None)
+        p._run(["nonexistent-tool"], check=False)
+        assert seen["cmd"][0] == "nonexistent-tool"
+
+
 class TestStepDepsGitGuard:
     """requirements.txt pins whisper to a git URL; uv needs a git executable
     for it. When git could not be provisioned, _step_deps must fail up front
