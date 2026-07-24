@@ -45,6 +45,7 @@ module = [
     "stt.nllb_catalog",
     "stt.tts_catalog",
     "stt.calibration",
+    "stt.model_memory",
 ]
 disallow_untyped_defs = true
 

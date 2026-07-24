@@ -1,55 +1,29 @@
-"""Tests for the dynamic system-requirements estimate/warning logic."""
+"""Dynamic system-requirements estimate/warning logic (stt/model_memory.py).
 
-import ast
+Previously this reached into the monolith via an AST-extraction hack because
+speech_to_text.py can't be imported; the logic now lives in an importable
+module, so these import it directly.
+"""
+
 import os
 import shutil
-import sys
 import tempfile
 
-from conftest import REPO, extract_definitions
-
-SOURCE = "speech_to_text.py"
+from stt.model_memory import (
+    BASELINE_RAM_GB as BASELINE,
+    GPU_HOST_RAM_GB as GPU_HOST,
+    MODEL_MEMORY_ESTIMATES as EST,
+    _format_parts,
+    _largest_fitting_whisper,
+    _memory_advice,
+    _normalize_whisper_size,
+    check_system_requirements,
+    estimate_memory_requirements,
+)
 
 # Fake models dir so the estimate's "translation model downloaded?" check has
 # somewhere to look; tests create/remove the NLLB subdir to simulate set-up.
 _MODELS_DIR = tempfile.mkdtemp(prefix="stt-test-models-")
-
-
-def _nllb_dir(nllb="facebook/nllb-200-distilled-600M"):
-    return os.path.join(_MODELS_DIR, nllb.replace("/", "--"))
-
-
-def _extract_constants(names):
-    """Literal top-level assignments (constants) from the monolith's AST."""
-    src = (REPO / SOURCE).read_text()
-    out = {}
-    for node in ast.parse(src).body:
-        if isinstance(node, ast.Assign) and len(node.targets) == 1 \
-                and isinstance(node.targets[0], ast.Name) and node.targets[0].id in names:
-            out[node.targets[0].id] = ast.literal_eval(node.value)
-    missing = set(names) - set(out)
-    assert not missing, f"constants not found: {missing}"
-    return out
-
-
-def _ns():
-    consts = _extract_constants(["BASELINE_RAM_GB", "GPU_HOST_RAM_GB", "BASE_DISK_GB", "MODEL_MEMORY_ESTIMATES"])
-    consts["sys"] = sys
-    consts["os"] = os
-    consts["MODELS_DIR"] = _MODELS_DIR
-    return extract_definitions(
-        SOURCE,
-        ["_normalize_whisper_size", "_estimate_memory_requirements",
-         "_largest_fitting_whisper", "_memory_advice",
-         "_format_parts", "_check_system_requirements"],
-        extra_globals=consts,
-    )
-
-
-NS = _ns()
-BASELINE = NS["BASELINE_RAM_GB"]
-GPU_HOST = NS["GPU_HOST_RAM_GB"]
-EST = NS["MODEL_MEMORY_ESTIMATES"]
 
 GB = 1024**3
 
@@ -57,9 +31,13 @@ AMPLE_HW = {"ram_bytes": 64 * GB, "cpu_cores": 16, "disk_free_bytes": 500 * GB,
             "vram_bytes": 24 * GB, "has_cuda": True, "apple_silicon": False}
 
 
+def _nllb_dir(nllb="facebook/nllb-200-distilled-600M"):
+    return os.path.join(_MODELS_DIR, nllb.replace("/", "--"))
+
+
 def _cfg(model="small", backend="whisper", use_gpu=False, ft_model=None, ft_gpu=False,
          translation=False, nllb="facebook/nllb-200-distilled-600M", nllb_gpu=False, remote=False):
-    cfg = {
+    return {
         "model": {"type": "whisper", "whisper": {"model": model}, "backend": backend},
         "performance": {"use_gpu": use_gpu},
         "file_transcription": {"model": {"type": "whisper", "whisper": {"model": ft_model or model},
@@ -67,35 +45,34 @@ def _cfg(model="small", backend="whisper", use_gpu=False, ft_model=None, ft_gpu=
         "live_translation": {"enabled": translation, "translation_model": nllb, "use_gpu": nllb_gpu,
                              "remote": {"enabled": remote, "endpoint": "http://x" if remote else ""}},
     }
-    return cfg
 
 
 class TestNormalizeWhisperSize:
     def test_plain_sizes(self):
         for s in ("tiny", "base", "small", "medium"):
-            assert NS["_normalize_whisper_size"](s) == s
+            assert _normalize_whisper_size(s) == s
 
     def test_en_suffix(self):
-        assert NS["_normalize_whisper_size"]("tiny.en") == "tiny"
-        assert NS["_normalize_whisper_size"]("small.en") == "small"
+        assert _normalize_whisper_size("tiny.en") == "tiny"
+        assert _normalize_whisper_size("small.en") == "small"
 
     def test_large_variants(self):
         for s in ("large", "large-v1", "large-v2", "large-v3"):
-            assert NS["_normalize_whisper_size"](s) == "large"
+            assert _normalize_whisper_size(s) == "large"
 
     def test_turbo_variants(self):
         for s in ("turbo", "large-v3-turbo", "distil-large-v3"):
-            assert NS["_normalize_whisper_size"](s) == "turbo"
+            assert _normalize_whisper_size(s) == "turbo"
 
     def test_unknown(self):
-        assert NS["_normalize_whisper_size"]("gigantic") is None
-        assert NS["_normalize_whisper_size"]("") is None
-        assert NS["_normalize_whisper_size"](None) is None
+        assert _normalize_whisper_size("gigantic") is None
+        assert _normalize_whisper_size("") is None
+        assert _normalize_whisper_size(None) is None
 
 
 class TestEstimate:
-    def est(self, cfg, gpu=False):
-        return NS["_estimate_memory_requirements"](cfg, gpu_available=gpu)
+    def est(self, cfg, gpu=False, unified=False):
+        return estimate_memory_requirements(cfg, _MODELS_DIR, gpu_available=gpu, unified=unified)
 
     def test_cpu_whisper(self):
         need = self.est(_cfg(model="small", backend="whisper"))
@@ -120,17 +97,13 @@ class TestEstimate:
         assert need["ram_gb"] == BASELINE + EST["whisper"]["medium"]["ram"]
 
     def test_apple_silicon_unified_skips_host_copy(self):
-        # Discrete GPU keeps a host-side copy per model (GPU_HOST); unified
-        # memory shares one pool, so it must not be added.
         discrete = self.est(_cfg(model="medium", use_gpu=True, ft_gpu=True), gpu=True)
-        unified = NS["_estimate_memory_requirements"](
-            _cfg(model="medium", use_gpu=True, ft_gpu=True), gpu_available=True, unified=True)
+        unified = self.est(_cfg(model="medium", use_gpu=True, ft_gpu=True), gpu=True, unified=True)
         assert unified["vram_gb"] == discrete["vram_gb"] == EST["whisper"]["medium"]["vram"]
         assert discrete["ram_gb"] == BASELINE + GPU_HOST
         assert unified["ram_gb"] == BASELINE  # no phantom host copy on unified
 
     def test_local_nllb_adds(self):
-        # Counted only when the translation model is actually downloaded.
         os.makedirs(_nllb_dir(), exist_ok=True)
         try:
             base = self.est(_cfg())
@@ -142,7 +115,6 @@ class TestEstimate:
         assert with_t["min_cores"] == 8
 
     def test_local_nllb_not_counted_without_model(self):
-        # Enabled but no model downloaded → not set up → transcription-only.
         shutil.rmtree(_nllb_dir(), ignore_errors=True)
         need = self.est(_cfg(translation=True))
         assert need["tier"] == "transcription"
@@ -172,9 +144,26 @@ class TestEstimate:
         assert need["vram_gb"] == 0
 
 
+class TestFitAndAdvice:
+    def test_largest_fitting(self):
+        assert _largest_fitting_whisper(BASELINE + EST["faster-whisper"]["large"]["ram"]) == "large"
+        assert _largest_fitting_whisper(BASELINE + EST["faster-whisper"]["tiny"]["ram"]) == "tiny"
+        assert _largest_fitting_whisper(2.0) is None  # not even tiny fits
+
+    def test_advice_when_something_fits(self):
+        assert "largest model that fits is 'small'" in _memory_advice(BASELINE + 1.2)
+
+    def test_advice_when_nothing_fits(self):
+        assert "too big" in _memory_advice(1.0)
+
+    def test_format_parts_skips_zero(self):
+        parts = [{"label": "baseline", "ram_gb": 4.0}, {"label": "gpu-only", "ram_gb": 0.0}]
+        assert _format_parts(parts, "ram_gb") == "baseline: ~4 GB"
+
+
 class TestWarnings:
     def check(self, cfg, hw):
-        return NS["_check_system_requirements"](cfg=cfg, hw=hw)
+        return check_system_requirements(cfg, hw, _MODELS_DIR)
 
     def test_ample_hardware_no_warnings(self):
         assert self.check(_cfg(), AMPLE_HW) == []
@@ -216,9 +205,13 @@ class TestWarnings:
         assert any("free disk" in w for w in warns)
 
     def test_messages_are_self_contained(self):
-        hw = {"ram_bytes": 4 * GB, "cpu_cores": 2, "disk_free_bytes": 1 * GB,
-              "vram_bytes": 1 * GB, "has_cuda": True, "apple_silicon": False}
-        warns = self.check(_cfg(model="large-v3", use_gpu=True, translation=True), hw)
+        os.makedirs(_nllb_dir(), exist_ok=True)
+        try:
+            hw = {"ram_bytes": 4 * GB, "cpu_cores": 2, "disk_free_bytes": 1 * GB,
+                  "vram_bytes": 1 * GB, "has_cuda": True, "apple_silicon": False}
+            warns = self.check(_cfg(model="large-v3", use_gpu=True, translation=True), hw)
+        finally:
+            shutil.rmtree(_nllb_dir(), ignore_errors=True)
         assert len(warns) == 4  # cores, RAM, VRAM, disk
         for w in warns:
             if "CPU cores" not in w:
