@@ -16,9 +16,8 @@ the monolith's import-time side effects. Stdlib-only; paths are passed in.
 from __future__ import annotations
 
 import os
-import shutil
 import tempfile
-from typing import Callable, Iterable, List, Tuple
+from typing import Iterable
 
 # Single-file weight layouts across the model families this app downloads:
 #   HF Transformers -> model.safetensors / pytorch_model.bin
@@ -75,79 +74,3 @@ def dir_is_writable(path: str) -> bool:
             return True
     except OSError:
         return False
-
-
-def resolve_writable_models_dir(preferred: str, fallback: str) -> Tuple[str, bool]:
-    """Pick a models directory the running process can actually write to.
-
-    Tries ``preferred`` first (creating it if absent). If it exists but is not
-    writable — the classic case being a ``models/`` created by root while the
-    server now runs as a normal user — falls back to ``fallback`` under the
-    user's home, which every OS lets a process write. Returns
-    ``(chosen_dir, used_fallback)``; ``used_fallback`` is True when the caller
-    should warn that downloads are going somewhere other than ``preferred``.
-
-    If neither is writable, returns ``(preferred, False)`` so the caller still
-    has a stable path to surface a clear "cannot write" error against.
-    """
-    for candidate in (preferred, fallback):
-        try:
-            os.makedirs(candidate, exist_ok=True)
-        except OSError:
-            continue
-        if dir_is_writable(candidate):
-            return candidate, candidate != preferred
-    return preferred, False
-
-
-def stranded_model_dirs(preferred: str, fallback: str) -> List[str]:
-    """Names of model directories that a fallback to ``fallback`` would orphan.
-
-    A directory counts as stranded when it lives in ``preferred``, holds a
-    weight file, and is not already mirrored (with weights) in ``fallback``.
-    These are exactly the previously-downloaded models the app would stop
-    seeing once it switches to the fallback location. Sorted for stable output;
-    an unreadable ``preferred`` yields an empty list.
-    """
-    stranded: List[str] = []
-    try:
-        entries = sorted(os.listdir(preferred))
-    except OSError:
-        return stranded
-    for name in entries:
-        src = os.path.join(preferred, name)
-        if not os.path.isdir(src) or not dir_has_weights(src):
-            continue
-        if dir_has_weights(os.path.join(fallback, name)):
-            continue  # already present in the fallback — not stranded
-        stranded.append(name)
-    return stranded
-
-
-def migrate_model_dirs(
-    names: Iterable[str],
-    preferred: str,
-    fallback: str,
-    log: Callable[[str], None] = print,
-) -> List[str]:
-    """Copy each named model directory from ``preferred`` into ``fallback``.
-
-    Copies rather than moves: the source may be read-only (owned by another
-    user), which is the whole reason the fallback was needed. A target that
-    already has weights is treated as done and left untouched. Returns the
-    names that ended up present in ``fallback`` (copied now or already there);
-    directories that fail to copy are logged and omitted.
-    """
-    migrated: List[str] = []
-    for name in names:
-        src = os.path.join(preferred, name)
-        dst = os.path.join(fallback, name)
-        if dir_has_weights(dst):
-            migrated.append(name)
-            continue
-        try:
-            shutil.copytree(src, dst, dirs_exist_ok=True)
-            migrated.append(name)
-        except OSError as e:
-            log(f"could not migrate {name}: {e}")
-    return migrated

@@ -62,17 +62,18 @@ IS_MACOS = sys.platform == "darwin"
 
 _FROZEN = getattr(sys, 'frozen', False)
 
-# Thin-bootstrapper layout separates DATA (config/models/logs — never touched by
-# updates) from SOURCE (the git checkout + its venv). When frozen, the tiny
-# bootstrapper provisions SOURCE under DATA_DIR/app and runs the app from that
-# venv. In dev-from-repo, both collapse to the repo directory.
+# Layout separates DATA (config/models/logs — never touched by updates) from
+# SOURCE (the git checkout + its venv). DATA always lives under ~/.stt so the
+# worker's data dir is the per-user, always-writable location and matches what a
+# direct-launch server uses (speech_to_text.py resolves the same ~/.stt). When
+# frozen, the bootstrapper provisions SOURCE under DATA_DIR/app; run-from-repo
+# keeps SOURCE as the checkout so a git pull advances it in place.
+DATA_DIR = os.path.join(os.path.expanduser("~"), ".stt")
 if _FROZEN:
-    DATA_DIR   = os.path.join(os.path.expanduser("~"), ".stt")
     SOURCE_DIR = os.path.join(DATA_DIR, "app")
 else:
     # This file lives in <repo>/stt/ — the repo root is one level up
-    DATA_DIR   = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    SOURCE_DIR = DATA_DIR
+    SOURCE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 APP_DIR = DATA_DIR  # config/logs/crash dumps live in DATA
 os.makedirs(APP_DIR, exist_ok=True)
 
