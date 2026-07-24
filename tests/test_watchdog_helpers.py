@@ -345,6 +345,50 @@ class TestAugmentedPath:
         assert watchdog._augmented_path().endswith(os.pathsep + "/existing/entry")
 
 
+class TestProgressNoiseFilter:
+    """winget writes \\r-redrawn spinner/progress frames that universal
+    newlines split into hundreds of 'lines' — _run must not log them."""
+
+    def test_spinner_frames_filtered(self):
+        for frame in ("-", "\\", "|", "/", "   -", "   \\"):
+            assert watchdog._is_progress_noise(frame)
+
+    def test_progress_bars_filtered(self):
+        assert watchdog._is_progress_noise("  █████████▒▒▒▒▒▒▒▒▒  1024 KB / 3.20 MB")
+        assert watchdog._is_progress_noise("  ▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒  0%")
+        assert watchdog._is_progress_noise("██████████████████████████████  100%")
+
+    def test_real_output_kept(self):
+        for line in ("Successfully installed",
+                     "Found Git [Git.Git] Version 2.55.0.3",
+                     "Downloading https://github.com/git-for-windows/...",
+                     "- item in a bullet list",
+                     "C:/Users/cp/.stt"):
+            assert not watchdog._is_progress_noise(line)
+
+    def test_run_drops_noise_from_log_and_tail(self, monkeypatch):
+        lines = ["   -", "   \\", "██████▒▒▒▒  50%", "Successfully installed"]
+
+        class FakeProc:
+            stdout = iter(line + "\n" for line in lines)
+
+            def wait(self, timeout=None):
+                return 1  # fail so tail lands in the ProvisionError detail
+
+        monkeypatch.setattr(watchdog.subprocess, "Popen", lambda cmd, **kw: FakeProc())
+        monkeypatch.setattr(watchdog, "_which", lambda name: None)
+        logged = []
+        p = watchdog.Provisioner(log=logged.append)
+        try:
+            p._run(["installer"])
+            raise AssertionError("expected ProvisionError")
+        except watchdog.ProvisionError as e:
+            assert "Successfully installed" in str(e)
+            assert "50%" not in str(e)
+        assert any("Successfully installed" in m for m in logged)
+        assert not any("50%" in m or m.strip().endswith("-") for m in logged)
+
+
 class TestPickMingitAsset:
     """Asset selection from a git-for-windows release (fallback git install
     for Windows machines without a working winget)."""

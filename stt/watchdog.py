@@ -692,6 +692,18 @@ def _git_usable():
     return True
 
 
+_PROGRESS_SPINNER = {"-", "\\", "|", "/"}
+
+
+def _is_progress_noise(line):
+    """True for progress-animation frames some installers (winget) write to a
+    pipe: spinner characters and block-element progress bars. Each \r-redrawn
+    frame arrives as its own 'line' (universal newlines), so one download can
+    drown the provisioning log in hundreds of them (seen in the field)."""
+    s = line.strip()
+    return s in _PROGRESS_SPINNER or "█" in s or "▒" in s
+
+
 def _pick_mingit_asset(assets, machine):
     """browser_download_url of the right MinGit zip from a git-for-windows
     release asset list, or None. Prefers the standard build over busybox
@@ -818,7 +830,7 @@ class Provisioner:
         assert proc.stdout is not None  # stdout=PIPE above
         for line in proc.stdout:
             line = line.rstrip()
-            if line:
+            if line and not _is_progress_noise(line):
                 self.log("    " + line)
                 tail.append(line)
                 if len(tail) > 5:
