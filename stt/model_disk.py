@@ -16,7 +16,8 @@ the monolith's import-time side effects. Stdlib-only; paths are passed in.
 from __future__ import annotations
 
 import os
-from typing import Iterable
+import tempfile
+from typing import Iterable, Tuple
 
 # Single-file weight layouts across the model families this app downloads:
 #   HF Transformers -> model.safetensors / pytorch_model.bin
@@ -58,3 +59,41 @@ def dir_has_weights(path: str) -> bool:
         return has_weight_file(os.listdir(path))
     except OSError:
         return False
+
+
+def dir_is_writable(path: str) -> bool:
+    """True when the current process can create a file inside ``path``.
+
+    Probes by actually creating and deleting a temp file rather than calling
+    ``os.access(path, os.W_OK)``, which is unreliable under root and POSIX ACLs
+    (it consults the permission bits, not whether a write would really succeed).
+    A missing directory, or one owned by another user, returns False.
+    """
+    try:
+        with tempfile.NamedTemporaryFile(dir=path):
+            return True
+    except OSError:
+        return False
+
+
+def resolve_writable_models_dir(preferred: str, fallback: str) -> Tuple[str, bool]:
+    """Pick a models directory the running process can actually write to.
+
+    Tries ``preferred`` first (creating it if absent). If it exists but is not
+    writable — the classic case being a ``models/`` created by root while the
+    server now runs as a normal user — falls back to ``fallback`` under the
+    user's home, which every OS lets a process write. Returns
+    ``(chosen_dir, used_fallback)``; ``used_fallback`` is True when the caller
+    should warn that downloads are going somewhere other than ``preferred``.
+
+    If neither is writable, returns ``(preferred, False)`` so the caller still
+    has a stable path to surface a clear "cannot write" error against.
+    """
+    for candidate in (preferred, fallback):
+        try:
+            os.makedirs(candidate, exist_ok=True)
+        except OSError:
+            continue
+        if dir_is_writable(candidate):
+            return candidate, candidate != preferred
+    return preferred, False

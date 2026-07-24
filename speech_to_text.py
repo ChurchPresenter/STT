@@ -23,7 +23,24 @@ else:
     BUNDLE_DIR = _script_dir
 
 os.makedirs(APP_DIR, exist_ok=True)
-MODELS_DIR = os.path.join(APP_DIR, "models")
+
+# Models live under APP_DIR/models. On a normal per-user install that is
+# ~/.stt/models and always writable. But when the app is run straight from a
+# shared checkout, that folder can end up owned by another user (e.g. created
+# by a root-run server), and a non-root server then cannot write downloads
+# there — the download silently fails. Fall back to a guaranteed-writable
+# per-user location so downloads work for whoever is running the server,
+# without needing root or a chown. _MODELS_DIR_FELL_BACK is surfaced at boot.
+from stt.model_disk import resolve_writable_models_dir as _resolve_models_dir
+
+_MODELS_DIR_PREFERRED = os.path.join(APP_DIR, "models")
+_MODELS_DIR_FALLBACK = os.path.join(os.path.expanduser("~"), ".stt", "models")
+MODELS_DIR, _MODELS_DIR_FELL_BACK = _resolve_models_dir(_MODELS_DIR_PREFERRED, _MODELS_DIR_FALLBACK)
+if _MODELS_DIR_FELL_BACK:
+    print(f"[MODELS] '{_MODELS_DIR_PREFERRED}' is not writable by the current "
+          f"user; downloading models to '{MODELS_DIR}' instead. To share one "
+          f"models folder, run the server as the folder's owner or fix its "
+          f"permissions.")
 os.makedirs(MODELS_DIR, exist_ok=True)
 
 # Default base directory for database + audio backups (rooted in APP_DIR so compiled
@@ -57,7 +74,7 @@ for _mig_name in ("config.json", "custom_dictionary.json", "word_highlighting.js
 # safe_model_path is re-imported and safe_managed_path keeps its APP_DIR default.
 from stt import paths as _paths
 from stt.paths import safe_model_path  # noqa: F401
-from stt.model_disk import dir_has_weights, has_weight_file, is_weight_file  # noqa: F401
+from stt.model_disk import dir_has_weights, dir_is_writable, has_weight_file, is_weight_file  # noqa: F401
 
 
 def safe_managed_path(path, base_dir=None):
@@ -9151,12 +9168,33 @@ cleanup_thread = threading.Thread(target=periodic_cleanup, daemon=True)
 cleanup_thread.start()
 
 
+def _models_not_writable_response():
+    """Return a JSON error response when MODELS_DIR can't be written, else None.
+
+    Model downloads run in a background thread; without this up-front check the
+    UI shows a brief "downloading" and then the thread dies with an opaque
+    errno 13, so it looks like nothing happened. Checking here lets every
+    download route fail fast with a clear, actionable message instead."""
+    if dir_is_writable(MODELS_DIR):
+        return None
+    return jsonify({
+        "success": False,
+        "error": (f"Cannot write to the models folder ({MODELS_DIR}). It is not "
+                  f"writable by the user running the server — run the server as "
+                  f"that folder's owner, or fix its ownership/permissions."),
+    }), 503
+
+
 @app.route("/api/models/download", methods=["POST"])
 def download_model():
     """Download/cache a model (Hugging Face or Whisper)
     Example: POST /api/models/download {"model_type": "whisper", "model_name": "small"}"""
     if not check_ip_whitelist():
         return jsonify({"success": False, "error": "Access Denied"}), 403
+
+    not_writable = _models_not_writable_response()
+    if not_writable:
+        return not_writable
 
     try:
         data = request.get_json()
@@ -10457,6 +10495,10 @@ def download_faster_whisper_model():
     if not check_ip_whitelist():
         return jsonify({"success": False, "error": "Access Denied"}), 403
 
+    not_writable = _models_not_writable_response()
+    if not_writable:
+        return not_writable
+
     try:
         data = request.get_json()
         model_name = data.get("model_name")
@@ -11103,6 +11145,10 @@ def download_translation_model():
     """Download any translation model to ./models/ directory"""
     if not check_ip_whitelist():
         return jsonify({"success": False, "error": "Access Denied"}), 403
+
+    not_writable = _models_not_writable_response()
+    if not_writable:
+        return not_writable
 
     global nllb_download_progress
 
