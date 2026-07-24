@@ -31,17 +31,64 @@ os.makedirs(APP_DIR, exist_ok=True)
 # there — the download silently fails. Fall back to a guaranteed-writable
 # per-user location so downloads work for whoever is running the server,
 # without needing root or a chown. _MODELS_DIR_FELL_BACK is surfaced at boot.
-from stt.model_disk import resolve_writable_models_dir as _resolve_models_dir
+from stt.model_disk import (
+    resolve_writable_models_dir as _resolve_models_dir,
+    stranded_model_dirs as _stranded_model_dirs,
+    migrate_model_dirs as _migrate_model_dirs,
+)
 
 _MODELS_DIR_PREFERRED = os.path.join(APP_DIR, "models")
 _MODELS_DIR_FALLBACK = os.path.join(os.path.expanduser("~"), ".stt", "models")
 MODELS_DIR, _MODELS_DIR_FELL_BACK = _resolve_models_dir(_MODELS_DIR_PREFERRED, _MODELS_DIR_FALLBACK)
-if _MODELS_DIR_FELL_BACK:
-    print(f"[MODELS] '{_MODELS_DIR_PREFERRED}' is not writable by the current "
-          f"user; downloading models to '{MODELS_DIR}' instead. To share one "
-          f"models folder, run the server as the folder's owner or fix its "
-          f"permissions.")
 os.makedirs(MODELS_DIR, exist_ok=True)
+
+# The fallback only ever fires in a dev-from-repo run: a normal install always
+# has STT_DATA_DIR set (or is frozen), so its preferred models dir is the
+# always-writable ~/.stt/models and this branch is unreachable there. When it
+# does fire, models already downloaded into the now-unwritable preferred folder
+# would be orphaned — the app would silently run split across two locations. So
+# (dev only) warn, print the exact commands to consolidate, and — when a dev is
+# running interactively — offer to migrate the stranded models into the writable
+# folder. Headless runs only warn; they never copy or prompt.
+_IS_DEV_FROM_REPO = not _data_override and not getattr(sys, "frozen", False)
+if _MODELS_DIR_FELL_BACK and _IS_DEV_FROM_REPO:
+    import getpass as _getpass
+    _stranded = _stranded_model_dirs(_MODELS_DIR_PREFERRED, _MODELS_DIR_FALLBACK)
+    try:
+        _who = _getpass.getuser()
+    except Exception:
+        _who = "the current user"
+    print("=" * 72)
+    print(f"[MODELS] '{_MODELS_DIR_PREFERRED}' is not writable by {_who}; "
+          f"using '{MODELS_DIR}' instead.")
+    if _stranded:
+        print(f"[MODELS] {len(_stranded)} model(s) already in the unwritable "
+              f"folder will be invisible to the app: {', '.join(_stranded)}")
+    print("[MODELS] To keep ONE shared models folder, stop the server and run:")
+    print(f'             sudo chown -R "$(whoami)" "{_MODELS_DIR_PREFERRED}"')
+    print("         then restart — the app will use that folder directly.")
+    # Interactive dev only (a TTY is attached): offer to copy the stranded
+    # models into the writable location now. isatty is false under systemd /
+    # the watchdog / CI, so those never prompt and never copy silently.
+    if _stranded and sys.stdin.isatty() and sys.stdout.isatty():
+        try:
+            _ans = input(f"[MODELS] Copy {len(_stranded)} model(s) into "
+                         f"'{MODELS_DIR}' now? [y/N] ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            _ans = "n"
+        if _ans in ("y", "yes"):
+            _done = _migrate_model_dirs(_stranded, _MODELS_DIR_PREFERRED,
+                                        _MODELS_DIR_FALLBACK, log=lambda m: print(f"[MODELS] {m}"))
+            print(f"[MODELS] Copied {len(_done)}/{len(_stranded)} model(s) to '{MODELS_DIR}'.")
+            if _done:
+                _orig_paths = " ".join(
+                    '"' + os.path.join(_MODELS_DIR_PREFERRED, _n) + '"' for _n in _done)
+                print("[MODELS] Originals still occupy space in the unwritable "
+                      "folder. Reclaim it with:")
+                print(f"             sudo rm -rf {_orig_paths}")
+        else:
+            print("[MODELS] Skipped copy; using the fallback folder for now.")
+    print("=" * 72)
 
 # Default base directory for database + audio backups (rooted in APP_DIR so compiled
 # builds keep all data under ~/.stt instead of the launch directory).

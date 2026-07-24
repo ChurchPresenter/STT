@@ -9,8 +9,18 @@ from stt.model_disk import (
     dir_is_writable,
     has_weight_file,
     is_weight_file,
+    migrate_model_dirs,
     resolve_writable_models_dir,
+    stranded_model_dirs,
 )
+
+
+def _make_model_dir(base, name, weight="model.safetensors"):
+    d = base / name
+    d.mkdir(parents=True)
+    (d / "config.json").write_text("{}")
+    (d / weight).write_bytes(b"\x00\x01")
+    return d
 
 
 class TestIsWeightFile:
@@ -137,3 +147,67 @@ class TestResolveWritableModelsDir:
             assert fallback.is_dir()
         finally:
             os.chmod(preferred, 0o700)
+
+
+class TestStrandedModelDirs:
+    def test_lists_only_weighted_dirs_missing_from_fallback(self, tmp_path):
+        preferred = tmp_path / "repo-models"
+        fallback = tmp_path / "home-models"
+        fallback.mkdir()
+        _make_model_dir(preferred, "facebook--nllb-200-distilled-600M")
+        _make_model_dir(preferred, "faster-whisper-small")
+        # A config-only leftover (no weights) is not a real model -> not stranded.
+        (preferred / "half-deleted").mkdir()
+        (preferred / "half-deleted" / "config.json").write_text("{}")
+        # Already mirrored in the fallback -> not stranded.
+        _make_model_dir(preferred, "whisper-base", weight="base.pt")
+        _make_model_dir(fallback, "whisper-base", weight="base.pt")
+
+        assert stranded_model_dirs(str(preferred), str(fallback)) == [
+            "facebook--nllb-200-distilled-600M",
+            "faster-whisper-small",
+        ]
+
+    def test_empty_when_preferred_missing(self, tmp_path):
+        assert stranded_model_dirs(str(tmp_path / "nope"), str(tmp_path / "fb")) == []
+
+
+class TestMigrateModelDirs:
+    def test_copies_and_leaves_source(self, tmp_path):
+        preferred = tmp_path / "repo-models"
+        fallback = tmp_path / "home-models"
+        fallback.mkdir()
+        _make_model_dir(preferred, "facebook--nllb-200-distilled-600M")
+
+        done = migrate_model_dirs(
+            ["facebook--nllb-200-distilled-600M"], str(preferred), str(fallback))
+
+        assert done == ["facebook--nllb-200-distilled-600M"]
+        # Copied into the writable location...
+        assert dir_has_weights(str(fallback / "facebook--nllb-200-distilled-600M"))
+        # ...and the original is left in place (never moved/deleted).
+        assert dir_has_weights(str(preferred / "facebook--nllb-200-distilled-600M"))
+
+    def test_skips_when_target_already_has_weights(self, tmp_path):
+        preferred = tmp_path / "repo-models"
+        fallback = tmp_path / "home-models"
+        _make_model_dir(preferred, "m", weight="model.bin")
+        _make_model_dir(fallback, "m", weight="model.bin")
+        # Sentinel proves copytree did not run over the existing target.
+        (fallback / "m" / "sentinel.txt").write_text("keep")
+
+        done = migrate_model_dirs(["m"], str(preferred), str(fallback))
+
+        assert done == ["m"]
+        assert (fallback / "m" / "sentinel.txt").exists()
+
+    def test_reports_failures_without_raising(self, tmp_path):
+        preferred = tmp_path / "repo-models"
+        fallback = tmp_path / "home-models"
+        preferred.mkdir()
+        fallback.mkdir()
+        logged = []
+        # 'ghost' has no source directory -> copytree raises -> logged, omitted.
+        done = migrate_model_dirs(["ghost"], str(preferred), str(fallback), log=logged.append)
+        assert done == []
+        assert logged and "ghost" in logged[0]
