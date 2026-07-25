@@ -339,6 +339,7 @@
                 <small style="display: block; margin: -6px 0 14px 0; color: var(--text-secondary);">Helps diagnose crashes automatically. No transcription content is sent. Requires server restart.</small>
 
                 <button id="main-save-btn" type="submit" class="btn-save" style="background: var(--accent);">💾 Save Settings</button>
+                <button type="button" onclick="updateServer()" class="btn-save" style="background: var(--accent); margin-top: 10px; width: 100%;">⬇️ Update &amp; Restart</button>
                 <button type="button" onclick="restartServer()" class="btn-save" style="background: var(--danger); margin-top: 10px; width: 100%;">🔄 Restart Server</button>
                 <button type="button" onclick="resetAllToDefaults()" class="btn-save" style="background: var(--danger); margin-top: 10px; width: 100%;">⚠️ Reset ALL Settings to Default (Nuclear)</button>
                 <button type="button" onclick="logout()" class="btn-save" style="background: var(--warning); margin-top: 10px; width: 100%;">🚪 Logout</button>
@@ -1157,6 +1158,41 @@
             } catch (error) {
                 // This is expected - server is restarting
                 showAlert('Server is restarting... Page will reload automatically.', 'success');
+                setTimeout(() => {
+                    window.location.reload();
+                }, 12000);
+            }
+        }
+
+        async function updateServer() {
+            if (!confirm('Pull the latest code and restart the server? This applies updates now instead of waiting for the nightly check, and briefly disconnects all users.')) {
+                return;
+            }
+
+            try {
+                showAlert('Checking for updates...', 'info');
+
+                const response = await fetch('/api/server/update', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' }
+                });
+
+                const data = await response.json();
+
+                if (data.updated) {
+                    // New code pulled -> server is restarting; reload like restartServer().
+                    showAlert('Updated — restarting... Page will reload automatically.', 'success');
+                    setTimeout(() => {
+                        window.location.reload();
+                    }, 12000);
+                } else {
+                    // Nothing changed (up-to-date / dirty / diverged / not a checkout).
+                    showAlert(data.message || (data.error ? ('Update failed: ' + data.error) : 'No update applied.'),
+                              data.success ? 'info' : 'error');
+                }
+            } catch (error) {
+                // Connection dropped mid-restart -> treat as a successful restart.
+                showAlert('Updated — restarting... Page will reload automatically.', 'success');
                 setTimeout(() => {
                     window.location.reload();
                 }, 12000);

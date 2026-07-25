@@ -6761,6 +6761,53 @@ def restart_server():
         return jsonify({"success": False, "error": str(e)}), 500
 
 
+@app.route("/api/server/update", methods=["POST"])
+def update_server():
+    """Pull the latest code (git fast-forward) and, if it advanced, restart to
+    apply it — the web-UI equivalent of update_server.sh. Reuses the same
+    non-destructive self-update the nightly auto-update uses."""
+    if not check_ip_whitelist():
+        return jsonify({"success": False, "error": "Access Denied"}), 403
+
+    # Frozen/watchdog installs update via releases, not a git pull.
+    if _is_watchdog_managed():
+        return jsonify({"success": False,
+                        "message": "This install is managed by the watchdog; it updates via releases, not a git pull."})
+
+    # Don't yank code + restart out from under a live session.
+    if _ts_get("running"):
+        return jsonify({"success": False,
+                        "message": "Transcription is running — stop it before updating."})
+
+    try:
+        from stt.self_update import git_self_update
+        updated, reason = git_self_update(BUNDLE_DIR)
+
+        if not updated:
+            messages = {
+                "up-to-date": "Already up to date — no new code to apply.",
+                "dirty-worktree": "Local uncommitted changes are present; not updating (nothing was changed).",
+                "not-fast-forwardable": "The checkout has diverged or unpushed commits; not updating (nothing was changed).",
+                "not-a-git-checkout": "This is not a git checkout, so it can't self-update.",
+                "error": "Update check failed — see the server log.",
+            }
+            return jsonify({"success": True, "updated": False,
+                            "message": messages.get(reason, f"No update applied ({reason}).")})
+
+        # Advanced to new code — restart to load it (same pattern as /restart).
+        def do_update_restart():
+            sleep(1)  # let the response flush first
+            print("[UPDATE] Update pulled via API; restarting to apply")
+            perform_server_restart()
+
+        threading.Thread(target=do_update_restart, daemon=True).start()
+        return jsonify({"success": True, "updated": True,
+                        "message": "Updated to the latest code. Restarting… wait 10-15 seconds and refresh."})
+
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
 @app.route("/api/disk-space", methods=["GET"])
 def get_disk_space():
     """API endpoint to get disk space information (cross-platform)"""
