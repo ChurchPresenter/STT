@@ -469,7 +469,7 @@
                     <h4>🔗 Generated URL</h4>
                     <div class="url-output">
                         <input type="text" id="customURL" onclick="this.select()" placeholder="Generated URL — or paste one here and click Recall">
-                        <button onclick="copyURL()">📋 Copy</button>
+                        <button onclick="copyURL(this)">📋 Copy</button>
                         <button onclick="openURL()">🚀 Open</button>
                         <button onclick="recallFromURL()" title="Load the settings from the URL in this field into the builder">📥 Recall</button>
                     </div>
@@ -828,18 +828,31 @@
             }, 500);
         }
 
+        // Briefly flash a copy button to "✅ Copied!" — inline feedback right
+        // where the user clicked, instead of a top-right toast that's easy to miss.
+        function flashCopied(btn) {
+            if (!btn || btn.dataset.copying) return;
+            const original = btn.textContent;
+            btn.dataset.copying = '1';
+            btn.textContent = '✅ Copied!';
+            setTimeout(() => {
+                btn.textContent = original;
+                delete btn.dataset.copying;
+            }, 1500);
+        }
+
         // Copy URL to clipboard
-        function copyURL() {
+        function copyURL(btn) {
             const urlInput = document.getElementById('customURL');
             urlInput.select();
 
             try {
                 document.execCommand('copy');
-                showNotification('✅ URL copied to clipboard!', 'success');
+                flashCopied(btn);
             } catch (err) {
                 // Fallback for modern browsers
                 navigator.clipboard.writeText(urlInput.value).then(() => {
-                    showNotification('✅ URL copied to clipboard!', 'success');
+                    flashCopied(btn);
                 }).catch(() => {
                     showNotification('❌ Failed to copy URL', 'error');
                 });
@@ -901,7 +914,7 @@
                     <span style="font-weight:600;">${escapeHtml(p.name)}${isActive ? ' <span style="color:var(--accent);">★ root</span>' : ''}</span>
                     <code style="flex:1;min-width:120px;color:#999;font-size:0.8em;">/profile/${escapeHtml(p.name)}</code>
                     <button onclick="recallProfile('${enc}')">📂 Recall</button>
-                    <button onclick="copyProfileURL('${enc}')" title="Copy display URL">📋 Copy</button>
+                    <button onclick="copyProfileURL('${enc}', this)" title="Copy display URL">📋 Copy</button>
                     <button onclick="openProfileURL('${enc}')" title="Open display URL">🚀 Open</button>
                     <button onclick="setAsRoot('${enc}')">🏠 Set as Root</button>
                     <button onclick="deleteProfile('${enc}')" title="Delete">🗑</button>
@@ -923,10 +936,10 @@
             if (!ok && navigator.clipboard) navigator.clipboard.writeText(text).catch(() => {});
         }
 
-        function copyProfileURL(enc) {
+        function copyProfileURL(enc, btn) {
             const url = location.origin + '/profile/' + decodeURIComponent(enc);
             copyText(url);
-            showNotification('📋 Copied ' + url, 'success');
+            flashCopied(btn);
         }
 
         function openProfileURL(enc) {
