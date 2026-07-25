@@ -199,9 +199,11 @@
             position: fixed;
             z-index: 1000;
             max-width: 280px;
-            background: var(--bg-elevated);
+            /* Solid, opaque surface — the --bg-* tokens are ~4% white overlays,
+               which render a see-through tooltip over page content. */
+            background: #1c1c24;
             color: var(--text-primary);
-            border: 1px solid var(--border);
+            border: 1px solid rgba(255, 255, 255, 0.18);
             border-radius: var(--radius-sm);
             padding: 6px 9px;
             font-size: 0.75rem;
