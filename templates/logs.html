@@ -1,0 +1,252 @@
+{% extends "base.html" %}
+
+{% block title %}Access Logs - Speech to Text{% endblock %}
+{% block page_title %}Access Logs{% endblock %}
+
+{% block extra_css %}
+        .logs-toolbar {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 10px;
+            align-items: center;
+            margin-bottom: 16px;
+        }
+        .logs-toolbar select,
+        .logs-toolbar input[type="text"] {
+            padding: 7px 10px;
+            background: var(--bg-input);
+            border: 1px solid var(--border);
+            color: var(--text-primary);
+            border-radius: var(--radius-sm);
+            font-size: 0.85em;
+        }
+        .logs-toolbar input[type="text"] { flex: 1; min-width: 160px; }
+        .logs-toolbar label {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            color: var(--text-secondary);
+            font-size: 0.85em;
+        }
+        .logs-btn {
+            padding: 7px 14px;
+            background: var(--accent-subtle);
+            border: 1px solid var(--accent);
+            color: var(--accent-hover);
+            border-radius: var(--radius-sm);
+            cursor: pointer;
+            font-size: 0.85em;
+        }
+        .logs-btn:hover { background: var(--accent-glow); }
+        .logs-btn.danger {
+            background: var(--danger-bg);
+            border-color: var(--danger);
+            color: var(--danger);
+        }
+        .logs-meta {
+            color: var(--text-muted);
+            font-size: 0.8em;
+            margin-left: auto;
+        }
+        .logs-table-wrap { overflow-x: auto; border-radius: var(--radius-md); }
+        table.logs-table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 0.82em;
+        }
+        table.logs-table th,
+        table.logs-table td {
+            text-align: left;
+            padding: 7px 10px;
+            border-bottom: 1px solid var(--border);
+            white-space: nowrap;
+        }
+        table.logs-table th {
+            color: var(--text-secondary);
+            font-weight: 600;
+            position: sticky;
+            top: 0;
+            background: var(--bg-base);
+        }
+        table.logs-table td.path {
+            white-space: normal;
+            word-break: break-all;
+            max-width: 360px;
+            font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        }
+        table.logs-table td.ua {
+            max-width: 240px;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            color: var(--text-muted);
+        }
+        .tag {
+            display: inline-block;
+            padding: 1px 8px;
+            border-radius: 999px;
+            font-size: 0.85em;
+            font-weight: 600;
+        }
+        .tag.web { background: var(--accent-subtle); color: var(--accent-hover); }
+        .tag.api { background: var(--warning-bg); color: var(--warning); }
+        .tag.socket { background: var(--success-bg); color: var(--success); }
+        .status-2xx { color: var(--success); }
+        .status-3xx { color: var(--text-secondary); }
+        .status-4xx { color: var(--warning); }
+        .status-5xx { color: var(--danger); }
+        .logs-empty { padding: 24px; text-align: center; color: var(--text-muted); }
+{% endblock %}
+
+{% block content %}
+<div class="logs-toolbar">
+    <select id="filter-source">
+        <option value="">All sources</option>
+        <option value="web">Web interface</option>
+        <option value="api">API</option>
+        <option value="socket">WebSocket</option>
+    </select>
+    <select id="filter-kind">
+        <option value="">All events</option>
+        <option value="http">HTTP request</option>
+        <option value="connection">WS connection</option>
+        <option value="action">Action</option>
+    </select>
+    <input type="text" id="filter-search" placeholder="Search path, IP, or detail…">
+    <select id="filter-limit">
+        <option value="200">200 rows</option>
+        <option value="500">500 rows</option>
+        <option value="1000">1000 rows</option>
+        <option value="2000">2000 rows</option>
+    </select>
+    <label><input type="checkbox" id="auto-refresh" checked> Auto-refresh</label>
+    <button class="logs-btn" id="refresh-btn">Refresh</button>
+    <button class="logs-btn danger" id="clear-btn">Clear</button>
+    <span class="logs-meta" id="logs-meta"></span>
+</div>
+
+<div class="logs-table-wrap">
+    <table class="logs-table">
+        <thead>
+            <tr>
+                <th>Time</th>
+                <th>Source</th>
+                <th>Event</th>
+                <th>Method</th>
+                <th>Path / Action</th>
+                <th>Status</th>
+                <th>IP</th>
+                <th>ms</th>
+                <th>Detail / Agent</th>
+            </tr>
+        </thead>
+        <tbody id="logs-body">
+            <tr><td colspan="9" class="logs-empty">Loading…</td></tr>
+        </tbody>
+    </table>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+(function () {
+    const $ = (id) => document.getElementById(id);
+    let timer = null;
+
+    function esc(s) {
+        if (s === null || s === undefined) return "";
+        return String(s).replace(/[&<>"]/g, (c) =>
+            ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+    }
+
+    function fmtTime(ts) {
+        if (!ts) return "";
+        const d = new Date(ts * 1000);
+        return d.toLocaleString();
+    }
+
+    function statusClass(status) {
+        if (!status) return "";
+        return "status-" + Math.floor(status / 100) + "xx";
+    }
+
+    function row(e) {
+        const tag = `<span class="tag ${esc(e.source)}">${esc(e.source)}</span>`;
+        const status = e.status
+            ? `<span class="${statusClass(e.status)}">${esc(e.status)}</span>` : "";
+        const ms = (e.duration_ms === null || e.duration_ms === undefined)
+            ? "" : esc(e.duration_ms);
+        const detail = e.detail || e.user_agent || "";
+        return `<tr>
+            <td>${esc(fmtTime(e.ts))}</td>
+            <td>${tag}</td>
+            <td>${esc(e.kind)}</td>
+            <td>${esc(e.method || "")}</td>
+            <td class="path">${esc(e.path || "")}</td>
+            <td>${status}</td>
+            <td>${esc(e.ip || "")}</td>
+            <td>${ms}</td>
+            <td class="ua" title="${esc(detail)}">${esc(detail)}</td>
+        </tr>`;
+    }
+
+    async function load() {
+        const params = new URLSearchParams();
+        const source = $("filter-source").value;
+        const kind = $("filter-kind").value;
+        const search = $("filter-search").value.trim();
+        const limit = $("filter-limit").value;
+        if (source) params.set("source", source);
+        if (kind) params.set("kind", kind);
+        if (search) params.set("search", search);
+        params.set("limit", limit);
+        try {
+            const res = await fetch("/api/logs?" + params.toString());
+            const data = await res.json();
+            const body = $("logs-body");
+            if (!data.success) {
+                body.innerHTML = `<tr><td colspan="9" class="logs-empty">${esc(data.error || "Error")}</td></tr>`;
+                return;
+            }
+            if (!data.entries.length) {
+                body.innerHTML = `<tr><td colspan="9" class="logs-empty">No matching log entries.</td></tr>`;
+            } else {
+                body.innerHTML = data.entries.map(row).join("");
+            }
+            const enabled = data.enabled ? "" : " — logging is DISABLED in config";
+            $("logs-meta").textContent =
+                `showing ${data.entries.length} of ${data.total} total${enabled}`;
+        } catch (err) {
+            $("logs-body").innerHTML =
+                `<tr><td colspan="9" class="logs-empty">Failed to load logs.</td></tr>`;
+        }
+    }
+
+    function scheduleAuto() {
+        if (timer) { clearInterval(timer); timer = null; }
+        if ($("auto-refresh").checked) timer = setInterval(load, 4000);
+    }
+
+    async function clearLogs() {
+        if (!confirm("Delete all access-log entries?")) return;
+        try {
+            await fetch("/api/logs/clear", { method: "POST" });
+        } catch (err) { /* ignore */ }
+        load();
+    }
+
+    $("refresh-btn").addEventListener("click", load);
+    $("clear-btn").addEventListener("click", clearLogs);
+    $("auto-refresh").addEventListener("change", scheduleAuto);
+    ["filter-source", "filter-kind", "filter-limit"].forEach(
+        (id) => $(id).addEventListener("change", load));
+    let searchTimer = null;
+    $("filter-search").addEventListener("input", () => {
+        if (searchTimer) clearTimeout(searchTimer);
+        searchTimer = setTimeout(load, 300);
+    });
+
+    load();
+    scheduleAuto();
+})();
+</script>
+{% endblock %}

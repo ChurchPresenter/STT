@@ -223,7 +223,9 @@ def get_file_mover_runtime():
         return dict(file_mover_runtime)
 
 
-from flask import Flask, render_template, jsonify, request, redirect, send_from_directory, make_response
+import functools
+
+from flask import Flask, render_template, jsonify, request, redirect, send_from_directory, make_response, g
 from flask_socketio import SocketIO, emit
 import speech_recognition as sr
 import numpy as np
@@ -3086,6 +3088,72 @@ app.config["TEMPLATES_AUTO_RELOAD"] = True  # Auto-reload templates when they ch
 app.config["SEND_FILE_MAX_AGE_DEFAULT"] = 0  # Disable caching for static files
 socketio = SocketIO(app, async_mode="threading", static_url_path="/static", static_folder=os.path.join(BUNDLE_DIR, "static"), ping_timeout=120, ping_interval=25)
 
+# --- Access log ------------------------------------------------------------
+# Records every HTTP request (tagged web vs api), WebSocket connect/disconnect,
+# and SocketIO action, into a size-capped SQLite table under APP_DIR/logs.
+# Viewed at /logs (page) and /api/logs (JSON). Thin wrapper over stt.request_log.
+from stt import request_log as _request_log  # noqa: E402
+
+try:
+    os.makedirs(os.path.join(APP_DIR, "logs"), exist_ok=True)
+    request_logger = _request_log.RequestLog(
+        os.path.join(APP_DIR, "logs", "access_log.db"),
+        max_rows=int((config.get("access_log", {}) or {}).get("max_rows", 50000) or 50000),
+    )
+except Exception:
+    # A logging store failure must never stop the server from booting.
+    request_logger = None
+
+
+def _access_log_enabled():
+    """Whether request logging is currently on (default True). Read fresh so a
+    config change via /api/config takes effect without a restart."""
+    try:
+        return bool((config.get("access_log", {}) or {}).get("enabled", True))
+    except Exception:
+        return False
+
+
+def _record_socket_event(event_name, kind):
+    """Log a SocketIO connect/disconnect or action. Best-effort, never raises."""
+    if request_logger is None or not _access_log_enabled():
+        return
+    try:
+        sid = getattr(request, "sid", None)
+        request_logger.log(
+            source=_request_log.SOURCE_SOCKET,
+            kind=kind,
+            path=event_name,
+            ip=getattr(request, "remote_addr", None),
+            user_agent=request.headers.get("User-Agent") if request else None,
+            detail=(f"sid={sid}" if sid else None),
+        )
+    except Exception:
+        pass
+
+
+# Wrap socketio.on so every @socketio.on(...) handler registered below is
+# transparently logged — connect/disconnect as connections, everything else as
+# actions. Installed before any handler is defined so all of them are covered.
+_socketio_on_orig = socketio.on
+
+
+def _logging_socketio_on(message, namespace=None):
+    decorator = _socketio_on_orig(message, namespace=namespace)
+    _kind = _request_log.KIND_CONNECTION if message in ("connect", "disconnect") else _request_log.KIND_ACTION
+
+    def register(handler):
+        @functools.wraps(handler)
+        def instrumented(*args, **kwargs):
+            _record_socket_event(message, _kind)
+            return handler(*args, **kwargs)
+        return decorator(instrumented)
+    return register
+
+
+socketio.on = _logging_socketio_on
+# ---------------------------------------------------------------------------
+
 # When this (web) process started — used for the Server Settings uptime display.
 # Resets on restart/redeploy/crash-recovery, reflecting the live server-process lifetime.
 SERVER_START_TIME = time.time()
@@ -3458,6 +3526,45 @@ def check_ip_whitelist():
         return False
 
 
+@app.before_request
+def _access_log_start_timer():
+    """Stamp a monotonic start time so the after_request hook can report the
+    request duration. Best-effort — never breaks a request."""
+    try:
+        g._access_log_t0 = time.perf_counter()
+    except Exception:
+        pass
+
+
+@app.after_request
+def _access_log_record(response):
+    """Log the request (tagged web vs api). Skips static assets and socket.io
+    transport frames — WebSocket traffic is logged via the socket handlers.
+    Best-effort — never breaks a response.
+
+    The query string is deliberately dropped: it can carry ?key=<access_token>,
+    which must not be written to the log."""
+    try:
+        if request_logger is not None and _access_log_enabled():
+            path = request.path or ""
+            if not (path.startswith("/static/") or path.startswith("/socket.io/")):
+                t0 = getattr(g, "_access_log_t0", None)
+                duration_ms = round((time.perf_counter() - t0) * 1000.0, 2) if t0 is not None else None
+                request_logger.log(
+                    source=_request_log.classify_source(path),
+                    kind=_request_log.KIND_HTTP,
+                    method=request.method,
+                    path=path,
+                    status=response.status_code,
+                    ip=request.remote_addr,
+                    user_agent=request.headers.get("User-Agent"),
+                    duration_ms=duration_ms,
+                )
+    except Exception:
+        pass  # request logging must never break a response
+    return response
+
+
 @app.after_request
 def _mint_access_token_cookie(response):
     """Turn a valid ?key=<access_token> request into a browser session.
@@ -3702,6 +3809,14 @@ def word_highlighting_page():
     return render_template("word-highlighting.html")
 
 
+@app.route("/logs")
+def logs_page():
+    """Render the access-log viewer page"""
+    if not check_ip_whitelist():
+        return render_template("auth-required.html"), 403
+    return render_template("logs.html")
+
+
 @app.route("/api/config", methods=["GET"])
 def get_config():
     """API endpoint to get current configuration"""
@@ -3710,6 +3825,50 @@ def get_config():
 
     try:
         return jsonify({"success": True, "config": config})
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@app.route("/api/logs", methods=["GET"])
+def api_logs():
+    """Return recent access-log entries (newest first), with optional filters:
+    ?source=web|api|socket, ?kind=http|connection|action, ?search=<substr>,
+    ?limit=<n>."""
+    if not check_ip_whitelist():
+        return jsonify({"success": False, "error": "Access Denied"}), 403
+    if request_logger is None:
+        return jsonify({"success": True, "entries": [], "total": 0, "enabled": False})
+    try:
+        limit = int(request.args.get("limit", 200))
+    except (TypeError, ValueError):
+        limit = 200
+    limit = max(1, min(limit, 2000))
+    try:
+        entries = request_logger.query(
+            source=(request.args.get("source") or None),
+            kind=(request.args.get("kind") or None),
+            search=(request.args.get("search") or None),
+            limit=limit,
+        )
+        return jsonify({
+            "success": True,
+            "entries": entries,
+            "total": request_logger.count(),
+            "enabled": _access_log_enabled(),
+        })
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@app.route("/api/logs/clear", methods=["POST"])
+def api_logs_clear():
+    """Delete all access-log entries."""
+    if not check_ip_whitelist():
+        return jsonify({"success": False, "error": "Access Denied"}), 403
+    try:
+        if request_logger is not None:
+            request_logger.clear()
+        return jsonify({"success": True})
     except Exception as e:
         return jsonify({"success": False, "error": str(e)}), 500
 

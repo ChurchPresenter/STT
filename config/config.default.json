@@ -170,6 +170,12 @@
       "_session_timeout_comment": "How long password-authenticated sessions remain valid (in minutes)"
     }
   },
+  "access_log": {
+    "enabled": true,
+    "_enabled_comment": "Log all HTTP requests, WebSocket connections, and SocketIO actions (tagged web vs api). View at /logs.",
+    "max_rows": 50000,
+    "_max_rows_comment": "Maximum log rows to retain in APP_DIR/logs/access_log.db. Oldest rows are pruned past this cap."
+  },
   "performance": {
     "use_gpu": true,
     "_use_gpu_comment": "Automatically use GPU (CUDA) if available for faster transcription"
