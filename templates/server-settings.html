@@ -243,7 +243,7 @@
                 <div class="form-group">
                     <label for="ip_whitelist">IP Whitelist (one per line)</label>
                     <textarea id="ip_whitelist" name="web_server.settings_ip_whitelist" rows="4" placeholder="127.0.0.1&#10;::1&#10;192.168.2.0/24"></textarea>
-                    <small>Devices at these IPs get in without logging in. Any other device must log in with the password (below) or open a <code>?key=</code> URL.</small>
+                    <small>IPs that can access settings pages without a password. Any other device must log in with the password or open a <code>?key=</code> URL.</small>
                 </div>
 
                 <div class="form-group">
@@ -457,7 +457,7 @@
                             • <code>0.0.0.0/0</code> - allow all (not recommended)
                         </div>
                         <div class="warning-box">
-                            ⚠️ Only whitelisted IPs can access settings pages. Index page is always accessible.
+                            ⚠️ Non-whitelisted devices must log in with the password or use a <code>?key=</code> token to reach settings pages. The index page is always accessible.
                         </div>
                     </div>
 
