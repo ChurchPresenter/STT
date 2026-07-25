@@ -26,6 +26,29 @@ PYTHON_BIN=$([ -f "$VENV_PYTHON" ] && echo "$VENV_PYTHON" || echo "python3")
 # Read port from config.json
 PORT=$("$PYTHON_BIN" -c "import json; print(json.load(open('config/config.json')).get('web_server',{}).get('port',8080))" 2>/dev/null || echo 8080)
 
+# ─── Fast path: launchd KeepAlive supervisor (macOS) ────────────────
+# When the server is supervised by launchd with KeepAlive — a system daemon
+# (/Library/LaunchDaemons/com.stt.server.plist) or a per-user gui agent — killing
+# the worker IS a full restart: launchd respawns it with the current on-disk code.
+# We must NOT also start a second instance. That was the double-launch bug: a
+# *system* daemon isn't visible to a user-context `launchctl list`, so the script
+# fell through to its nohup fallback and launched a rival that fought for the port.
+if [ "$OS" = "Darwin" ] && { [ -f /Library/LaunchDaemons/com.stt.server.plist ] \
+        || launchctl print "gui/$(id -u)/com.stt.server" >/dev/null 2>&1; }; then
+    echo "Restarting via launchd (KeepAlive respawn)..."
+    pkill -TERM -f "speech_to_text\.py" 2>/dev/null
+    sleep 4
+    for _ in $(seq 1 15); do
+        if pgrep -f "speech_to_text\.py" >/dev/null 2>&1; then
+            echo -e "${GREEN}[OK]${NC} Server respawned by launchd (port $PORT)"
+            exit 0
+        fi
+        sleep 1
+    done
+    echo -e "${RED}[ERROR]${NC} launchd did not respawn the server — check: launchctl print system/com.stt.server"
+    exit 1
+fi
+
 echo "Stopping server..."
 
 # ─── Stop managed services ──────────────────────────────────────────
