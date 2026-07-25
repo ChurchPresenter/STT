@@ -488,7 +488,7 @@
   "auto_update": {
     "enabled": true,
     "_enabled_comment": "When running the server directly (not under the watchdog), fast-forward the git checkout to its upstream branch and restart. Non-destructive: skipped if the working tree is dirty or the branch has unpushed/diverged commits, so developer work is never discarded. Ignored under the watchdog, which has its own updater.",
-    "check_interval_hours": 1,
-    "_check_interval_hours_comment": "How often the running server re-checks for updates. It also checks once at startup. Updates only apply while transcription is not running."
+    "update_hour": 1,
+    "_update_hour_comment": "Local hour of day (0-23) when the running server checks for updates each night; default 1 (1am) so a live box updates during off-hours instead of restarting hourly. It also checks once at startup. Updates only apply while transcription is not running. (Supersedes the old check_interval_hours setting.)"
   }
 }

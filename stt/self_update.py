@@ -22,6 +22,7 @@ import os
 import shutil
 import subprocess
 import sys
+from datetime import datetime, timedelta
 from typing import Tuple
 
 log = logging.getLogger(__name__)
@@ -215,3 +216,20 @@ def restart_via_execv() -> None:
     """
     log.info("[self-update] restarting to load updated code")
     os.execv(sys.executable, [sys.executable, *sys.argv])
+
+
+def seconds_until_hour(now: datetime, target_hour: int) -> float:
+    """Seconds from ``now`` to the next local occurrence of ``target_hour``:00.
+
+    Used to schedule the auto-update at a fixed nightly hour (default 1 am)
+    instead of a flat interval, so a live box updates during off-hours rather
+    than restarting every hour. ``now`` is injected so the schedule math is
+    deterministic and testable. ``target_hour`` is clamped to 0-23; when ``now``
+    is exactly on the hour the next occurrence is tomorrow (a full day away, so
+    it doesn't re-fire immediately).
+    """
+    target_hour = max(0, min(23, int(target_hour)))
+    target = now.replace(hour=target_hour, minute=0, second=0, microsecond=0)
+    if target <= now:
+        target += timedelta(days=1)
+    return (target - now).total_seconds()

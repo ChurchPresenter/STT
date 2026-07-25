@@ -15172,16 +15172,23 @@ def _run_startup_self_update():
 
 
 def _self_update_loop():
-    """Periodic git self-update; only applies while transcription is idle."""
+    """Nightly git self-update at a fixed hour; only applies while idle.
+
+    Runs at auto_update.update_hour (local, default 1 = 1am) rather than a flat
+    interval, so a live box updates during off-hours instead of restarting every
+    hour. The one-shot startup check still catches a box up at boot."""
     import time
-    from stt.self_update import git_self_update
+    from datetime import datetime
+    from stt.self_update import git_self_update, seconds_until_hour
     try:
-        interval = float(config.get("auto_update", {}).get("check_interval_hours", 1))
+        update_hour = int(config.get("auto_update", {}).get("update_hour", 1))
     except (TypeError, ValueError):
-        interval = 1.0
-    interval = max(0.05, interval)  # floor to avoid a hot loop on misconfig
+        update_hour = 1
     while True:
-        time.sleep(interval * 3600)
+        delay = seconds_until_hour(datetime.now(), update_hour)
+        print(f"[AUTO-UPDATE] Next update check at {update_hour:02d}:00 "
+              f"(in {delay / 3600:.1f}h)")
+        time.sleep(delay)
         if _server_shutting_down.is_set():
             return
         try:

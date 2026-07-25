@@ -314,3 +314,35 @@ def test_up_to_date_also_heals_dep_drift(repos, monkeypatch):
 
     assert (updated, reason) == (False, "up-to-date")
     assert synced == [str(clone)]
+
+
+class TestSecondsUntilHour:
+    """seconds_until_hour: schedule the nightly auto-update at a fixed local hour."""
+
+    from datetime import datetime as _dt
+
+    def test_later_today(self):
+        # 00:00 -> 01:00 is one hour away
+        assert self_update.seconds_until_hour(self._dt(2026, 7, 24, 0, 0, 0), 1) == 3600
+
+    def test_target_already_passed_rolls_to_tomorrow(self):
+        # 12:00 with target 1am -> next 1am is 13h away
+        assert self_update.seconds_until_hour(self._dt(2026, 7, 24, 12, 0, 0), 1) == 13 * 3600
+
+    def test_exactly_on_the_hour_waits_a_full_day(self):
+        # exactly 01:00:00 must not fire immediately again
+        assert self_update.seconds_until_hour(self._dt(2026, 7, 24, 1, 0, 0), 1) == 86400
+
+    def test_partial_hour(self):
+        assert self_update.seconds_until_hour(self._dt(2026, 7, 24, 0, 30, 0), 1) == 1800
+
+    def test_late_night_to_early_morning(self):
+        # 23:30 -> 01:00 = 1.5h
+        assert self_update.seconds_until_hour(self._dt(2026, 7, 24, 23, 30, 0), 1) == 5400
+
+    def test_target_hour_clamped(self):
+        # out-of-range hours clamp to [0, 23]
+        big = self_update.seconds_until_hour(self._dt(2026, 7, 24, 12, 0, 0), 25)   # -> 23:00
+        assert big == 11 * 3600
+        low = self_update.seconds_until_hour(self._dt(2026, 7, 24, 12, 0, 0), -5)   # -> 00:00 tomorrow
+        assert low == 12 * 3600
