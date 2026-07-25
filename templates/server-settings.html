@@ -192,6 +192,27 @@
             justify-content: space-between;
         }
         .unsaved-bar span { color: var(--warning); font-size: 0.85em; font-weight: 600; }
+
+        /* Body-anchored tooltip: escapes the scrollable endpoints list (which
+           would clip a CSS ::after) and works on hover, keyboard focus, and tap. */
+        #app-tooltip {
+            position: fixed;
+            z-index: 1000;
+            max-width: 280px;
+            background: var(--bg-elevated);
+            color: var(--text-primary);
+            border: 1px solid var(--border);
+            border-radius: var(--radius-sm);
+            padding: 6px 9px;
+            font-size: 0.75rem;
+            line-height: 1.35;
+            box-shadow: 0 6px 20px rgba(0, 0, 0, 0.5);
+            pointer-events: none;
+            opacity: 0;
+            transition: opacity 0.1s ease;
+        }
+        #app-tooltip.show { opacity: 1; }
+        [data-tip] { cursor: help; }
 {% endblock %}
 
 {% block content %}
@@ -618,8 +639,8 @@
                             const descriptionHtml = description ? `<div class="endpoint-description">${description}</div>` : '';
                             const examplesHtml = examples.length > 0 ? examples.map(ex => `<div class="endpoint-example">${ex}</div>`).join('') : '';
                             const authBadge = ep.auth_required
-                                ? `<span style="background:rgba(245,158,11,0.15);color:var(--warning);border-radius:var(--radius-sm);padding:1px 6px;font-size:0.75em;white-space:nowrap;cursor:help;" title="Whitelisted IPs can call this freely. Other devices must log in with the password (/api/auth/login) or open a ?key=TOKEN URL first.">🔒 Auth</span>`
-                                : `<span style="background:var(--bg-elevated);color:var(--text-secondary);border-radius:var(--radius-sm);padding:1px 6px;font-size:0.75em;white-space:nowrap;" title="No authentication required — any IP can call this endpoint.">Open</span>`;
+                                ? `<span tabindex="0" style="background:rgba(245,158,11,0.15);color:var(--warning);border-radius:var(--radius-sm);padding:1px 6px;font-size:0.75em;white-space:nowrap;" data-tip="Whitelisted IPs can call this freely. Other devices must log in with the password (/api/auth/login) or open a ?key=TOKEN URL first.">🔒 Auth</span>`
+                                : `<span tabindex="0" style="background:var(--bg-elevated);color:var(--text-secondary);border-radius:var(--radius-sm);padding:1px 6px;font-size:0.75em;white-space:nowrap;" data-tip="No authentication required — any IP can call this endpoint.">Open</span>`;
                             html += `
                                 <div class="endpoint-item">
                                     <span class="endpoint-methods">${methods}</span>
@@ -1275,5 +1296,53 @@
                 showAlert('Network error during logout. Please try again.', 'error');
             }
         }
+
+        // Lightweight tooltip for [data-tip] elements. Delegated on document so it
+        // covers dynamically-rendered content (the endpoint badges), body-anchored
+        // (position:fixed) so the scrollable endpoints list can't clip it, and it
+        // triggers on hover, keyboard focus, and tap (native title does none of
+        // these reliably — nothing at all on touch).
+        (function initAppTooltip() {
+            const tip = document.createElement('div');
+            tip.id = 'app-tooltip';
+            document.body.appendChild(tip);
+            let current = null;
+
+            function show(el) {
+                const text = el.getAttribute('data-tip');
+                if (!text) return;
+                tip.textContent = text;
+                tip.classList.add('show');
+                const r = el.getBoundingClientRect();
+                const tw = tip.offsetWidth, th = tip.offsetHeight;
+                let left = r.left + r.width / 2 - tw / 2;
+                let top = r.top - th - 8;                 // prefer above
+                if (top < 4) top = r.bottom + 8;          // flip below if no room
+                left = Math.max(4, Math.min(left, window.innerWidth - tw - 4));
+                tip.style.left = left + 'px';
+                tip.style.top = top + 'px';
+                current = el;
+            }
+            function hide() { tip.classList.remove('show'); current = null; }
+
+            document.addEventListener('mouseover', e => {
+                const el = e.target.closest('[data-tip]');
+                if (el) show(el);
+            });
+            document.addEventListener('mouseout', e => {
+                if (current && e.target.closest('[data-tip]') === current) hide();
+            });
+            document.addEventListener('focusin', e => {
+                const el = e.target.closest('[data-tip]');
+                if (el) show(el);
+            });
+            document.addEventListener('focusout', hide);
+            document.addEventListener('click', e => {   // touch: tap toggles
+                const el = e.target.closest('[data-tip]');
+                if (el) { current === el ? hide() : show(el); }
+                else hide();
+            });
+            window.addEventListener('scroll', hide, true);
+        })();
     </script>
 {% endblock %}
