@@ -307,6 +307,11 @@
                 </div>
 
                 <div class="checkbox-group">
+                    <input type="checkbox" id="audio_autostart_enabled" name="audio.autostart">
+                    <label for="audio_autostart_enabled">Auto-start transcription on server launch <small>(applies on next server start)</small></label>
+                </div>
+
+                <div class="checkbox-group">
                     <input type="checkbox" id="srt_generation_enabled" name="database.srt_enabled">
                     <label for="srt_generation_enabled">Save Transcription SRT</label>
                 </div>
@@ -847,6 +852,7 @@
                     document.getElementById('database_path_format').value = config.database?.path_format || '%Y/%m';
                     document.getElementById('database_filename_format').value = config.database?.filename_format || '%Y-%m-%d_%H%M%S';
                     document.getElementById('database_filename_prefix').value = config.database?.filename_prefix || '';
+                    document.getElementById('audio_autostart_enabled').checked = config.audio?.autostart === true;
                     document.getElementById('srt_generation_enabled').checked = config.database?.srt_enabled !== false;
                     document.getElementById('html_generation_enabled').checked = config.database?.html_enabled !== false;
                     document.getElementById('translation_srt_enabled').checked = config.live_translation?.srt_enabled !== false;
@@ -895,6 +901,10 @@
                     filename_prefix: document.getElementById('database_filename_prefix').value.trim(),
                     srt_enabled: document.getElementById('srt_generation_enabled').checked,
                     html_enabled: document.getElementById('html_generation_enabled').checked
+                },
+                audio: {
+                    // /api/config deep-merges, so the other audio.* keys are untouched
+                    autostart: document.getElementById('audio_autostart_enabled').checked
                 },
                 live_translation: {
                     srt_enabled: document.getElementById('translation_srt_enabled').checked,

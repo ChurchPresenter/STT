@@ -15526,6 +15526,18 @@ if __name__ == "__main__":
     globals()["thread1"] = transcription_process
     globals()["thread2"] = thread2
 
+    # Opt-in auto-start: begin live transcription immediately on launch.
+    # The worker (already started above) picks this up from its idle loop,
+    # lazily loads the model, and self-selects the default device — no UI,
+    # client, or device index required. Mirrors the calibration start path.
+    try:
+        if load_config().get("audio", {}).get("autostart", False):
+            print("[AUTOSTART] audio.autostart enabled; starting transcription")
+            control_queue.put({"command": "start"})
+            transcription_state["status"] = "starting"
+    except Exception as e:
+        print(f"[AUTOSTART] Failed to auto-start transcription: {e}")
+
     # Periodic direct-run auto-update (idle-gated). Started here in the main
     # process only, so the multiprocessing worker (which re-imports this module)
     # never spawns a duplicate updater.

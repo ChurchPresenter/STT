@@ -84,6 +84,8 @@
     "_phrase_timeout_comment": "Seconds of silence before considering it a new phrase. Higher = fewer false phrase breaks, Lower = more responsive to pauses",
     "language": "auto",
     "_language_comment": "Language code for transcription (auto, en, es, fr, de, etc.)",
+    "autostart": false,
+    "_autostart_comment": "Automatically begin live microphone transcription as soon as the server starts, without needing the UI Start button. The worker still loads the model and self-selects the default device.",
     "same_output_threshold": 7,
     "_same_output_threshold_comment": "Number of repeated outputs before text is finalized. Lower = faster finalization (3-5), Higher = more stable but slower (10-25). Default: 7",
     "fuzzy_duplicate_threshold": 0.85,
