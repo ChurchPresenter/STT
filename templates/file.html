@@ -1596,20 +1596,34 @@ ${segmentsHtml}
         }
 
         // Copy
-        document.getElementById('copyBtn').addEventListener('click', () => {
+        // Briefly flash a copy button to "✅ Copied!" — inline feedback where the
+        // user clicked, instead of a blocking alert() popup.
+        function flashCopied(btn, label) {
+            if (!btn || btn.dataset.copying) return;
+            const original = btn.textContent;
+            btn.dataset.copying = '1';
+            btn.textContent = label || '✅ Copied!';
+            setTimeout(() => {
+                btn.textContent = original;
+                delete btn.dataset.copying;
+            }, 1500);
+        }
+
+        document.getElementById('copyBtn').addEventListener('click', (e) => {
+            const btn = e.currentTarget;
             const text = transcriptionText;
             if (navigator.clipboard && navigator.clipboard.writeText) {
                 navigator.clipboard.writeText(text).then(() => {
-                    alert('✅ Copied to clipboard!');
+                    flashCopied(btn);
                 }).catch(() => {
-                    fallbackCopy(text);
+                    fallbackCopy(text, btn);
                 });
             } else {
-                fallbackCopy(text);
+                fallbackCopy(text, btn);
             }
         });
 
-        function fallbackCopy(text) {
+        function fallbackCopy(text, btn) {
             const textarea = document.createElement('textarea');
             textarea.value = text;
             textarea.style.position = 'fixed';
@@ -1618,7 +1632,7 @@ ${segmentsHtml}
             textarea.select();
             try {
                 document.execCommand('copy');
-                alert('✅ Copied to clipboard!');
+                flashCopied(btn);
             } catch (err) {
                 alert('❌ Failed to copy. Please select the text manually and use Ctrl+C.');
             }
@@ -1671,19 +1685,20 @@ ${segmentsHtml}
         });
 
         // Copy Translation
-        document.getElementById('copyTranslationBtn').addEventListener('click', () => {
+        document.getElementById('copyTranslationBtn').addEventListener('click', (e) => {
+            const btn = e.currentTarget;
             if (!translationText) {
                 alert('No translation to copy');
                 return;
             }
             if (navigator.clipboard && navigator.clipboard.writeText) {
                 navigator.clipboard.writeText(translationText).then(() => {
-                    alert('✅ Translation copied to clipboard!');
+                    flashCopied(btn);
                 }).catch(() => {
-                    fallbackCopy(translationText);
+                    fallbackCopy(translationText, btn);
                 });
             } else {
-                fallbackCopy(translationText);
+                fallbackCopy(translationText, btn);
             }
         });
 

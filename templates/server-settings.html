@@ -652,7 +652,7 @@
                                         ${examplesHtml}
                                     </div>
                                     ${authBadge}
-                                    <button class="endpoint-copy-btn" onclick="copyEndpoint('${fullUrl}')" title="Copy full URL">📋</button>
+                                    <button class="endpoint-copy-btn" onclick="copyEndpoint('${fullUrl}', this)" title="Copy full URL">📋</button>
                                 </div>`;
                         });
                         html += `</div>`;
@@ -668,22 +668,35 @@
             }
         }
 
+        // Briefly flash a copy button to a checkmark — inline feedback where the
+        // user clicked, instead of a top-right toast that's easy to miss.
+        function flashCopied(btn, label) {
+            if (!btn || btn.dataset.copying) return;
+            const original = btn.textContent;
+            btn.dataset.copying = '1';
+            btn.textContent = label || '✅';
+            setTimeout(() => {
+                btn.textContent = original;
+                delete btn.dataset.copying;
+            }, 1500);
+        }
+
         // Copy endpoint URL to clipboard
-        function copyEndpoint(url) {
+        function copyEndpoint(url, btn) {
             // Use clipboard API if available, otherwise fallback
             if (navigator.clipboard && navigator.clipboard.writeText) {
                 navigator.clipboard.writeText(url).then(() => {
-                    showAlert('success', '✅ Endpoint URL copied to clipboard!');
+                    flashCopied(btn);
                 }).catch(() => {
-                    fallbackCopyEndpoint(url);
+                    fallbackCopyEndpoint(url, btn);
                 });
             } else {
-                fallbackCopyEndpoint(url);
+                fallbackCopyEndpoint(url, btn);
             }
         }
 
         // Fallback copy for non-HTTPS or older browsers
-        function fallbackCopyEndpoint(url) {
+        function fallbackCopyEndpoint(url, btn) {
             const textarea = document.createElement('textarea');
             textarea.value = url;
             textarea.style.position = 'fixed';
@@ -692,7 +705,7 @@
             textarea.select();
             try {
                 document.execCommand('copy');
-                showAlert('success', '✅ Endpoint URL copied to clipboard!');
+                flashCopied(btn);
             } catch (err) {
                 showAlert('error', '❌ Failed to copy URL');
             }
