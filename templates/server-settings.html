@@ -243,7 +243,17 @@
                 <div class="form-group">
                     <label for="ip_whitelist">IP Whitelist (one per line)</label>
                     <textarea id="ip_whitelist" name="web_server.settings_ip_whitelist" rows="4" placeholder="127.0.0.1&#10;::1&#10;192.168.2.0/24"></textarea>
-                    <small>IPs that can access settings pages</small>
+                    <small>Devices at these IPs get in without logging in. Any other device must log in with the password (below) or open a <code>?key=</code> URL.</small>
+                </div>
+
+                <div class="form-group">
+                    <label for="access_token">URL Access Token</label>
+                    <div style="display: flex; gap: 8px; align-items: center;">
+                        <input type="text" id="access_token" name="web_server.access_token" placeholder="(disabled)" oninput="updateAccessTokenExample()" style="flex: 1;">
+                        <button type="button" onclick="generateAccessToken()" class="btn-save" style="background: var(--accent); width: auto; margin: 0; white-space: nowrap;">🔑 Generate</button>
+                    </div>
+                    <small>Lets a device that can't use the login page (e.g. an OBS / browser-source display) get in by putting <code>?key=TOKEN</code> in its URL. Opening such a URL authenticates that browser for the session. Blank = disabled. Click Save to apply. The token appears in URLs/logs — rotate it if leaked.</small>
+                    <small id="access_token_example" style="display:block; margin-top:6px; color: var(--text-secondary); word-break: break-all;"></small>
                 </div>
 
                 <div class="form-group">
@@ -381,7 +391,7 @@
                         All available API endpoints for integration and automation.
                     </div>
                     <div style="margin-bottom: 10px; font-size: 0.82em; color: var(--text-secondary);">
-                        <span style="background: rgba(245,158,11,0.15); color: var(--warning); border-radius: var(--radius-sm); padding: 1px 6px; font-size: 0.85em; margin-right: 6px;">🔒 Auth</span> requires IP whitelist or password login &nbsp;·&nbsp;
+                        <span style="background: rgba(245,158,11,0.15); color: var(--warning); border-radius: var(--radius-sm); padding: 1px 6px; font-size: 0.85em; margin-right: 6px;">🔒 Auth</span> requires a whitelisted IP, password login, or a <code>?key=</code> access token &nbsp;·&nbsp;
                         <span style="background: var(--bg-secondary); color: var(--text-secondary); border-radius: var(--radius-sm); padding: 1px 6px; font-size: 0.85em; margin-right: 6px;">Open</span> accessible from any IP
                     </div>
                     <div id="api-endpoints-list" style="max-height: 400px; overflow-y: auto;" aria-live="polite">
@@ -608,7 +618,7 @@
                             const descriptionHtml = description ? `<div class="endpoint-description">${description}</div>` : '';
                             const examplesHtml = examples.length > 0 ? examples.map(ex => `<div class="endpoint-example">${ex}</div>`).join('') : '';
                             const authBadge = ep.auth_required
-                                ? `<span style="background:rgba(245,158,11,0.15);color:var(--warning);border-radius:var(--radius-sm);padding:1px 6px;font-size:0.75em;white-space:nowrap;cursor:help;" title="Whitelisted IPs can call this freely. Other IPs need to log in with a password first (/api/auth/login).">🔒 Auth</span>`
+                                ? `<span style="background:rgba(245,158,11,0.15);color:var(--warning);border-radius:var(--radius-sm);padding:1px 6px;font-size:0.75em;white-space:nowrap;cursor:help;" title="Whitelisted IPs can call this freely. Other devices must log in with the password (/api/auth/login) or open a ?key=TOKEN URL first.">🔒 Auth</span>`
                                 : `<span style="background:var(--bg-elevated);color:var(--text-secondary);border-radius:var(--radius-sm);padding:1px 6px;font-size:0.75em;white-space:nowrap;" title="No authentication required — any IP can call this endpoint.">Open</span>`;
                             html += `
                                 <div class="endpoint-item">
@@ -793,6 +803,8 @@
                     // IP Whitelist
                     const whitelist = config.web_server?.settings_ip_whitelist || ['127.0.0.1', '::1', '192.168.2.0/24'];
                     document.getElementById('ip_whitelist').value = Array.isArray(whitelist) ? whitelist.join('\n') : whitelist;
+                    document.getElementById('access_token').value = config.web_server?.access_token || '';
+                    updateAccessTokenExample();
 
                     // Database settings
                     document.getElementById('database_path').value = config.database?.path || '';
@@ -837,7 +849,8 @@
                     host: document.getElementById('host').value,
                     port: parseInt(document.getElementById('port').value),
                     update_interval: parseFloat(document.getElementById('update_interval').value),
-                    settings_ip_whitelist: ipWhitelist
+                    settings_ip_whitelist: ipWhitelist,
+                    access_token: document.getElementById('access_token').value.trim()
                 },
                 database: {
                     path: document.getElementById('database_path').value.trim(),
@@ -1161,6 +1174,34 @@
                 setTimeout(() => {
                     window.location.reload();
                 }, 12000);
+            }
+        }
+
+        function updateAccessTokenExample() {
+            const el = document.getElementById('access_token_example');
+            if (!el) return;
+            const t = document.getElementById('access_token').value.trim();
+            el.textContent = t
+                ? ('Example URL: ' + window.location.origin + '/?key=' + encodeURIComponent(t))
+                : 'Enter or generate a token to enable ?key= URL access.';
+        }
+
+        async function generateAccessToken() {
+            try {
+                const response = await fetch('/api/server/access-token', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' }
+                });
+                const data = await response.json();
+                if (data.success && data.token) {
+                    document.getElementById('access_token').value = data.token;
+                    updateAccessTokenExample();
+                    showAlert('Token generated — click 💾 Save Settings to apply it.', 'info');
+                } else {
+                    showAlert('Failed to generate token: ' + (data.error || 'unknown error'), 'error');
+                }
+            } catch (error) {
+                showAlert('Failed to generate token: ' + error.message, 'error');
             }
         }
 

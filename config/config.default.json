@@ -159,6 +159,8 @@
       "::1"
     ],
     "_settings_ip_whitelist_comment": "IP addresses or CIDR ranges allowed to access settings. Empty array = allow all. Example: ['127.0.0.1', '192.168.1.0/24']",
+    "access_token": "",
+    "_access_token_comment": "Optional token to embed auth in a URL: append ?key=TOKEN (e.g. http://host:8080/?key=TOKEN) so a non-whitelisted device or an OBS/display source that can't use the login page gets in. Opening such a URL sets a session cookie for the rest of that browser session. Empty = disabled. Generate/rotate it on the Server Settings page. It appears in URLs/logs, so rotate it if leaked.",
     "password_auth": {
       "enabled": true,
       "_enabled_comment": "Enable password authentication as fallback for non-whitelisted IPs",

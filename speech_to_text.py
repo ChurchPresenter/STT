@@ -3373,9 +3373,21 @@ def check_ip_whitelist():
     # First check if password authentication is enabled
     password_auth_config = config.get("web_server", {}).get("password_auth", {})
     password_auth_enabled = password_auth_config.get("enabled", False)
+    access_token = str(config.get("web_server", {}).get("access_token", "") or "")
 
-    # Check for valid session token (from cookie or header)
-    if password_auth_enabled:
+    # A request carrying ?key=<access_token> is granted directly, so a
+    # non-whitelisted device (or an OBS/display source that can't use the login
+    # page) can embed auth in the URL. _mint_access_token_cookie (after_request)
+    # then sets a session cookie so the rest of that browser session works
+    # without re-passing the key. Empty token = disabled.
+    if access_token:
+        provided_key = request.args.get("key", "")
+        if provided_key and secrets.compare_digest(provided_key, access_token):
+            return True
+
+    # Check for a valid session token (from password login OR a minted
+    # access-token session) via cookie or Authorization header.
+    if password_auth_enabled or access_token:
         # Check cookie first
         session_token = request.cookies.get("auth_session")
 
@@ -3444,6 +3456,37 @@ def check_ip_whitelist():
         # Invalid client IP format
         print(f"[WARNING] Invalid client IP format: {client_ip}")
         return False
+
+
+@app.after_request
+def _mint_access_token_cookie(response):
+    """Turn a valid ?key=<access_token> request into a browser session.
+
+    A display/OBS source (or any device) can embed ?key=<token> in the URL to
+    get in; this mints an IP-bound auth_session cookie on that response so the
+    page's subsequent requests (assets, socket.io, navigation) authenticate
+    without re-passing the key. Best-effort — never breaks a response."""
+    try:
+        access_token = str(config.get("web_server", {}).get("access_token", "") or "")
+        if not access_token or request.cookies.get("auth_session"):
+            return response
+        provided_key = request.args.get("key", "")
+        if not (provided_key and secrets.compare_digest(provided_key, access_token)):
+            return response
+        timeout_minutes = int(config.get("web_server", {}).get("password_auth", {})
+                              .get("session_timeout_minutes", 60) or 60)
+        token = generate_session_token()
+        with auth_sessions_lock:
+            auth_sessions[token] = {
+                "ip": request.remote_addr,
+                "expires": datetime.now() + timedelta(minutes=timeout_minutes),
+                "created": datetime.now(),
+            }
+        response.set_cookie("auth_session", token, max_age=timeout_minutes * 60,
+                            httponly=True, samesite="Strict")
+    except Exception:
+        pass  # auth-cookie minting must never break a response
+    return response
 
 
 @app.route("/api/auth/login", methods=["POST"])
@@ -6806,6 +6849,15 @@ def update_server():
 
     except Exception as e:
         return jsonify({"success": False, "error": str(e)}), 500
+
+
+@app.route("/api/server/access-token", methods=["POST"])
+def generate_access_token():
+    """Return a fresh random URL access token for the settings UI to save into
+    web_server.access_token. Does not persist it — the normal settings save does."""
+    if not check_ip_whitelist():
+        return jsonify({"success": False, "error": "Access Denied"}), 403
+    return jsonify({"success": True, "token": secrets.token_urlsafe(24)})
 
 
 @app.route("/api/disk-space", methods=["GET"])
