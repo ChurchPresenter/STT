@@ -57,6 +57,17 @@
             border: 2px solid var(--border);
             border-radius: var(--radius-sm);
             cursor: pointer;
+            padding: 2px;  /* trim the browser's default internal swatch padding */
+        }
+        /* Remove the native swatch's own padding/border so the colour fills the box */
+        .color-input-group input[type="color"]::-webkit-color-swatch-wrapper { padding: 0; }
+        .color-input-group input[type="color"]::-webkit-color-swatch {
+            border: none;
+            border-radius: calc(var(--radius-sm) - 2px);
+        }
+        .color-input-group input[type="color"]::-moz-color-swatch {
+            border: none;
+            border-radius: calc(var(--radius-sm) - 2px);
         }
 
         .color-input-group input[type="text"] {
