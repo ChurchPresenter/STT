@@ -739,7 +739,12 @@ def load_translation_model(use_gpu=True, model_id=None):
 
 # Glossary application and the TranslationCache live in stt/translation_utils.py
 # (importable, unit-tested); the wrapper below resolves config/session state.
-from stt.translation_utils import TranslationCache, apply_glossary as _apply_glossary_dict
+from stt.translation_utils import (
+    TranslationCache,
+    TextTranslationCache,
+    apply_glossary as _apply_glossary_dict,
+    should_use_fp16 as _should_use_fp16,
+)
 
 
 def _apply_glossary(text, source_lang, target_lang):
@@ -1097,6 +1102,7 @@ def get_live_translation_model(use_gpu=True, model_id=None):
             _live_translation_model_id = None
             gc.collect()
             _empty_device_cache()
+            get_server_text_cache().clear()  # results were from the old model
 
         if _live_translation_model is None:
             _live_translation_model_loading = True
@@ -1137,6 +1143,9 @@ def unload_live_translation_model():
             _live_translation_device = None
             gc.collect()
             _empty_device_cache()
+            # Drop server-side text cache: it may hold results from the model
+            # we're unloading (a reload could change model/precision/output).
+            get_server_text_cache().clear()
             print("[LIVE-TRANSLATION] Live translation model unloaded")
 
 
@@ -1378,10 +1387,22 @@ def synthesize_tts(text, language="en"):
 # Global translation cache instance
 _translation_cache = TranslationCache()
 
+# Server-side cache for offloaded /api/translate requests: keyed by
+# (text, langs, num_beams) so repeated phrases skip model.generate. Distinct
+# from _translation_cache (segment-id keyed). Sized from config on first use.
+_server_text_cache = TextTranslationCache(
+    max_size=int((config.get("live_translation", {}).get("remote", {}) or {}).get("server_cache_size", 512) or 512)
+)
+
 
 def get_translation_cache():
     """Get the global translation cache"""
     return _translation_cache
+
+
+def get_server_text_cache():
+    """Get the server-side text translation cache (for offloaded requests)."""
+    return _server_text_cache
 
 
 # ====================================================================================
@@ -5606,6 +5627,23 @@ def translate_remote():
     # Use generation_params from request (Machine A's settings) if provided
     generation_params = data.get("generation_params")
 
+    # Server-side text cache: on the simple offload path (no extras) skip the
+    # model for repeated identical requests. Only the hot path is cached —
+    # extras/alternatives requests carry confidence data we don't want to stale.
+    _cache_on = (not return_extras and num_alternatives == 0
+                 and (cfg.get("remote", {}) or {}).get("server_cache_enabled", True))
+    _num_beams = 2
+    if _cache_on:
+        try:
+            _gp = generation_params or cfg.get("generation_params", {}) or {}
+            _num_beams = int(_gp.get("num_beams", 2))
+            _hit = get_server_text_cache().get(text, source_lang, target_lang, _num_beams)
+            if _hit is not None:
+                return jsonify({"translated_text": _hit.get("text", text),
+                                "confidence": None, "alternatives": []})
+        except Exception:
+            pass  # cache must never break translation
+
     # local_only: we are the translation SERVER for this request — translate
     # locally and never re-offload, even if this machine is itself configured to
     # offload elsewhere (prevents chaining loops).
@@ -5621,8 +5659,14 @@ def translate_remote():
             "confidence": result.get("confidence"),
             "alternatives": result.get("alternatives", []),
         })
-    return jsonify({"translated_text": result if isinstance(result, str) else text,
-                    "confidence": None, "alternatives": []})
+
+    translated = result if isinstance(result, str) else text
+    if _cache_on and isinstance(result, str):
+        try:
+            get_server_text_cache().set(text, source_lang, target_lang, _num_beams, {"text": translated})
+        except Exception:
+            pass
+    return jsonify({"translated_text": translated, "confidence": None, "alternatives": []})
 
 
 @app.route("/api/translate/unload", methods=["POST"])

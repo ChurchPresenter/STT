@@ -8,7 +8,8 @@ handles config/session-override/file resolution.
 
 import re
 import threading
-from typing import Any, Dict, Optional
+from collections import OrderedDict
+from typing import Any, Dict, Optional, Tuple
 
 
 def apply_glossary(text: str, source_lang: str, target_lang: str, dictionary: Optional[dict]) -> str:
@@ -123,3 +124,60 @@ class TranslationCache:
         """Highest integer segment id currently cached, or 0 if none"""
         with self._lock:
             return max((sid for sid in self._cache if isinstance(sid, int)), default=0)
+
+
+class TextTranslationCache:
+    """Bounded, thread-safe LRU keyed by (text, source_lang, target_lang, num_beams).
+
+    Distinct from TranslationCache (which is keyed by segment_id): this cache
+    short-circuits repeated *identical* offloaded /api/translate requests on the
+    server that hosts the model, so recurring phrases (liturgy, refrains) skip
+    model.generate entirely. Stores the full result dict so both callers get a
+    consistent shape.
+    """
+
+    def __init__(self, max_size: int = 512) -> None:
+        self._cache: "OrderedDict[Tuple[str, str, str, int], dict]" = OrderedDict()
+        self._max_size = max(1, max_size)
+        self._lock = threading.Lock()
+
+    def _make_key(self, text: str, source_lang: str, target_lang: str, num_beams: int) -> Tuple[str, str, str, int]:
+        return (text.strip(), source_lang, target_lang, int(num_beams))
+
+    def get(self, text: str, source_lang: str, target_lang: str, num_beams: int) -> Optional[dict]:
+        """Return the cached result dict (marking it most-recently-used), or None."""
+        key = self._make_key(text, source_lang, target_lang, num_beams)
+        with self._lock:
+            entry = self._cache.get(key)
+            if entry is None:
+                return None
+            self._cache.move_to_end(key)  # mark as most-recently-used
+            return dict(entry)
+
+    def set(self, text: str, source_lang: str, target_lang: str, num_beams: int, result: dict) -> None:
+        """Store a result dict, evicting the least-recently-used entry when full."""
+        key = self._make_key(text, source_lang, target_lang, num_beams)
+        with self._lock:
+            self._cache[key] = dict(result)
+            self._cache.move_to_end(key)
+            while len(self._cache) > self._max_size:
+                self._cache.popitem(last=False)  # drop least-recently-used
+
+    def clear(self) -> None:
+        """Drop all cached translations."""
+        with self._lock:
+            self._cache.clear()
+
+    def get_size(self) -> int:
+        """Current number of cached entries."""
+        with self._lock:
+            return len(self._cache)
+
+
+def should_use_fp16(use_fp16: bool, device: str) -> bool:
+    """Whether to load the NLLB model in half precision.
+
+    Only on GPU accelerators (CUDA/MPS); fp16 on CPU is slow/unsupported for
+    many ops, so it is never applied there regardless of the flag.
+    """
+    return bool(use_fp16) and device in ("cuda", "mps")

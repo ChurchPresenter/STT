@@ -1,6 +1,13 @@
 """Glossary post-processing and the live translation cache (stt/translation_utils.py)."""
 
-from stt.translation_utils import TranslationCache, apply_glossary
+import threading
+
+from stt.translation_utils import (
+    TextTranslationCache,
+    TranslationCache,
+    apply_glossary,
+    should_use_fp16,
+)
 
 
 def glossary(mapping, key="en_to_es"):
@@ -107,3 +114,93 @@ class TestTranslationCache:
         c.set("live", "b", "y", "es")
         c.set(7, "c", "z", "es")
         assert c.max_segment_id() == 7
+
+
+class TestTextTranslationCache:
+    RESULT = {"text": "hola", "confidence": None, "alternatives": []}
+
+    def test_miss_returns_none(self):
+        c = TextTranslationCache()
+        assert c.get("hello", "en", "es", 2) is None
+
+    def test_set_then_get_roundtrip(self):
+        c = TextTranslationCache()
+        c.set("hello", "en", "es", 2, self.RESULT)
+        assert c.get("hello", "en", "es", 2) == self.RESULT
+
+    def test_get_returns_a_copy_not_the_stored_dict(self):
+        c = TextTranslationCache()
+        c.set("hello", "en", "es", 2, self.RESULT)
+        got = c.get("hello", "en", "es", 2)
+        got["text"] = "mutated"
+        assert c.get("hello", "en", "es", 2)["text"] == "hola"  # store untouched
+
+    def test_text_is_stripped_for_keying(self):
+        c = TextTranslationCache()
+        c.set("hello", "en", "es", 2, self.RESULT)
+        assert c.get("  hello  ", "en", "es", 2) == self.RESULT
+
+    def test_key_sensitivity(self):
+        c = TextTranslationCache()
+        c.set("hello", "en", "es", 2, self.RESULT)
+        assert c.get("hello", "en", "es", 2) is not None  # exact hit
+        assert c.get("goodbye", "en", "es", 2) is None     # different text
+        assert c.get("hello", "de", "es", 2) is None       # different source
+        assert c.get("hello", "en", "fr", 2) is None       # different target
+        assert c.get("hello", "en", "es", 5) is None       # different num_beams
+
+    def test_lru_eviction_bounds_size_and_drops_oldest(self):
+        c = TextTranslationCache(max_size=3)
+        for i in range(5):
+            c.set(f"t{i}", "en", "es", 2, {"text": f"x{i}"})
+        assert c.get_size() == 3
+        assert c.get("t0", "en", "es", 2) is None  # evicted
+        assert c.get("t1", "en", "es", 2) is None  # evicted
+        assert c.get("t4", "en", "es", 2) == {"text": "x4"}  # newest kept
+
+    def test_get_marks_recency_protecting_from_eviction(self):
+        c = TextTranslationCache(max_size=2)
+        c.set("a", "en", "es", 2, {"text": "A"})
+        c.set("b", "en", "es", 2, {"text": "B"})
+        assert c.get("a", "en", "es", 2) == {"text": "A"}  # 'a' now most-recent
+        c.set("c", "en", "es", 2, {"text": "C"})           # evicts LRU = 'b'
+        assert c.get("a", "en", "es", 2) == {"text": "A"}  # survived
+        assert c.get("b", "en", "es", 2) is None           # evicted
+        assert c.get("c", "en", "es", 2) == {"text": "C"}
+
+    def test_clear_and_size(self):
+        c = TextTranslationCache()
+        c.set("a", "en", "es", 2, self.RESULT)
+        assert c.get_size() == 1
+        c.clear()
+        assert c.get_size() == 0
+        assert c.get("a", "en", "es", 2) is None
+
+    def test_concurrent_access_stays_bounded_and_safe(self):
+        c = TextTranslationCache(max_size=50)
+
+        def worker(base):
+            for i in range(200):
+                c.set(f"k{base}-{i}", "en", "es", 2, {"text": str(i)})
+                c.get(f"k{base}-{i}", "en", "es", 2)
+
+        threads = [threading.Thread(target=worker, args=(b,)) for b in range(8)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        assert c.get_size() <= 50
+
+
+class TestShouldUseFp16:
+    def test_enabled_on_gpu_devices(self):
+        assert should_use_fp16(True, "cuda") is True
+        assert should_use_fp16(True, "mps") is True
+
+    def test_never_on_cpu(self):
+        assert should_use_fp16(True, "cpu") is False
+
+    def test_disabled_flag_is_false_everywhere(self):
+        assert should_use_fp16(False, "cuda") is False
+        assert should_use_fp16(False, "mps") is False
+        assert should_use_fp16(False, "cpu") is False
