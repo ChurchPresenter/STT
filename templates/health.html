@@ -346,6 +346,37 @@
         }
     }
 
+    // Render the VRAM tile + GPU-utilisation value for a machine, handling
+    // CUDA (used/total meter + util%), Apple MPS (unified memory, allocated
+    // bytes only, no util), and no-GPU. `p` is the id prefix ("m" or "mb").
+    function renderGpu(p, vramCardId, s) {
+        const kind = s.gpu_kind;
+        const vram = $(p + "-vram"), bar = $(p + "-vram-bar"), sub = $(p + "-vram-sub"), gpu = $(p + "-gpu");
+        const noVram = (s.vram_used_bytes === null || s.vram_used_bytes === undefined);
+        if (kind === "mps") {
+            vram.innerHTML = noVram || !s.vram_used_bytes ? "MPS"
+                : fmtBytes(s.vram_used_bytes).replace(" ", " <small>") + "</small>";
+            bar.style.width = "0%";                       // unified memory: no separate total
+            sub.textContent = "Apple Metal · unified";
+            if (gpu) gpu.textContent = "MPS";
+        } else if (!kind && !s.has_cuda && noVram) {
+            vram.textContent = "no GPU";
+            bar.style.width = "0%";
+            sub.textContent = "";
+            if (gpu) gpu.textContent = "no GPU";
+        } else {
+            vram.innerHTML = noVram ? "n/a"
+                : fmtBytes(s.vram_used_bytes).replace(" ", " <small>") + "</small>";
+            if (!noVram && s.vram_total_bytes) {
+                bar.style.width = (100 * s.vram_used_bytes / s.vram_total_bytes) + "%";
+                sub.textContent = "of " + fmtBytes(s.vram_total_bytes);
+            } else { bar.style.width = "0%"; sub.textContent = ""; }
+            if (gpu) gpu.innerHTML = (s.gpu_util_pct === null || s.gpu_util_pct === undefined)
+                ? "n/a" : num(s.gpu_util_pct, 0) + " <small>%</small>";
+        }
+        setStatus(vramCardId, s.vram_status);
+    }
+
     function render(h) {
         // Server
         $("b-uptime").textContent = "up " + (h.server.uptime_display || "—");
@@ -437,21 +468,7 @@
         } else { $("m-ram-bar").style.width = "0%"; $("m-ram-sub").textContent = ""; }
         setStatus("c-ram", s.ram_status);
 
-        if (!s.has_cuda && s.vram_used_bytes === null) {
-            $("m-vram").textContent = "no GPU";
-            $("m-vram-bar").style.width = "0%";
-            $("m-vram-sub").textContent = "";
-        } else {
-            $("m-vram").innerHTML = s.vram_used_bytes === null ? "n/a"
-                : fmtBytes(s.vram_used_bytes).replace(" ", " <small>") + "</small>";
-            if (s.vram_used_bytes !== null && s.vram_total_bytes) {
-                $("m-vram-bar").style.width = (100 * s.vram_used_bytes / s.vram_total_bytes) + "%";
-                $("m-vram-sub").textContent = "of " + fmtBytes(s.vram_total_bytes);
-            } else { $("m-vram-bar").style.width = "0%"; }
-        }
-        setStatus("c-vram", s.vram_status);
-
-        $("m-gpu").innerHTML = s.gpu_util_pct === null ? "n/a" : num(s.gpu_util_pct, 0) + " <small>%</small>";
+        renderGpu("m", "c-vram", s);
         // Disk: percent used headline, GB free/total underneath, colour by usage.
         $("m-disk").innerHTML = s.disk_percent === null || s.disk_percent === undefined
             ? fmtBytes(s.disk_free_bytes) + " <small>free</small>"
@@ -536,22 +553,7 @@
         } else { $("mb-ram-bar").style.width = "0%"; $("mb-ram-sub").textContent = ""; }
         setStatus("mb-c-ram", s.ram_status);
 
-        if (!s.has_cuda && (s.vram_used_bytes === null || s.vram_used_bytes === undefined)) {
-            $("mb-vram").textContent = "no GPU";
-            $("mb-vram-bar").style.width = "0%";
-            $("mb-vram-sub").textContent = "";
-        } else {
-            $("mb-vram").innerHTML = s.vram_used_bytes === null || s.vram_used_bytes === undefined
-                ? "n/a" : fmtBytes(s.vram_used_bytes).replace(" ", " <small>") + "</small>";
-            if (s.vram_used_bytes && s.vram_total_bytes) {
-                $("mb-vram-bar").style.width = (100 * s.vram_used_bytes / s.vram_total_bytes) + "%";
-                $("mb-vram-sub").textContent = "of " + fmtBytes(s.vram_total_bytes);
-            } else { $("mb-vram-bar").style.width = "0%"; }
-        }
-        setStatus("mb-c-vram", s.vram_status);
-
-        $("mb-gpu").innerHTML = s.gpu_util_pct === null || s.gpu_util_pct === undefined
-            ? "n/a" : num(s.gpu_util_pct, 0) + " <small>%</small>";
+        renderGpu("mb", "mb-c-vram", s);
 
         const tr = h.translation || {};
         $("mb-trans").textContent = !tr.enabled ? "disabled"

@@ -125,6 +125,7 @@ def test_sample_system_resources_all_none_when_deps_absent(monkeypatch):
         "ram_total_bytes": None,
         "gpu_util_pct": None,
         "vram_used_bytes": None,
+        "gpu_kind": None,
     }
 
 
@@ -134,8 +135,37 @@ def test_sample_system_resources_never_raises():
     result = sample_system_resources()
     assert set(result) == {
         "cpu_pct", "ram_used_bytes", "ram_total_bytes",
-        "gpu_util_pct", "vram_used_bytes",
+        "gpu_util_pct", "vram_used_bytes", "gpu_kind",
     }
+
+
+def test_sample_system_resources_detects_mps(monkeypatch):
+    # Fake an Apple-Silicon torch: no CUDA, MPS available with allocated memory.
+    import builtins
+    import types
+
+    fake_torch = types.SimpleNamespace()
+    fake_torch.cuda = types.SimpleNamespace(is_available=lambda: False)
+    fake_torch.backends = types.SimpleNamespace(
+        mps=types.SimpleNamespace(is_available=lambda: True))
+    fake_torch.mps = types.SimpleNamespace(current_allocated_memory=lambda: 2048.0)
+
+    real_import = builtins.__import__
+
+    def fake_import(name, *args, **kwargs):
+        if name == "torch":
+            return fake_torch
+        if name == "psutil":
+            raise ImportError(name)
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+    monkeypatch.setattr(metrics.shutil, "which", lambda _exe: None)
+
+    result = sample_system_resources()
+    assert result["gpu_kind"] == "mps"
+    assert result["vram_used_bytes"] == 2048.0
+    assert result["gpu_util_pct"] is None  # no utilisation counter on MPS
 
 
 def test_sample_system_resources_uses_nvidia_smi_fallback(monkeypatch):

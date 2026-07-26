@@ -5028,7 +5028,9 @@ def get_health():
     new performance and system-resource instrumentation into one payload the
     dashboard polls. Each numeric metric carries a server-computed status so the
     client only paints colours."""
-    if not check_ip_whitelist():
+    # A paired translation peer (Machine A) may read this box's health so it can
+    # show it as "Machine B" — the same trust the /api/translate endpoints use.
+    if not (check_ip_whitelist() or _is_trusted_translation_client(request.remote_addr)):
         return jsonify({"success": False, "error": "Access Denied"}), 403
     try:
         ts = _ts_snapshot()
@@ -5085,6 +5087,7 @@ def get_health():
             "ram_total_bytes": ram_total,
             "ram_status": _metrics.fraction_status(ram_used, ram_total),
             "gpu_util_pct": sysres.get("gpu_util_pct"),
+            "gpu_kind": sysres.get("gpu_kind"),  # "cuda" | "mps" | None
             "has_cuda": hw.get("has_cuda", False),
             "vram_used_bytes": vram_used,
             "vram_total_bytes": vram_total,

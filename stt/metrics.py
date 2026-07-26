@@ -171,7 +171,7 @@ def _nvidia_smi_query() -> Optional[Dict[str, Optional[float]]]:
         return None
 
 
-def sample_system_resources() -> Dict[str, Optional[float]]:
+def sample_system_resources() -> Dict[str, Any]:
     """Live resource utilisation snapshot; every field degrades to ``None``.
 
     - CPU percent and used/total RAM come from ``psutil`` when installed.
@@ -181,12 +181,13 @@ def sample_system_resources() -> Dict[str, Optional[float]]:
     Never raises: a missing dependency or a probe failure yields ``None`` for
     that field so the dashboard shows "n/a" and stays up.
     """
-    result: Dict[str, Optional[float]] = {
+    result: Dict[str, Any] = {
         "cpu_pct": None,
         "ram_used_bytes": None,
         "ram_total_bytes": None,
         "gpu_util_pct": None,
         "vram_used_bytes": None,
+        "gpu_kind": None,  # "cuda" | "mps" | None — which accelerator, if any
     }
 
     try:
@@ -203,10 +204,21 @@ def sample_system_resources() -> Dict[str, Optional[float]]:
         import torch  # type: ignore
 
         if torch.cuda.is_available():
+            result["gpu_kind"] = "cuda"
             result["vram_used_bytes"] = float(torch.cuda.memory_reserved(0))
             try:
                 util = torch.cuda.utilization(0)  # needs pynvml; optional
                 result["gpu_util_pct"] = float(util)
+            except Exception:
+                pass
+        elif getattr(getattr(torch, "backends", None), "mps", None) is not None \
+                and torch.backends.mps.is_available():
+            # Apple Silicon: Metal (MPS). Memory is unified with system RAM so
+            # there's no separate VRAM total and no utilisation counter — we can
+            # only report bytes currently allocated on the MPS device.
+            result["gpu_kind"] = "mps"
+            try:
+                result["vram_used_bytes"] = float(torch.mps.current_allocated_memory())
             except Exception:
                 pass
     except Exception:
