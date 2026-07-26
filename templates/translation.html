@@ -219,6 +219,13 @@
                         </select>
                         <small id="remote_model_note" style="display:block; margin-top:4px; color: var(--text-secondary); font-size: 0.75em;">Chosen from models already downloaded on Machine B.</small>
                     </div>
+                    <div class="checkbox-group" style="margin-bottom: 8px;">
+                        <input type="checkbox" id="remote_sync_dictionary" checked>
+                        <label for="remote_sync_dictionary">Keep Machine B's dictionary in sync</label>
+                    </div>
+                    <small style="color: var(--text-secondary); font-size: 0.75em; margin-left: 22px; display: block; margin-top: -5px; margin-bottom: 10px;">
+                        Push glossary/dictionary edits to Machine B immediately so it doesn't translate with a stale glossary.
+                    </small>
                     <div style="display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 6px;">
                         <button id="request_pairing_btn" onclick="requestPairing()" class="btn-save btn-primary" style="margin: 0; padding: 6px 14px;">Request Pairing</button>
                         <span id="pair_status_text" style="font-size: 0.85em; color: var(--text-secondary);"></span>
@@ -709,6 +716,7 @@
                     document.getElementById('remote_translation_enabled').checked = remoteCfg.enabled || false;
                     document.getElementById('remote_translation_endpoint').value = remoteCfg.endpoint || '';
                     document.getElementById('remote_translation_fallback').value = remoteCfg.fallback || 'skip';
+                    document.getElementById('remote_sync_dictionary').checked = remoteCfg.sync_dictionary_on_edit !== false;
                     // Machine B model — populated from B's downloaded models (async).
                     _pendingRemoteModel = remoteCfg.model || '';
                     loadRemoteModels();
@@ -862,6 +870,7 @@
                     endpoint: document.getElementById('remote_translation_endpoint').value.trim(),
                     fallback: document.getElementById('remote_translation_fallback').value,
                     model: document.getElementById('remote_model').value,
+                    sync_dictionary_on_edit: document.getElementById('remote_sync_dictionary').checked,
                 },
                 translation_count: parseInt(document.getElementById('translation_alternatives').value),
             };

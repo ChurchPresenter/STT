@@ -5427,16 +5427,19 @@ def save_translation_settings():
             "repetition_penalty": max(0.5, min(3.0, float(gp.get("repetition_penalty", 1.0)))),
         }
 
-    # Save remote translation endpoint config
+    # Save remote translation endpoint config (preserve keys the UI doesn't send,
+    # e.g. server_cache_*).
     if "remote" in data:
-        _existing_remote = config.get("live_translation", {}).get("remote", {}) or {}
-        config["live_translation"]["remote"] = {
-            "enabled": bool(data["remote"].get("enabled", False)),
-            "endpoint": str(data["remote"].get("endpoint", "")),
-            "fallback": "local" if data["remote"].get("fallback") == "local" else "skip",
-            # Which model Machine B should run (chosen from B's downloaded models).
-            "model": str(data["remote"].get("model", _existing_remote.get("model", "")) or ""),
-        }
+        _remote = dict(config.get("live_translation", {}).get("remote", {}) or {})
+        _remote["enabled"] = bool(data["remote"].get("enabled", False))
+        _remote["endpoint"] = str(data["remote"].get("endpoint", ""))
+        _remote["fallback"] = "local" if data["remote"].get("fallback") == "local" else "skip"
+        # Which model Machine B should run (chosen from B's downloaded models).
+        _remote["model"] = str(data["remote"].get("model", _remote.get("model", "")) or "")
+        # Whether to push glossary/dictionary edits to B immediately.
+        _remote["sync_dictionary_on_edit"] = bool(
+            data["remote"].get("sync_dictionary_on_edit", _remote.get("sync_dictionary_on_edit", True)))
+        config["live_translation"]["remote"] = _remote
 
     # Save translation alternatives count to corrections config
     if "translation_count" in data:
