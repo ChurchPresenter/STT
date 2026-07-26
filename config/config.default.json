@@ -410,7 +410,9 @@
       "server_cache_size": 512,
       "_server_cache_size_comment": "Max entries in the server-side text translation cache (LRU).",
       "sync_dictionary_on_edit": true,
-      "_sync_dictionary_on_edit_comment": "When offloading, push glossary/dictionary edits to the remote server immediately so it doesn't keep translating with a stale glossary."
+      "_sync_dictionary_on_edit_comment": "When offloading, push glossary/dictionary edits to the remote server immediately so it doesn't keep translating with a stale glossary.",
+      "model": "",
+      "_model_comment": "NLLB model the remote (Machine B) should run, chosen from B's already-downloaded models. Empty = B uses its own configured model. Set from the 'Machine B model' dropdown on this machine's Translations page."
     },
     "trusted_clients": [],
     "_trusted_clients_comment": "IPs allowed to use this machine for remote translation (managed automatically via pairing)",

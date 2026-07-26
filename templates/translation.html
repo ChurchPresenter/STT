@@ -213,6 +213,12 @@
                             <option value="local">Fall back to local translation</option>
                         </select>
                     </div>
+                    <div class="form-group" style="margin-bottom: 8px;">
+                        <label for="remote_model">Machine B translation model</label>
+                        <select id="remote_model" style="width: 100%; box-sizing: border-box; padding: 6px 8px; background: var(--bg-elevated); border: 1px solid var(--border); border-radius: 4px; color: var(--text-primary); font-size: 0.9em;">
+                        </select>
+                        <small id="remote_model_note" style="display:block; margin-top:4px; color: var(--text-secondary); font-size: 0.75em;">Chosen from models already downloaded on Machine B.</small>
+                    </div>
                     <div style="display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 6px;">
                         <button id="request_pairing_btn" onclick="requestPairing()" class="btn-save btn-primary" style="margin: 0; padding: 6px 14px;">Request Pairing</button>
                         <span id="pair_status_text" style="font-size: 0.85em; color: var(--text-secondary);"></span>
@@ -636,6 +642,47 @@
             }
         }
 
+        // Machine B model dropdown: populated from B's DOWNLOADED models (no
+        // remote download is triggered). _pendingRemoteModel holds the saved
+        // value to re-select once the async list arrives.
+        let _pendingRemoteModel = '';
+        async function loadRemoteModels() {
+            const sel = document.getElementById('remote_model');
+            const note = document.getElementById('remote_model_note');
+            if (!sel) return;
+            let models = [];
+            try {
+                const response = await fetch('/api/remote-translation/nllb-list');
+                const data = await response.json();
+                models = (data && data.models) || [];
+            } catch (e) {
+                console.error('Error loading Machine B models:', e);
+            }
+            sel.innerHTML = '';
+            const first = document.createElement('option');
+            first.value = '';
+            first.textContent = "(use Machine B's own model)";
+            sel.appendChild(first);
+            models.forEach(m => {
+                const o = document.createElement('option');
+                o.value = m.model_id;
+                o.textContent = m.name || m.model_id;
+                sel.appendChild(o);
+            });
+            if (note) {
+                if (models.length === 0) {
+                    note.textContent = "No NLLB models downloaded on Machine B — open Machine B's Model Manager to download one, then it'll appear here.";
+                    note.style.color = 'var(--warning)';
+                } else {
+                    note.textContent = 'Chosen from models already downloaded on Machine B.';
+                    note.style.color = 'var(--text-secondary)';
+                }
+            }
+            if (_pendingRemoteModel && [...sel.options].some(o => o.value === _pendingRemoteModel)) {
+                sel.value = _pendingRemoteModel;
+            }
+        }
+
         async function loadSettings() {
             try {
                 const response = await fetch('/api/translation/settings');
@@ -662,6 +709,9 @@
                     document.getElementById('remote_translation_enabled').checked = remoteCfg.enabled || false;
                     document.getElementById('remote_translation_endpoint').value = remoteCfg.endpoint || '';
                     document.getElementById('remote_translation_fallback').value = remoteCfg.fallback || 'skip';
+                    // Machine B model — populated from B's downloaded models (async).
+                    _pendingRemoteModel = remoteCfg.model || '';
+                    loadRemoteModels();
                     toggleRemoteFields();
 
                     // Set translation model (wait for dropdown to be populated)
@@ -811,6 +861,7 @@
                     enabled: document.getElementById('remote_translation_enabled').checked,
                     endpoint: document.getElementById('remote_translation_endpoint').value.trim(),
                     fallback: document.getElementById('remote_translation_fallback').value,
+                    model: document.getElementById('remote_model').value,
                 },
                 translation_count: parseInt(document.getElementById('translation_alternatives').value),
             };
@@ -1086,6 +1137,7 @@
         function toggleRemoteFields() {
             const enabled = document.getElementById('remote_translation_enabled').checked;
             document.getElementById('remote_translation_fields').style.display = enabled ? '' : 'none';
+            if (enabled) loadRemoteModels();  // refresh B's downloaded-model list
         }
 
         document.addEventListener('DOMContentLoaded', () => {
