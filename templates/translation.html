@@ -150,7 +150,7 @@
 
                 <div class="form-group">
                     <label for="source_language">Source Language</label>
-                    <select id="source_language">
+                    <select id="source_language" data-a-controlled>
                         <option value="auto">Auto (use audio language setting)</option>
                         <!-- Additional languages populated dynamically -->
                     </select>
@@ -160,7 +160,7 @@
                 <hr class="divider">
 
                 <div class="checkbox-group">
-                    <input type="checkbox" id="translate_in_progress">
+                    <input type="checkbox" id="translate_in_progress" data-a-controlled>
                     <label for="translate_in_progress">Translate In-Progress Text</label>
                 </div>
                 <small style="color: var(--text-secondary); font-size: 0.75em; margin-left: 22px; display: block; margin-top: -5px; margin-bottom: 10px;">
@@ -315,7 +315,7 @@
 
                 <div class="form-group">
                     <label for="translation_alternatives">Translation Alternatives: <span id="translationAltsValue">3</span></label>
-                    <input type="range" id="translation_alternatives" min="0" max="5" value="3" step="1"
+                    <input type="range" id="translation_alternatives" data-a-controlled min="0" max="5" value="3" step="1"
                            oninput="document.getElementById('translationAltsValue').textContent = this.value"
                            style="width:100%;">
                     <small style="color: var(--text-secondary); font-size: 0.75em;">0 = disabled. Higher = more alternatives but slower translation</small>
