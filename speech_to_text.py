@@ -671,7 +671,20 @@ from stt.nllb_catalog import (  # noqa: F401
 )
 
 
-def load_translation_model(use_gpu=True, model_id=None):
+def _maybe_half_translation_model(model, device, use_fp16):
+    """Convert the model to fp16 on GPU when requested (CUDA/MPS only — see
+    _should_use_fp16). Returns (model, applied). Never raises: on failure it
+    keeps the fp32 model so a bad fp16 path degrades instead of failing the load."""
+    if not _should_use_fp16(use_fp16, device):
+        return model, False
+    try:
+        return model.half(), True
+    except Exception as e:
+        print(f"[LIVE-TRANSLATION] fp16 conversion failed, staying fp32: {e}")
+        return model, False
+
+
+def load_translation_model(use_gpu=True, model_id=None, use_fp16=False):
     """
     Load NLLB-200 translation model
 
@@ -679,6 +692,7 @@ def load_translation_model(use_gpu=True, model_id=None):
         use_gpu: Whether to use GPU acceleration
         model_id: HuggingFace model ID (e.g., "facebook/nllb-200-distilled-600M")
                   If None, defaults to facebook/nllb-200-distilled-600M
+        use_fp16: Load in half precision on GPU (MPS/CUDA only; ignored on CPU)
 
     Returns:
         Tuple of (model, tokenizer)
@@ -717,13 +731,17 @@ def load_translation_model(use_gpu=True, model_id=None):
     if use_gpu and torch.cuda.is_available():
         model = model.to("cuda")
         _live_translation_device = "cuda"
-        print("[INFO] Translation model loaded on GPU (CUDA)")
+        model, _fp16 = _maybe_half_translation_model(model, "cuda", use_fp16)
+        print(f"[INFO] Translation model loaded on GPU (CUDA) (fp16={_fp16})")
     elif use_gpu and hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
         model = model.to("mps")
         _live_translation_device = "mps"
-        print("[INFO] Translation model loaded on GPU (MPS)")
+        model, _fp16 = _maybe_half_translation_model(model, "mps", use_fp16)
+        print(f"[INFO] Translation model loaded on GPU (MPS) (fp16={_fp16})")
     else:
         _live_translation_device = "cpu"
+        if use_fp16:
+            print("[LIVE-TRANSLATION] use_fp16 ignored on CPU")
         print("[INFO] Translation model loaded on CPU")
         if use_gpu:
             # GPU was requested but no accelerator was usable — translations will
@@ -1137,7 +1155,8 @@ def get_live_translation_model(use_gpu=True, model_id=None):
                 print(f"[LIVE-TRANSLATION] Loading live translation model: {model_id or 'default'}...")
                 _live_translation_model, _live_translation_tokenizer = load_translation_model(
                     use_gpu=use_gpu,
-                    model_id=model_id
+                    model_id=model_id,
+                    use_fp16=config.get("live_translation", {}).get("use_fp16", False),
                 )
                 _live_translation_model_loaded = True
                 _live_translation_model_id = model_id
