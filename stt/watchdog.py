@@ -1381,6 +1381,13 @@ class ProcessManager:
                 stderr=self._log_fh,
                 close_fds=not IS_WINDOWS,
                 creationflags=_CREATE_NO_WINDOW,
+                # POSIX: give the worker its own session/process group (setsid) so
+                # stop() can sweep the entire tree — the multiprocessing spawn
+                # workers and their resource_tracker — with one killpg. Without
+                # this a non-graceful kill (e.g. an update mid-transcription)
+                # orphans those children to init, where they linger across
+                # restarts and leak memory. No-op on Windows.
+                start_new_session=not IS_WINDOWS,
             )
             self.state.set(process=proc, status="running", consecutive_crashes=0)
             logging.info(f"[PM] STT started (PID {proc.pid})")
@@ -1400,6 +1407,15 @@ class ProcessManager:
 
         self._no_restart.set()   # tell crash thread this stop is intentional
         logging.info(f"[PM] Stopping STT (PID {proc.pid})...")
+        # Capture the POSIX process-group id while the worker is still alive, so
+        # after teardown we can sweep any multiprocessing children that outlived
+        # the main process (see the killpg at the end of stop()).
+        pgid = None
+        if not IS_WINDOWS:
+            try:
+                pgid = os.getpgid(proc.pid)
+            except (ProcessLookupError, OSError):
+                pgid = None
         # Graceful first: ask over the stdin channel (the only cross-process
         # "signal" Windows has; the worker runs its normal shutdown handler and
         # exits cleanly — no mid-write cuts to the DB/backup files). Escalate
@@ -1442,6 +1458,17 @@ class ProcessManager:
                 )
         except Exception:
             pass
+
+        # POSIX: sweep the worker's whole process group so any surviving
+        # multiprocessing spawn workers + resource_tracker die with it instead
+        # of orphaning to init. Guarded so we never signal the watchdog's own
+        # group (would only happen if start_new_session didn't take effect).
+        if pgid is not None:
+            try:
+                if pgid != os.getpgid(0):
+                    os.killpg(pgid, signal.SIGKILL)
+            except (ProcessLookupError, OSError):
+                pass
 
         self.state.set(process=None, status="stopped")
         logging.info("[PM] STT stopped")
