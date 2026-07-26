@@ -1,9 +1,25 @@
 <!DOCTYPE html>
-<html lang="en" style="color-scheme: dark">
+<html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>{% block title %}Speech to Text{% endblock %}</title>
+    <!-- Resolve theme before first paint: stored override wins, else follow the OS. -->
+    <script>
+        (function () {
+            try {
+                var t = localStorage.getItem('stt-theme') ||
+                    (window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark');
+                var r = document.documentElement;
+                r.setAttribute('data-theme', t);
+                r.style.colorScheme = t;
+                document.addEventListener('DOMContentLoaded', function () {
+                    var m = document.querySelector('meta[name="theme-color"]');
+                    if (m) m.setAttribute('content', t === 'light' ? '#EAECEF' : '#050506');
+                });
+            } catch (e) { /* no storage / no matchMedia — CSS defaults to dark */ }
+        })();
+    </script>
     <meta name="theme-color" content="#050506">
     <link rel="icon" type="image/svg+xml" href="{{ url_for('static', filename='favicon.svg') }}">
     <link rel="stylesheet" href="{{ url_for('static', filename='fonts/inter.css') }}">
@@ -41,7 +57,15 @@
             /* Borders & surfaces */
             --border: rgba(255, 255, 255, 0.08);
             --border-hover: rgba(255, 255, 255, 0.15);
+            --border-subtle: rgba(255, 255, 255, 0.06);
+            --overlay-hover: rgba(255, 255, 255, 0.06);
+            --overlay-active: rgba(255, 255, 255, 0.13);
             --glass-blur: 12px;
+
+            /* Chrome surfaces that were hardcoded — tokenized so they can theme */
+            --bg-header: rgba(10, 10, 12, 0.8);
+            --bg-float: #0e0e11;
+            --bg-select: #1a1a2e;
 
             /* Radius */
             --radius-sm: 8px;
@@ -58,6 +82,61 @@
             --fs-base: 0.875rem;   /* 14px — body, card text */
             --fs-md:  0.9375rem;   /* 15px — panel/card headings */
             --fs-lg:  1.125rem;    /* 18px — page title */
+        }
+
+        /* Light theme — cool, technical (not warm cream). Page is light grey,
+           panels/cards white; white-overlay tokens become dark-overlays; status
+           colours darken for contrast on white. Accent hue is unchanged. */
+        :root[data-theme="light"] {
+            --bg-deep: #EAECEF;
+            --bg-base: #F4F5F7;
+            --bg-elevated: #FFFFFF;
+            --bg-card: #FFFFFF;
+            --bg-input: #FFFFFF;
+
+            --text-primary: #16181D;
+            --text-secondary: #565C66;
+            --text-muted: #868D98;
+
+            --accent: #2979FF;
+            --accent-hover: #1E5FD0;
+            --accent-glow: rgba(41, 121, 255, 0.25);
+            --accent-subtle: rgba(41, 121, 255, 0.08);
+
+            --success: #15A34A;
+            --success-bg: rgba(34, 197, 94, 0.14);
+            --warning: #B45309;
+            --warning-bg: rgba(245, 158, 11, 0.16);
+            --danger: #DC2626;
+            --danger-bg: rgba(239, 68, 68, 0.12);
+            --info: #2563EB;
+            --info-bg: rgba(59, 130, 246, 0.12);
+
+            --border: rgba(0, 0, 0, 0.12);
+            --border-hover: rgba(0, 0, 0, 0.22);
+            --border-subtle: rgba(0, 0, 0, 0.08);
+            --overlay-hover: rgba(0, 0, 0, 0.05);
+            --overlay-active: rgba(0, 0, 0, 0.10);
+
+            --bg-header: rgba(244, 245, 247, 0.85);
+            --bg-float: #FFFFFF;
+            --bg-select: #FFFFFF;
+        }
+
+        /* No-JS fallback: honour the OS preference when no explicit choice is set.
+           The head script normally stamps data-theme before paint. */
+        @media (prefers-color-scheme: light) {
+            :root:not([data-theme="dark"]) {
+                --bg-deep: #EAECEF; --bg-base: #F4F5F7; --bg-elevated: #FFFFFF;
+                --bg-card: #FFFFFF; --bg-input: #FFFFFF;
+                --text-primary: #16181D; --text-secondary: #565C66; --text-muted: #868D98;
+                --accent-hover: #1E5FD0; --accent-subtle: rgba(41, 121, 255, 0.08);
+                --success: #15A34A; --warning: #B45309; --danger: #DC2626; --info: #2563EB;
+                --border: rgba(0, 0, 0, 0.12); --border-hover: rgba(0, 0, 0, 0.22);
+                --border-subtle: rgba(0, 0, 0, 0.08); --overlay-hover: rgba(0, 0, 0, 0.05);
+                --overlay-active: rgba(0, 0, 0, 0.10);
+                --bg-header: rgba(244, 245, 247, 0.85); --bg-float: #FFFFFF; --bg-select: #FFFFFF;
+            }
         }
 
         * {
@@ -103,7 +182,7 @@
             max-width: {% block max_width %}1300px{% endblock %};
             margin: 0 auto;
             background: var(--bg-base);
-            border: 1px solid rgba(255, 255, 255, 0.06);
+            border: 1px solid var(--border-subtle);
             border-radius: var(--radius-lg);
             box-shadow: 0 24px 80px rgba(0, 0, 0, 0.6);
             overflow: hidden;
@@ -111,7 +190,7 @@
 
         /* Header & Navigation — glassmorphic */
         .header {
-            background: rgba(10, 10, 12, 0.8);
+            background: var(--bg-header);
             backdrop-filter: blur(var(--glass-blur));
             -webkit-backdrop-filter: blur(var(--glass-blur));
             color: var(--text-primary);
@@ -119,7 +198,7 @@
             display: flex;
             justify-content: space-between;
             align-items: center;
-            border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+            border-bottom: 1px solid var(--border-subtle);
         }
 
         .header h1 {
@@ -179,6 +258,35 @@
             flex-shrink: 0;
         }
 
+        /* Theme toggle — ghost icon button, sun in dark / moon in light */
+        .theme-toggle {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            width: 32px;
+            height: 32px;
+            margin-left: 4px;
+            padding: 0;
+            background: transparent;
+            border: 1px solid var(--border);
+            border-radius: var(--radius-sm);
+            color: var(--text-secondary);
+            cursor: pointer;
+            transition: color 0.2s var(--ease-out), background-color 0.2s var(--ease-out), border-color 0.2s var(--ease-out);
+        }
+        .theme-toggle:hover {
+            color: var(--text-primary);
+            background: var(--overlay-hover);
+            border-color: var(--border-hover);
+        }
+        .theme-toggle:focus-visible {
+            outline: 2px solid var(--accent);
+            outline-offset: 2px;
+        }
+        .theme-toggle svg { width: 16px; height: 16px; }
+        :root[data-theme="dark"] .theme-toggle .icon-moon { display: none; }
+        :root[data-theme="light"] .theme-toggle .icon-sun { display: none; }
+
         /* Content Area */
         .content {
             padding: 16px;
@@ -193,7 +301,7 @@
         }
 
         .settings-panel {
-            background: rgba(255, 255, 255, 0.03);
+            background: var(--overlay-hover);
             border: 1px solid var(--border);
             padding: 18px;
             border-radius: var(--radius-md);
@@ -302,15 +410,14 @@
 
         select,
         .form-group select {
-            color-scheme: dark;
-            background: #1a1a2e !important;
-            color: #EDEDEF !important;
+            background: var(--bg-select) !important;
+            color: var(--text-primary) !important;
         }
 
         select option,
         .form-group select option {
-            background: #1a1a2e !important;
-            color: #EDEDEF !important;
+            background: var(--bg-select) !important;
+            color: var(--text-primary) !important;
         }
 
         .form-group input:focus-visible,
@@ -395,12 +502,12 @@
         }
 
         .btn-secondary {
-            background: rgba(255, 255, 255, 0.08);
+            background: var(--overlay-hover);
             color: var(--text-primary);
         }
 
         .btn-secondary:hover {
-            background: rgba(255, 255, 255, 0.13);
+            background: var(--overlay-active);
             transform: translateY(-1px);
         }
 
@@ -501,7 +608,7 @@
             display: flex;
             align-items: center;
             gap: 14px;
-            background: #0e0e11;                 /* opaque: floats over content, no blur */
+            background: var(--bg-float);          /* opaque: floats over content, no blur */
             border: 1px solid var(--border-hover);
             border-radius: var(--radius-md);
             padding: 9px 10px 9px 18px;
@@ -634,7 +741,7 @@
         }
 
         .status-indicator.disabled {
-            background: rgba(255, 255, 255, 0.04);
+            background: var(--overlay-hover);
             color: var(--text-muted);
             border-color: var(--border);
         }
@@ -696,7 +803,7 @@
             width: 100%;
             height: 4px;
             border-radius: 2px;
-            background: rgba(255, 255, 255, 0.1);
+            background: var(--overlay-active);
             outline: none;
             -webkit-appearance: none;
             cursor: pointer;
@@ -741,11 +848,11 @@
             background: transparent;
         }
         ::-webkit-scrollbar-thumb {
-            background: rgba(255, 255, 255, 0.08);
+            background: var(--overlay-active);
             border-radius: 3px;
         }
         ::-webkit-scrollbar-thumb:hover {
-            background: rgba(255, 255, 255, 0.16);
+            background: var(--border-hover);
         }
 
         /* Responsive */
@@ -824,6 +931,10 @@
                 <a href="/model-manager" {% if request.path == '/model-manager' %}class="active"{% endif %}><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="4" width="16" height="16" rx="2" ry="2"/><rect x="9" y="9" width="6" height="6"/><line x1="9" y1="1" x2="9" y2="4"/><line x1="15" y1="1" x2="15" y2="4"/><line x1="9" y1="20" x2="9" y2="23"/><line x1="15" y1="20" x2="15" y2="23"/><line x1="20" y1="9" x2="23" y2="9"/><line x1="20" y1="14" x2="23" y2="14"/><line x1="1" y1="9" x2="4" y2="9"/><line x1="1" y1="14" x2="4" y2="14"/></svg> Models</a>
                 <a href="/file-manager" {% if request.path == '/file-manager' %}class="active"{% endif %}><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg> File Manager</a>
                 <a href="/corrections" {% if request.path == '/corrections' %}class="active"{% endif %}><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg> Corrections</a>
+                <button type="button" class="theme-toggle" onclick="toggleTheme()" aria-label="Toggle light/dark theme" title="Toggle light/dark theme">
+                    <svg class="icon-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg>
+                    <svg class="icon-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
+                </button>
             </nav>
         </div>
 
@@ -835,6 +946,19 @@
     </div>
 
     <script>
+        // Flip light/dark, persist the choice, and keep the browser chrome
+        // (theme-color) in sync. The pre-paint head script applies the stored
+        // value on every load.
+        function toggleTheme() {
+            var r = document.documentElement;
+            var t = r.getAttribute('data-theme') === 'light' ? 'dark' : 'light';
+            r.setAttribute('data-theme', t);
+            r.style.colorScheme = t;
+            try { localStorage.setItem('stt-theme', t); } catch (e) { /* private mode */ }
+            var m = document.querySelector('meta[name="theme-color"]');
+            if (m) m.setAttribute('content', t === 'light' ? '#EAECEF' : '#050506');
+        }
+
         // Reveal the header banner when the machine falls short of what the
         // configured models need. Server messages are complete sentences;
         // settings pages call refreshSysreqBanner() after saving config.
