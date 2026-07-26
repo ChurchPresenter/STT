@@ -194,9 +194,10 @@ class RequestLog:
     def stats(self, window_seconds: float, *, now: Optional[float] = None) -> Dict[str, Any]:
         """Aggregate request health over the last ``window_seconds``.
 
-        Returns request count, per-minute rate, error count/rate (HTTP status
-        >= 400), and p50/p95 response-latency in milliseconds — everything the
-        health dashboard needs from the access log in one query. ``now`` is
+        Returns request count, per-minute rate, error counts/rates split into
+        server (5xx) and client (4xx) — plus a combined total (>= 400) — and
+        p50/p95 response-latency in milliseconds: everything the health
+        dashboard needs from the access log in one query. ``now`` is
         injectable for deterministic tests. Rows with a NULL ``duration_ms``
         (e.g. socket connections) are excluded from the latency percentiles but
         still counted as requests.
@@ -213,6 +214,10 @@ class RequestLog:
                 "SELECT COUNT(*) FROM access_log WHERE ts >= ? AND status >= 400",
                 (cutoff,),
             ).fetchone()[0])
+            server_errors = int(self._conn.execute(
+                "SELECT COUNT(*) FROM access_log WHERE ts >= ? AND status >= 500",
+                (cutoff,),
+            ).fetchone()[0])
             durations = [
                 row[0] for row in self._conn.execute(
                     "SELECT duration_ms FROM access_log "
@@ -223,12 +228,21 @@ class RequestLog:
             ]
 
         minutes = window_seconds / 60.0 if window_seconds > 0 else 0.0
+        client_errors = errors - server_errors
         return {
             "window_seconds": int(window_seconds),
             "requests": total,
             "req_per_min": round(total / minutes, 1) if minutes > 0 else 0.0,
+            # error_count / error_rate = all >= 400 (kept for callers that want
+            # the total). Health status keys off server_* (5xx) only: a 4xx is a
+            # client/auth problem (e.g. a non-whitelisted viewer polling), not a
+            # server fault, and must not make the server look unhealthy.
             "error_count": errors,
             "error_rate": round(errors / total, 3) if total else 0.0,
+            "server_error_count": server_errors,
+            "server_error_rate": round(server_errors / total, 3) if total else 0.0,
+            "client_error_count": client_errors,
+            "client_error_rate": round(client_errors / total, 3) if total else 0.0,
             "p50_ms": _percentile(durations, 0.50),
             "p95_ms": _percentile(durations, 0.95),
         }

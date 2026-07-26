@@ -143,6 +143,10 @@ def test_stats_empty_window_is_zeros(log):
     assert s["requests"] == 0
     assert s["error_count"] == 0
     assert s["error_rate"] == 0.0
+    assert s["server_error_count"] == 0
+    assert s["server_error_rate"] == 0.0
+    assert s["client_error_count"] == 0
+    assert s["client_error_rate"] == 0.0
     assert s["req_per_min"] == 0.0
     assert s["p50_ms"] is None
     assert s["p95_ms"] is None
@@ -164,11 +168,32 @@ def test_stats_counts_rate_and_errors(log):
     assert s["requests"] == 6
     assert s["error_count"] == 2
     assert s["error_rate"] == round(2 / 6, 3)
+    # split: the 500 is a server error, the 404 a client error
+    assert s["server_error_count"] == 1
+    assert s["server_error_rate"] == round(1 / 6, 3)
+    assert s["client_error_count"] == 1
+    assert s["client_error_rate"] == round(1 / 6, 3)
     assert s["req_per_min"] == 6.0  # 6 requests over a 60s window
     # durations 10..60 sorted; nearest-rank p50 -> index round(0.5*5)=2 -> 30
     assert s["p50_ms"] == 30.0
     # p95 -> index round(0.95*5)=5 -> 60
     assert s["p95_ms"] == 60.0
+
+
+def test_stats_4xx_only_is_no_server_error(log):
+    # A window full of 4xx (e.g. a non-whitelisted viewer polling a gated
+    # endpoint) must report zero server errors, so the health tile stays green.
+    now = 20_000.0
+    _seed(log, ts=now - 3, status=200, duration_ms=10)
+    _seed(log, ts=now - 2, status=403, duration_ms=20)
+    _seed(log, ts=now - 1, status=403, duration_ms=30)
+    _seed(log, ts=now - 1, status=404, duration_ms=40)
+
+    s = log.stats(60, now=now)
+    assert s["error_count"] == 3            # total >= 400
+    assert s["server_error_count"] == 0     # no 5xx
+    assert s["server_error_rate"] == 0.0
+    assert s["client_error_count"] == 3     # all 4xx
 
 
 def test_stats_ignores_null_durations_in_percentiles(log):

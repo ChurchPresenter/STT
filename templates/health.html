@@ -432,8 +432,12 @@
         } else {
             $("m-reqrate").textContent = num(r.req_per_min, 1);
             $("m-reqtotal").textContent = r.requests + " in last 5 min";
-            $("m-errrate").innerHTML = (100 * (r.error_rate || 0)).toFixed(1) + " <small>%</small>";
-            $("m-errsub").textContent = (r.error_count || 0) + " errors";
+            // Headline is the server-fault (5xx) rate — the number that drives
+            // the tile colour. 4xx (auth/not-found) are shown in the sub-line as
+            // client errors so the noise is visible but doesn't read as a fault.
+            $("m-errrate").innerHTML = (100 * (r.server_error_rate || 0)).toFixed(1) + " <small>%</small>";
+            const _sc = r.server_error_count || 0, _cc = r.client_error_count || 0;
+            $("m-errsub").textContent = _sc + " server (5xx) · " + _cc + " client (4xx)";
             setStatus("c-err", r.error_status);
             $("m-p50").innerHTML = r.p50_ms === null ? "—" : num(r.p50_ms, 0) + " <small>ms</small>";
             $("m-p95").innerHTML = r.p95_ms === null ? "—" : num(r.p95_ms, 0) + " <small>ms</small>";

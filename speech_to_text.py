@@ -5141,10 +5141,13 @@ def get_health():
         if _access_log_enabled() and request_logger is not None:
             requests_stats = _safe(lambda: request_logger.stats(300))
             if requests_stats is not None:
+                # Status reflects server faults (5xx) only — 4xx are client/auth
+                # errors and don't mean the server is unhealthy. Any 5xx in the
+                # window is worth amber; a sustained rate goes red.
                 requests_stats["error_status"] = _metrics.fraction_status(
-                    requests_stats.get("error_count"),
+                    requests_stats.get("server_error_count"),
                     max(1, requests_stats.get("requests", 0)),
-                    degraded_above=0.02, error_above=0.10,
+                    degraded_above=0.0, error_above=0.05,
                 )
 
         # --- audio detectors (music/speech tagging + VAD) ---
