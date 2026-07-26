@@ -188,6 +188,9 @@ def sample_system_resources() -> Dict[str, Any]:
         "gpu_util_pct": None,
         "vram_used_bytes": None,
         "gpu_kind": None,  # "cuda" | "mps" | None — which accelerator, if any
+        "swap_used_bytes": None,
+        "swap_total_bytes": None,
+        "proc_rss_bytes": None,  # this server process's own resident memory
     }
 
     try:
@@ -197,6 +200,10 @@ def sample_system_resources() -> Dict[str, Any]:
         vm = psutil.virtual_memory()
         result["ram_used_bytes"] = float(vm.used)
         result["ram_total_bytes"] = float(vm.total)
+        sw = psutil.swap_memory()
+        result["swap_used_bytes"] = float(sw.used)
+        result["swap_total_bytes"] = float(sw.total)
+        result["proc_rss_bytes"] = float(psutil.Process().memory_info().rss)
     except Exception:
         pass
 

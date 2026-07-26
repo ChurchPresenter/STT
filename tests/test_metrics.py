@@ -126,6 +126,9 @@ def test_sample_system_resources_all_none_when_deps_absent(monkeypatch):
         "gpu_util_pct": None,
         "vram_used_bytes": None,
         "gpu_kind": None,
+        "swap_used_bytes": None,
+        "swap_total_bytes": None,
+        "proc_rss_bytes": None,
     }
 
 
@@ -136,7 +139,38 @@ def test_sample_system_resources_never_raises():
     assert set(result) == {
         "cpu_pct", "ram_used_bytes", "ram_total_bytes",
         "gpu_util_pct", "vram_used_bytes", "gpu_kind",
+        "swap_used_bytes", "swap_total_bytes", "proc_rss_bytes",
     }
+
+
+def test_sample_system_resources_reads_swap_and_rss(monkeypatch):
+    # Fake psutil so swap + process RSS flow through (torch absent → GPU None).
+    import builtins
+    import types
+
+    fake_psutil = types.SimpleNamespace(
+        cpu_percent=lambda interval=None: 12.0,
+        virtual_memory=lambda: types.SimpleNamespace(used=4.0, total=8.0),
+        swap_memory=lambda: types.SimpleNamespace(used=2.0, total=4.0),
+        Process=lambda: types.SimpleNamespace(
+            memory_info=lambda: types.SimpleNamespace(rss=1234.0)),
+    )
+    real_import = builtins.__import__
+
+    def fake_import(name, *args, **kwargs):
+        if name == "psutil":
+            return fake_psutil
+        if name == "torch":
+            raise ImportError(name)
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+    monkeypatch.setattr(metrics.shutil, "which", lambda _exe: None)
+
+    result = sample_system_resources()
+    assert result["swap_used_bytes"] == 2.0
+    assert result["swap_total_bytes"] == 4.0
+    assert result["proc_rss_bytes"] == 1234.0
 
 
 def test_sample_system_resources_detects_mps(monkeypatch):

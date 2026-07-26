@@ -5266,6 +5266,12 @@ def get_health():
             "disk_total_bytes": _disk_total,
             "disk_percent": round(100 * _disk_used / _disk_total, 1) if (_disk_used and _disk_total) else None,
             "disk_status": _metrics.fraction_status(_disk_used, _disk_total),
+            "swap_used_bytes": sysres.get("swap_used_bytes"),
+            "swap_total_bytes": sysres.get("swap_total_bytes"),
+            "swap_status": _metrics.fraction_status(
+                sysres.get("swap_used_bytes"), sysres.get("swap_total_bytes"),
+                degraded_above=0.25, error_above=0.6),
+            "proc_rss_bytes": sysres.get("proc_rss_bytes"),
             "apple_silicon": hw.get("apple_silicon", False),
         }
 

@@ -179,6 +179,12 @@
         <div class="meter"><span id="m-disk-bar"></span></div>
         <div class="stat-sub" id="m-disk-sub"></div>
     </div>
+    <div class="stat-card" id="c-swap">
+        <div class="stat-label"><span class="dot"></span>Swap</div>
+        <div class="stat-value" id="m-swap">—</div>
+        <div class="meter"><span id="m-swap-bar"></span></div>
+        <div class="stat-sub" id="m-swap-sub"></div>
+    </div>
     <div class="stat-card">
         <div class="stat-label">Uptime</div>
         <div class="stat-value" style="font-size:1.2em" id="m-uptime">—</div>
@@ -439,9 +445,22 @@
             : fmtBytes(s.ram_used_bytes).replace(" ", " <small>") + "</small>";
         if (s.ram_used_bytes !== null && s.ram_total_bytes) {
             $("m-ram-bar").style.width = (100 * s.ram_used_bytes / s.ram_total_bytes) + "%";
-            $("m-ram-sub").textContent = "of " + fmtBytes(s.ram_total_bytes);
+            // Include this server process's own footprint when available.
+            $("m-ram-sub").textContent = "of " + fmtBytes(s.ram_total_bytes)
+                + (s.proc_rss_bytes != null ? " · server " + fmtBytes(s.proc_rss_bytes) : "");
         } else { $("m-ram-bar").style.width = "0%"; $("m-ram-sub").textContent = ""; }
         setStatus("c-ram", s.ram_status);
+
+        // Swap: percent used headline, GB used/total underneath, colour by usage.
+        if (s.swap_total_bytes) {
+            $("m-swap").innerHTML = num(100 * (s.swap_used_bytes || 0) / s.swap_total_bytes, 0) + " <small>% used</small>";
+            $("m-swap-bar").style.width = (100 * (s.swap_used_bytes || 0) / s.swap_total_bytes) + "%";
+            $("m-swap-sub").textContent = fmtBytes(s.swap_used_bytes || 0) + " of " + fmtBytes(s.swap_total_bytes);
+        } else {
+            $("m-swap").textContent = s.swap_total_bytes === 0 ? "none" : "n/a";
+            $("m-swap-bar").style.width = "0%"; $("m-swap-sub").textContent = "";
+        }
+        setStatus("c-swap", s.swap_status);
 
         renderGpu("m", "c-vram", s);
         // Disk: percent used headline, GB free/total underneath, colour by usage.
