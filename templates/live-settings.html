@@ -1808,7 +1808,11 @@
             drawTimeline();
         }
 
-        // Draw oscilloscope-style timeline
+        // Draw the audio-energy timeline. Signal-aware: the waveform and the
+        // area under it are GREEN where energy is above the activation threshold
+        // (would trigger transcription) and MUTED grey below it — so the effect
+        // of the threshold you're tuning is visible at a glance. All colours come
+        // from theme tokens (re-read each draw, so it follows light/dark).
         function drawTimeline() {
             const canvas = document.getElementById('audio_timeline');
             if (!canvas) return;
@@ -1817,116 +1821,110 @@
             const accentColor = style.getPropertyValue('--accent').trim();
             const bgColor = style.getPropertyValue('--bg-base').trim();
             const mutedColor = style.getPropertyValue('--text-muted').trim();
+            const secondaryColor = style.getPropertyValue('--text-secondary').trim();
             const gridColor = style.getPropertyValue('--border').trim();
-            const infoColor = style.getPropertyValue('--info').trim();
-            const successColor = style.getPropertyValue('--success').trim();
-            const warningColor = style.getPropertyValue('--warning').trim();
-            const ctx = canvas.getContext('2d');
-            const width = canvas.width;
-            const height = canvas.height;
-            const centerY = height / 2;
+            const activeColor = style.getPropertyValue('--success').trim();  // above threshold
 
-            // Clear canvas
+            const ctx = canvas.getContext('2d');
+
+            // HiDPI + responsive: size the backing store to the on-screen size so
+            // the drawing is crisp and not horizontally stretched. Only reallocate
+            // when the size actually changes (cheap on steady state).
+            const dpr = window.devicePixelRatio || 1;
+            const W = canvas.clientWidth, H = canvas.clientHeight || 180;
+            if (!W) return;  // hidden / not laid out yet
+            const bw = Math.round(W * dpr), bh = Math.round(H * dpr);
+            if (canvas.width !== bw || canvas.height !== bh) { canvas.width = bw; canvas.height = bh; }
+            ctx.setTransform(dpr, 0, 0, dpr, 0, 0);  // draw in CSS pixels
+
+            ctx.clearRect(0, 0, W, H);
             ctx.fillStyle = bgColor;
-            ctx.fillRect(0, 0, width, height);
+            ctx.fillRect(0, 0, W, H);
 
             if (timelineData.length === 0) {
-                // Draw "waiting" message
                 ctx.fillStyle = mutedColor;
-                ctx.font = '14px monospace';
+                ctx.font = '13px system-ui, sans-serif';
                 ctx.textAlign = 'center';
-                ctx.fillText('Waiting for audio data...', width / 2, centerY);
+                ctx.textBaseline = 'middle';
+                ctx.fillText('Waiting for audio…', W / 2, H / 2);
                 return;
             }
 
-            // Draw grid lines (horizontal)
+            const PAD = 3;
+            const maxScale = Math.max(energyThreshold * 1.6, Math.max(...timelineData.map(d => d.energy)), 1);
+            const yFor = (e) => H - PAD - (Math.min(e, maxScale) / maxScale) * (H - 2 * PAD);
+            const thresholdY = yFor(energyThreshold);
+            const stepX = W / Math.max(1, maxTimelinePoints - 1);
+            const pts = timelineData.map((d, i) => ({ x: i * stepX, y: yFor(d.energy), e: d.energy }));
+
+            // Faint horizontal grid
             ctx.strokeStyle = gridColor;
             ctx.lineWidth = 1;
-            for (let i = 0; i <= 4; i++) {
-                const y = (height / 4) * i;
-                ctx.beginPath();
-                ctx.moveTo(0, y);
-                ctx.lineTo(width, y);
-                ctx.stroke();
+            for (let i = 1; i < 4; i++) {
+                const y = Math.round((H / 4) * i) + 0.5;
+                ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke();
             }
 
-            // Draw threshold line
-            const maxScale = Math.max(energyThreshold * 2, Math.max(...timelineData.map(d => d.energy)));
-            const thresholdY = height - (energyThreshold / maxScale) * height;
-            ctx.strokeStyle = accentColor;
-            ctx.lineWidth = 2;
-            ctx.setLineDash([5, 5]);
-            ctx.beginPath();
-            ctx.moveTo(0, thresholdY);
-            ctx.lineTo(width, thresholdY);
-            ctx.stroke();
+            // Area under the curve, split at the threshold line via clip regions:
+            // green above (active), grey below (silent). Flat tints via globalAlpha.
+            const fillArea = (top, bottom, color, alpha) => {
+                if (bottom - top <= 0) return;
+                ctx.save();
+                ctx.beginPath(); ctx.rect(0, top, W, bottom - top); ctx.clip();
+                ctx.globalAlpha = alpha; ctx.fillStyle = color;
+                ctx.beginPath();
+                ctx.moveTo(pts[0].x, H);
+                pts.forEach(p => ctx.lineTo(p.x, p.y));
+                ctx.lineTo(pts[pts.length - 1].x, H);
+                ctx.closePath(); ctx.fill();
+                ctx.restore();
+            };
+            fillArea(0, thresholdY, activeColor, 0.22);
+            fillArea(thresholdY, H, mutedColor, 0.12);
+
+            // Waveform line, coloured per-segment by above/below threshold
+            ctx.lineWidth = 2; ctx.lineJoin = 'round'; ctx.lineCap = 'round';
+            for (let i = 1; i < pts.length; i++) {
+                const a = pts[i - 1], b = pts[i];
+                ctx.strokeStyle = (b.e >= energyThreshold) ? activeColor : mutedColor;
+                ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke();
+            }
+
+            // Threshold line (dashed accent)
+            ctx.strokeStyle = accentColor; ctx.lineWidth = 1.5; ctx.setLineDash([5, 4]);
+            ctx.beginPath(); ctx.moveTo(0, thresholdY + 0.5); ctx.lineTo(W, thresholdY + 0.5); ctx.stroke();
             ctx.setLineDash([]);
 
-            // Draw threshold label (position it to avoid cutoff)
-            ctx.fillStyle = accentColor;
-            ctx.font = '11px monospace';
-            ctx.textAlign = 'left';
-            const labelText = `Activation Threshold (${energyThreshold})`;
-            const labelY = thresholdY > 15 ? thresholdY - 5 : thresholdY + 15; // Position above or below based on space
-            ctx.fillText(labelText, 15, labelY);
+            // Threshold pill label
+            const lbl = `Activation ${energyThreshold}`;
+            ctx.font = '600 11px system-ui, sans-serif'; ctx.textBaseline = 'middle';
+            const tw = ctx.measureText(lbl).width;
+            const px = 8, ph = 17, py = (thresholdY > ph + 6) ? thresholdY - ph - 3 : thresholdY + 3;
+            ctx.beginPath();
+            if (ctx.roundRect) ctx.roundRect(px, py, tw + 16, ph, 8);
+            else ctx.rect(px, py, tw + 16, ph);
+            ctx.fillStyle = accentColor; ctx.fill();
+            ctx.fillStyle = '#fff'; ctx.textAlign = 'left';
+            ctx.fillText(lbl, px + 8, py + ph / 2 + 0.5);
 
-            // Draw waveform
-            if (timelineData.length > 1) {
-                ctx.beginPath();
-                ctx.lineWidth = 2;
+            // Live readout (top-right)
+            const last = pts[pts.length - 1];
+            ctx.font = '600 11px system-ui, sans-serif'; ctx.textAlign = 'right'; ctx.textBaseline = 'top';
+            ctx.fillStyle = secondaryColor;
+            const peakStr = (typeof peakEnergy === 'number') ? ` · peak ${Math.round(peakEnergy)}` : '';
+            ctx.fillText(`level ${Math.round(last.e)}${peakStr}`, W - 8, 7);
 
-                // Draw the line with gradient color
-                const gradient = ctx.createLinearGradient(0, 0, width, 0);
-                gradient.addColorStop(0, infoColor);
-                gradient.addColorStop(0.5, successColor);
-                gradient.addColorStop(1, warningColor);
-                ctx.strokeStyle = gradient;
+            // Current-position marker + dot
+            ctx.strokeStyle = accentColor; ctx.lineWidth = 1; ctx.setLineDash([2, 3]);
+            ctx.beginPath(); ctx.moveTo(last.x, 0); ctx.lineTo(last.x, H); ctx.stroke(); ctx.setLineDash([]);
+            ctx.fillStyle = (last.e >= energyThreshold) ? activeColor : mutedColor;
+            ctx.beginPath(); ctx.arc(last.x, last.y, 3.5, 0, Math.PI * 2); ctx.fill();
 
-                const pointSpacing = width / maxTimelinePoints;
-
-                for (let i = 0; i < timelineData.length; i++) {
-                    const x = i * pointSpacing;
-                    const normalizedValue = timelineData[i].energy / maxScale;
-                    const y = height - (normalizedValue * height);
-
-                    if (i === 0) {
-                        ctx.moveTo(x, y);
-                    } else {
-                        ctx.lineTo(x, y);
-                    }
-                }
-                ctx.stroke();
-
-                // Fill area under curve with gradient
-                ctx.lineTo(timelineData.length * pointSpacing, height);
-                ctx.lineTo(0, height);
-                ctx.closePath();
-
-                const fillGradient = ctx.createLinearGradient(0, 0, 0, height);
-                fillGradient.addColorStop(0, 'rgba(34, 197, 94, 0.25)');
-                fillGradient.addColorStop(1, 'rgba(34, 197, 94, 0.03)');
-                ctx.fillStyle = fillGradient;
-                ctx.fill();
-
-                // Draw current value indicator (vertical line at end)
-                const lastX = (timelineData.length - 1) * pointSpacing;
-                const lastY = height - (timelineData[timelineData.length - 1].energy / maxScale) * height;
-
-                ctx.strokeStyle = accentColor;
-                ctx.lineWidth = 2;
-                ctx.setLineDash([2, 2]);
-                ctx.beginPath();
-                ctx.moveTo(lastX, 0);
-                ctx.lineTo(lastX, height);
-                ctx.stroke();
-                ctx.setLineDash([]);
-
-                // Draw value dot
-                ctx.fillStyle = accentColor;
-                ctx.beginPath();
-                ctx.arc(lastX, lastY, 4, 0, Math.PI * 2);
-                ctx.fill();
-            }
+            // Time axis
+            ctx.fillStyle = mutedColor; ctx.font = '10px system-ui, sans-serif'; ctx.textBaseline = 'bottom';
+            ctx.textAlign = 'left';   ctx.fillText('-60s', 6, H - 3);
+            ctx.textAlign = 'center'; ctx.fillText('-30s', W / 2, H - 3);
+            ctx.textAlign = 'right';  ctx.fillText('now', W - 6, H - 3);
         }
 
         // Initialize timeline with empty data
