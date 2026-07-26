@@ -909,6 +909,23 @@
             }
         }
 
+        /* "Serving mode" lock — shown on a machine acting as a translation
+           server (Machine B) for a paired Machine A, which owns these settings.
+           Applied by the shared script at the end of <body>. */
+        .server-lock-banner {
+            display: none;
+            margin: 0 16px 15px;
+            padding: 10px 14px;
+            background: var(--info-bg);
+            border: 1px solid var(--info);
+            border-radius: var(--radius-sm);
+            color: var(--text-primary);
+            font-size: 0.9em;
+        }
+        body.serving-mode .server-lock-banner { display: block; }
+        /* Non-form containers (e.g. the language grid) can't use :disabled. */
+        .a-locked { opacity: 0.5; pointer-events: none; }
+
         {% block extra_css %}{% endblock %}
     </style>
 </head>
@@ -939,6 +956,8 @@
         </div>
 
         {% block sysreq_banner %}<div id="sysreq_warning" role="alert" aria-live="polite" style="display: none; margin: 0 16px 15px; padding: 10px 14px; background: rgba(245,158,11,0.08); border: 1px solid rgba(245,158,11,0.3); border-radius: var(--radius-sm); color: var(--warning);"></div>{% endblock %}
+
+        <div id="server-lock-banner" class="server-lock-banner" role="status" aria-live="polite"></div>
 
         <div class="content" id="main-content">
             {% block content %}{% endblock %}
@@ -988,5 +1007,59 @@
     </script>
 
     {% block scripts %}{% endblock %}
+
+    <script>
+        // Serving-mode lock: when THIS machine is a paired translation server
+        // (Machine B), Machine A owns the settings it propagates, so B's copies
+        // of those controls are made read-only. Only runs on pages that actually
+        // have lockable controls (tagged data-a-controlled) — so display/index
+        // pages add no polling.
+        (function () {
+            var controlled = document.querySelectorAll('[data-a-controlled]');
+            if (!controlled.length) return;
+            var banner = document.getElementById('server-lock-banner');
+            var FORMISH = /^(INPUT|SELECT|TEXTAREA|BUTTON)$/;
+
+            function setLocked(locked, ips) {
+                document.body.classList.toggle('serving-mode', locked);
+                if (banner) {
+                    banner.textContent = locked
+                        ? '🔒 Serving translations for Machine A (' + ips.join(', ') +
+                          '). These settings are controlled by Machine A while paired — unpair on the Translation page to edit.'
+                        : '';
+                }
+                controlled.forEach(function (el) {
+                    var formish = FORMISH.test(el.tagName);
+                    if (locked) {
+                        // Only disable what we disabled, so we never fight a page's
+                        // own disable logic when we later unlock.
+                        if (formish && !el.disabled) {
+                            el.disabled = true;
+                            el.dataset.aServerLocked = '1';
+                        }
+                        el.classList.add('a-locked');
+                    } else {
+                        if (formish && el.dataset.aServerLocked === '1') {
+                            el.disabled = false;
+                            delete el.dataset.aServerLocked;
+                        }
+                        el.classList.remove('a-locked');
+                    }
+                });
+            }
+
+            function poll() {
+                fetch('/api/translation/status')
+                    .then(function (r) { return r.json(); })
+                    .then(function (d) {
+                        var t = (d && d.trusted_clients) || [];
+                        setLocked(t.length > 0, t);
+                    })
+                    .catch(function () {});
+            }
+            poll();
+            setInterval(poll, 5000);
+        })();
+    </script>
 </body>
 </html>

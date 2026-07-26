@@ -819,14 +819,14 @@
                     <span class="section-label" style="margin-bottom: 12px;">Custom Dictionary</span>
 
                     <div class="checkbox-group">
-                        <input type="checkbox" id="nllb_glossary_enabled" checked>
+                        <input type="checkbox" id="nllb_glossary_enabled" data-a-controlled checked>
                         <label for="nllb_glossary_enabled">NLLB glossary post-processing</label>
                     </div>
                     <div class="slider-hint" style="color: var(--text-muted); font-size: 0.8em; margin: -8px 0 8px 0;">Replaces translated terms using glossary mappings after translation</div>
 
                     <div class="form-group" style="margin-top: 12px;">
                         <label for="glossary_list" style="font-size: 0.85em;">Glossary (source=target, one per line)</label>
-                        <textarea id="glossary_list" rows="4" placeholder="Add translation term mappings...&#10;e.g. neural network=red neuronal&#10;machine learning=aprendizaje automatico"
+                        <textarea id="glossary_list" data-a-controlled rows="4" placeholder="Add translation term mappings...&#10;e.g. neural network=red neuronal&#10;machine learning=aprendizaje automatico"
                                   style="width: 100%; padding: 6px 8px; background: var(--bg-base); border: 1px solid var(--border); color: var(--text-primary); border-radius: var(--radius-sm); font-size: 0.85em; resize: vertical;"></textarea>
                         <small style="color: var(--text-muted); font-size: 0.75em;">Applied when translating to the target language</small>
                     </div>

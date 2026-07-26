@@ -129,7 +129,7 @@
 
                 <!-- Enable/Disable Translation -->
                 <div class="checkbox-group">
-                    <input type="checkbox" id="trans_enabled" onchange="toggleTranslation()">
+                    <input type="checkbox" id="trans_enabled" data-a-controlled onchange="toggleTranslation()">
                     <label for="trans_enabled">Enable Live Translation</label>
                 </div>
 
@@ -170,14 +170,14 @@
                 <div id="nllb_remote_section">
                 <div id="local_translation_settings">
                 <div class="checkbox-group">
-                    <input type="checkbox" id="translation_use_gpu" checked>
+                    <input type="checkbox" id="translation_use_gpu" data-a-controlled checked>
                     <label for="translation_use_gpu">Use GPU for Translation</label>
                 </div>
                 <small style="color: var(--text-secondary); font-size: 0.75em; margin-left: 22px; display: block; margin-top: -5px; margin-bottom: 10px;">
                     Disable to run NLLB on CPU, freeing GPU VRAM for Whisper
                 </small>
                 <div class="checkbox-group">
-                    <input type="checkbox" id="translation_use_fp16">
+                    <input type="checkbox" id="translation_use_fp16" data-a-controlled>
                     <label for="translation_use_fp16">Half precision (fp16) on GPU</label>
                 </div>
                 <small style="color: var(--text-secondary); font-size: 0.75em; margin-left: 22px; display: block; margin-top: -5px; margin-bottom: 10px;">
@@ -232,7 +232,7 @@
 
                 <div class="form-group">
                     <label for="translation_method">Translation Method</label>
-                    <select id="translation_method" onchange="onTranslationMethodChange()">
+                    <select id="translation_method" data-a-controlled onchange="onTranslationMethodChange()">
                         <option value="nllb">NLLB Model (any language)</option>
                         <option value="whisper_translate">Whisper Translate (English only)</option>
                         <option value="whisper_forced_lang">Whisper Forced Language (Experimental)</option>
@@ -250,7 +250,7 @@
                 <div id="nllb_settings_group">
                 <div class="form-group" id="local_model_settings">
                     <label for="translation_model">Translation Model</label>
-                    <select id="translation_model">
+                    <select id="translation_model" data-a-controlled>
                         <!-- Populated dynamically from downloaded NLLB models -->
                     </select>
                     <small id="model_hint">Select from downloaded NLLB models</small>
@@ -266,7 +266,7 @@
 
                 <div class="form-group">
                     <label for="context_window">Context Window: <span id="contextWindowValue">1</span> segment(s)</label>
-                    <input type="range" id="context_window" min="1" max="5" value="1" step="1"
+                    <input type="range" id="context_window" data-a-controlled min="1" max="5" value="1" step="1"
                            oninput="document.getElementById('contextWindowValue').textContent = this.value"
                            style="width:100%;">
                     <small style="color: var(--text-secondary); font-size: 0.75em;">Combine adjacent segments for better context. 1 = no batching, 2-5 = more context but slower</small>
@@ -274,7 +274,7 @@
 
                 <div class="form-group">
                     <label for="num_beams">Beam Search Width: <span id="numBeamsValue">2</span></label>
-                    <input type="range" id="num_beams" min="1" max="20" value="2" step="1"
+                    <input type="range" id="num_beams" data-a-controlled min="1" max="20" value="2" step="1"
                            oninput="document.getElementById('numBeamsValue').textContent = this.value"
                            style="width:100%;">
                     <small style="color: var(--text-secondary); font-size: 0.75em;">Higher = better quality but slower. 1 = greedy (fastest), 5 = default, 10+ = high quality</small>
@@ -282,7 +282,7 @@
 
                 <div class="form-group">
                     <label for="length_penalty">Length Penalty: <span id="lengthPenaltyValue">1.0</span></label>
-                    <input type="range" id="length_penalty" min="0.1" max="3.0" value="1.0" step="0.1"
+                    <input type="range" id="length_penalty" data-a-controlled min="0.1" max="3.0" value="1.0" step="0.1"
                            oninput="document.getElementById('lengthPenaltyValue').textContent = parseFloat(this.value).toFixed(1)"
                            style="width:100%;">
                     <small style="color: var(--text-secondary); font-size: 0.75em;">&lt;1.0 = shorter translations, 1.0 = neutral, &gt;1.0 = longer translations</small>
@@ -290,7 +290,7 @@
 
                 <div class="form-group">
                     <label for="no_repeat_ngram_size">No Repeat N-gram Size: <span id="noRepeatValue">0</span></label>
-                    <input type="range" id="no_repeat_ngram_size" min="0" max="10" value="0" step="1"
+                    <input type="range" id="no_repeat_ngram_size" data-a-controlled min="0" max="10" value="0" step="1"
                            oninput="document.getElementById('noRepeatValue').textContent = this.value"
                            style="width:100%;">
                     <small style="color: var(--text-secondary); font-size: 0.75em;">Prevents repeating phrases. 0 = disabled, 3 = recommended for reducing repetition</small>
@@ -298,7 +298,7 @@
 
                 <div class="form-group">
                     <label for="repetition_penalty">Repetition Penalty: <span id="repPenaltyValue">1.0</span></label>
-                    <input type="range" id="repetition_penalty" min="0.5" max="3.0" value="1.0" step="0.1"
+                    <input type="range" id="repetition_penalty" data-a-controlled min="0.5" max="3.0" value="1.0" step="0.1"
                            oninput="document.getElementById('repPenaltyValue').textContent = parseFloat(this.value).toFixed(1)"
                            style="width:100%;">
                     <small style="color: var(--text-secondary); font-size: 0.75em;">1.0 = disabled. 1.1-1.5 = recommended to reduce repeated tokens</small>
@@ -452,7 +452,7 @@
                 <div class="settings-card">
                     <h4>Quick Language Selection</h4>
                     <small style="color: var(--text-secondary);">Click a language to quickly switch to it</small>
-                    <div class="language-grid" id="language_grid" aria-live="polite">
+                    <div class="language-grid" id="language_grid" data-a-controlled aria-live="polite">
                         <!-- Populated dynamically -->
                     </div>
                 </div>
