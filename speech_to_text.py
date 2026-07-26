@@ -4938,6 +4938,21 @@ def _setup_status():
     }
 
 
+def _disk_usage_percent():
+    """Disk-usage percent of the app volume for the live page's disk-full
+    banner. Served on the *public* /api/transcription/status poll so any viewer
+    (including non-whitelisted displays) gets the warning without calling the
+    IP-gated /api/disk-space endpoint. Percent only — no paths/bytes, which stay
+    behind auth. Returns None on any failure so the banner just stays hidden."""
+    try:
+        du = shutil.disk_usage(APP_DIR)
+        if du.total > 0:
+            return round(du.used / du.total * 100, 2)
+    except Exception:
+        pass
+    return None
+
+
 @app.route("/api/system/requirements", methods=["GET"])
 def get_system_requirements():
     """Whether this machine can run the configured models (drives the header banner).
@@ -8311,6 +8326,7 @@ def get_transcription_status():
             "success": True,
             "state": _ts_snapshot(),
             "setup": _setup_status(),
+            "disk_percent": _disk_usage_percent(),
         }
     )
 

@@ -1887,6 +1887,10 @@
             } else {
               updateTranscriptionStatus(data.running || false);
             }
+            // Disk-full warning rides along on this public poll (see server's
+            // _disk_usage_percent) so non-whitelisted viewers get it without
+            // hitting the IP-gated /api/disk-space endpoint.
+            updateDiskBanner(data.disk_percent);
           })
           .catch(error => {
             console.error('Error checking transcription status:', error);
@@ -1894,41 +1898,33 @@
           });
       }
 
-      // Check disk space and update status if >= 75%
-      function checkDiskSpace() {
-        fetch('/api/disk-space')
-          .then(response => response.json())
-          .then(data => {
-            if (data.success) {
-              const diskSpace = data.disk_space;
-              const percentUsed = diskSpace.percent_used;
+      // Update the disk-full warning from a usage percent (delivered on the
+      // /api/transcription/status poll). Shows a banner at >= 75%, hides it
+      // below. A null/undefined percent (probe failed) just leaves it hidden.
+      function updateDiskBanner(percentUsed) {
+        if (percentUsed === null || percentUsed === undefined) return;
 
-              const container = document.getElementById('disk-status-container');
-              const dot = document.getElementById('disk-status-dot');
-              const text = document.getElementById('disk-status-text');
+        const container = document.getElementById('disk-status-container');
+        const dot = document.getElementById('disk-status-dot');
+        const text = document.getElementById('disk-status-text');
 
-              if (percentUsed >= 75) {
-                // Show disk space warning
-                container.style.display = 'flex';
+        if (percentUsed >= 75) {
+          // Show disk space warning
+          container.style.display = 'flex';
 
-                // Set color based on severity
-                dot.classList.remove('warning', 'error', 'inactive');
-                if (percentUsed >= 90) {
-                  dot.classList.add('error');
-                  text.textContent = `Disk: ${percentUsed}% (Critical!)`;
-                } else {
-                  dot.classList.add('warning');
-                  text.textContent = `Disk: ${percentUsed}% Used`;
-                }
-              } else {
-                // Hide disk space status if below 75%
-                container.style.display = 'none';
-              }
-            }
-          })
-          .catch(error => {
-            console.error('Error checking disk space:', error);
-          });
+          // Set color based on severity
+          dot.classList.remove('warning', 'error', 'inactive');
+          if (percentUsed >= 90) {
+            dot.classList.add('error');
+            text.textContent = `Disk: ${percentUsed}% (Critical!)`;
+          } else {
+            dot.classList.add('warning');
+            text.textContent = `Disk: ${percentUsed}% Used`;
+          }
+        } else {
+          // Hide disk space status if below 75%
+          container.style.display = 'none';
+        }
       }
 
       // Initialize socket connection monitoring (called after socket is created)
@@ -1936,14 +1932,11 @@
         // Only run status polling if menu is shown (not in embedded/OBS mode)
         // In embedded mode, fetch calls may fail but WebSocket still works
         if (window.displayConfig.showMenu) {
-          // Check status on load
+          // Check status on load (disk-full warning rides along on the response)
           checkTranscriptionStatus();
-          checkDiskSpace();
 
           // Check status every 5 seconds
           setInterval(checkTranscriptionStatus, 5000);
-          // Check disk space every 30 seconds
-          setInterval(checkDiskSpace, 30000);
         }
 
         // Clear segment/translation state and the drip-feed baselines, then
@@ -2000,7 +1993,6 @@
           updateServerStatus(true);
           if (window.displayConfig.showMenu) {
             checkTranscriptionStatus();
-            checkDiskSpace();
           }
           if (window.displayConfig.showAll) {
             socket.emit('request_all_entries');
