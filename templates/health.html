@@ -427,18 +427,24 @@
             : modelBits.join(" · ");
 
         const tr = h.translation || {};
-        $("m-trans").textContent = !tr.enabled ? "disabled"
-            : (tr.model_loading ? "loading…" : (tr.model_loaded ? "loaded" : "idle"));
         let trSub = [];
-        if (tr.translation_model) trSub.push(tr.translation_model.split("/").pop());
-        if (tr.model_device) trSub.push(tr.model_device.toUpperCase());
-        if (tr.local_translate_ms_ema !== null && tr.local_translate_ms_ema !== undefined)
-            trSub.push(num(tr.local_translate_ms_ema, 0) + " ms/translation");
-        if (tr.remote_active) {
-            trSub.push(tr.remote_reachable ? "remote OK" : "remote UNREACHABLE");
+        if (!tr.enabled) {
+            $("m-trans").textContent = "disabled";
+            setStatus("c-trans", "unknown");
+        } else if (tr.remote_active) {
+            // Offloaded: the NLLB model runs on Machine B, not here. Reflect that
+            // instead of the model_loaded=true remote-availability override.
+            $("m-trans").textContent = "offloaded";
+            trSub.push("→ Machine B");
+            trSub.push(tr.remote_reachable ? "reachable" : "UNREACHABLE");
             setStatus("c-trans", tr.remote_reachable ? "healthy" : "error");
         } else {
-            setStatus("c-trans", tr.enabled ? "healthy" : "unknown");
+            $("m-trans").textContent = tr.model_loading ? "loading…" : (tr.model_loaded ? "loaded" : "idle");
+            if (tr.translation_model) trSub.push(tr.translation_model.split("/").pop());
+            if (tr.model_device) trSub.push(tr.model_device.toUpperCase());
+            if (tr.local_translate_ms_ema !== null && tr.local_translate_ms_ema !== undefined)
+                trSub.push(num(tr.local_translate_ms_ema, 0) + " ms/translation");
+            setStatus("c-trans", tr.model_loaded ? "healthy" : "unknown");
         }
         $("m-trans-sub").textContent = trSub.join(" · ");
 
