@@ -355,7 +355,7 @@
                 <div id="tts_edge_options">
                     <div class="form-group">
                         <label for="tts_edge_voice">Voice</label>
-                        <select id="tts_edge_voice">
+                        <select id="tts_edge_voice" data-a-controlled>
                             <option value="en-US-AriaNeural">Loading voices...</option>
                         </select>
                         <small>Filter by translation target language. <button type="button" onclick="_edgeVoicesLoaded=false; loadEdgeVoices()" style="background: none; border: none; color: var(--accent); cursor: pointer; padding: 0; font-size: inherit;">Refresh voices</button></small>
@@ -370,7 +370,7 @@
                 <div id="tts_piper_options" style="display: none;">
                     <div class="form-group">
                         <label for="tts_piper_model">Piper Model</label>
-                        <select id="tts_piper_model">
+                        <select id="tts_piper_model" data-a-controlled>
                             <option value="">No models downloaded</option>
                         </select>
                         <small>Download models from <a href="/model-manager" style="color: var(--accent);">Model Manager</a></small>
