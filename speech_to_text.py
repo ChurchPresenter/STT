@@ -1076,6 +1076,33 @@ def is_live_translation_ready():
     return _live_translation_model_loaded
 
 
+def _warmup_translation_model(model, tokenizer, device):
+    """Run one throwaway translation so MPS/CUDA compile their generate kernels
+    here rather than on the first real request (a multi-second cold-start spike,
+    worst right after a restart / hourly auto-update). No-op on CPU (nothing to
+    pre-compile) and when disabled via config. Never raises — a warmup failure
+    must not block model availability."""
+    try:
+        if device == "cpu":
+            return
+        if not config.get("live_translation", {}).get("warmup", True):
+            return
+        num_beams = int((config.get("live_translation", {}).get("generation_params", {}) or {}).get("num_beams", 2))
+        t0 = time.perf_counter()
+        tokenizer.src_lang = "eng_Latn"
+        inputs = tokenizer("Hello.", return_tensors="pt")
+        _dev = next(model.parameters()).device
+        if _dev.type != "cpu":
+            inputs = {k: v.to(_dev) for k, v in inputs.items()}
+        # Mirror the real path (forced_bos + configured beam width) so the same
+        # kernels get compiled; tiny max_length keeps it fast.
+        bos = tokenizer.convert_tokens_to_ids("spa_Latn")
+        model.generate(**inputs, forced_bos_token_id=bos, max_length=8, num_beams=num_beams)
+        print(f"[LIVE-TRANSLATION] Warmup ({device}) took {(time.perf_counter() - t0) * 1000:.0f}ms")
+    except Exception as e:
+        print(f"[LIVE-TRANSLATION] Warmup failed (non-fatal): {e}")
+
+
 def get_live_translation_model(use_gpu=True, model_id=None):
     """Get or load the live translation model (singleton pattern).
     If model_id differs from the currently loaded model, unloads and reloads."""
@@ -1115,6 +1142,7 @@ def get_live_translation_model(use_gpu=True, model_id=None):
                 _live_translation_model_loaded = True
                 _live_translation_model_id = model_id
                 print(f"[LIVE-TRANSLATION] Live translation model loaded: {model_id or 'default'}")
+                _warmup_translation_model(_live_translation_model, _live_translation_tokenizer, _live_translation_device)
             finally:
                 _live_translation_model_loading = False
         return _live_translation_model, _live_translation_tokenizer
