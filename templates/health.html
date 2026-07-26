@@ -241,10 +241,38 @@
         <div class="stat-label">GPU utilisation</div>
         <div class="stat-value" id="mb-gpu">—</div>
     </div>
+    <div class="stat-card" id="mb-c-disk">
+        <div class="stat-label"><span class="dot"></span>Disk</div>
+        <div class="stat-value" id="mb-disk">—</div>
+        <div class="meter"><span id="mb-disk-bar"></span></div>
+        <div class="stat-sub" id="mb-disk-sub"></div>
+    </div>
     <div class="stat-card" id="mb-c-trans">
         <div class="stat-label"><span class="dot"></span>Translation (NLLB)</div>
         <div class="stat-value" style="font-size:1.05em" id="mb-trans">—</div>
         <div class="stat-sub" id="mb-trans-sub"></div>
+    </div>
+</div>
+
+<div class="health-section-title" id="mb-req-title" style="display:none">Machine B · API requests (last 5 min)</div>
+<div class="stat-grid" id="mb-req-grid" style="display:none">
+    <div class="stat-card">
+        <div class="stat-label">Requests / min</div>
+        <div class="stat-value" id="mb-reqrate">—</div>
+        <div class="stat-sub" id="mb-reqtotal"></div>
+    </div>
+    <div class="stat-card" id="mb-c-err">
+        <div class="stat-label"><span class="dot"></span>Error rate</div>
+        <div class="stat-value" id="mb-errrate">—</div>
+        <div class="stat-sub" id="mb-errsub"></div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-label">Latency p50</div>
+        <div class="stat-value" id="mb-p50">—</div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-label">Latency p95</div>
+        <div class="stat-value" id="mb-p95">—</div>
     </div>
 </div>
 {% endblock %}
@@ -448,6 +476,13 @@
         updateRemoteGate((h.translation || {}).remote_active);
     }
 
+    // Show/hide every Machine B section together (system grid + requests grid).
+    function setRemoteVisible(show) {
+        const disp = show ? "" : "none";
+        ["mb-title", "mb-grid", "mb-req-title", "mb-req-grid"].forEach(
+            (id) => { $(id).style.display = disp; });
+    }
+
     function updateRemoteGate(active) {
         const on = !!active && !document.hidden;
         if (on && !remoteTimer) {
@@ -457,26 +492,22 @@
             clearInterval(remoteTimer);
             remoteTimer = null;
         }
-        if (!active) {
-            $("mb-title").style.display = "none";
-            $("mb-grid").style.display = "none";
-        }
+        if (!active) setRemoteVisible(false);
     }
 
     function showRemoteUnreachable(endpoint, msg) {
-        $("mb-title").style.display = "";
-        $("mb-grid").style.display = "";
+        setRemoteVisible(true);
         $("mb-endpoint").textContent = endpoint || "";
         setStatus("mb-c-status", "error");
         $("mb-status").textContent = "unreachable";
         $("mb-status-sub").textContent = msg || "";
-        ["mb-uptime", "mb-cpu", "mb-ram", "mb-vram", "mb-gpu", "mb-trans"].forEach(
+        ["mb-uptime", "mb-cpu", "mb-ram", "mb-vram", "mb-gpu", "mb-disk", "mb-trans",
+         "mb-reqrate", "mb-errrate", "mb-p50", "mb-p95"].forEach(
             (id) => { $(id).textContent = "—"; });
     }
 
     function renderRemote(h, endpoint) {
-        $("mb-title").style.display = "";
-        $("mb-grid").style.display = "";
+        setRemoteVisible(true);
         $("mb-endpoint").textContent = endpoint || "";
 
         setStatus("mb-c-status", "healthy");
@@ -512,6 +543,38 @@
         if (tr.cache_size !== undefined && tr.cache_size !== null) tb.push("cache " + tr.cache_size);
         $("mb-trans-sub").textContent = tb.join(" · ");
         setStatus("mb-c-trans", tr.model_loaded ? "healthy" : "unknown");
+
+        // Disk (mirrors Machine A)
+        $("mb-disk").innerHTML = s.disk_percent === null || s.disk_percent === undefined
+            ? (s.disk_free_bytes != null ? fmtBytes(s.disk_free_bytes) + " <small>free</small>" : "n/a")
+            : num(s.disk_percent, 0) + " <small>% used</small>";
+        $("mb-disk-bar").style.width = (s.disk_percent || 0) + "%";
+        $("mb-disk-sub").textContent = (s.disk_total_bytes && s.disk_free_bytes != null)
+            ? fmtBytes(s.disk_free_bytes) + " free of " + fmtBytes(s.disk_total_bytes) : "";
+        setStatus("mb-c-disk", s.disk_status);
+
+        // API requests (mirrors Machine A: 5xx rate drives the tile, 4xx shown as client)
+        const r = h.requests;
+        if (!r) {
+            $("mb-reqrate").textContent = "n/a";
+            $("mb-reqtotal").textContent = "access log disabled";
+            $("mb-errrate").textContent = "—";
+            $("mb-errsub").textContent = "";
+            $("mb-p50").textContent = "—";
+            $("mb-p95").textContent = "—";
+            setStatus("mb-c-err", "unknown");
+        } else {
+            $("mb-reqrate").textContent = num(r.req_per_min, 1);
+            $("mb-reqtotal").textContent = r.requests + " in last 5 min";
+            // Fall back to legacy error_rate if the remote hasn't updated to the 5xx split yet.
+            const sRate = r.server_error_rate ?? r.error_rate ?? 0;
+            $("mb-errrate").innerHTML = (100 * sRate).toFixed(1) + " <small>%</small>";
+            const sc = r.server_error_count ?? r.error_count ?? 0, cc = r.client_error_count ?? 0;
+            $("mb-errsub").textContent = sc + " server (5xx) · " + cc + " client (4xx)";
+            setStatus("mb-c-err", r.error_status);
+            $("mb-p50").innerHTML = r.p50_ms === null ? "—" : num(r.p50_ms, 0) + " <small>ms</small>";
+            $("mb-p95").innerHTML = r.p95_ms === null ? "—" : num(r.p95_ms, 0) + " <small>ms</small>";
+        }
     }
 
     async function loadRemote() {
