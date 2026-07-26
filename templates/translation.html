@@ -63,7 +63,7 @@
         }
 
         .preview-text .in-progress {
-            color: rgba(224, 224, 224, 0.6);
+            color: var(--text-muted);
             font-style: italic;
         }
 
@@ -217,7 +217,7 @@
                         <button id="request_pairing_btn" onclick="requestPairing()" class="btn-save btn-primary" style="margin: 0; padding: 6px 14px;">Request Pairing</button>
                         <span id="pair_status_text" style="font-size: 0.85em; color: var(--text-secondary);"></span>
                     </div>
-                    <div id="pair_code_entry" style="display:none; margin-top: 8px; padding: 10px; background: #1e2a1e; border: 1px solid #3a5a3a; border-radius: var(--radius-sm);">
+                    <div id="pair_code_entry" style="display:none; margin-top: 8px; padding: 10px; background: var(--success-bg); border: 1px solid var(--success); border-radius: var(--radius-sm);">
                         <div style="margin-bottom: 6px; font-size: 0.85em;">Enter the code shown on Machine B's Translations tab:</div>
                         <div style="display: flex; gap: 8px; align-items: center;">
                             <input type="text" id="pair_code_input" maxlength="6" placeholder="123456"
@@ -240,10 +240,10 @@
                     <small id="translation_method_hint" style="color: var(--text-secondary); font-size: 0.75em;">NLLB uses a separate model. Whisper methods reuse the transcription model (no extra VRAM).</small>
                 </div>
 
-                <div id="whisper_translate_warning" style="display:none; background: #2a2000; border: 1px solid #665500; border-radius: var(--radius-sm); padding: 8px 12px; margin-bottom: 10px;">
+                <div id="whisper_translate_warning" style="display:none; background: var(--warning-bg); border: 1px solid var(--warning); border-radius: var(--radius-sm); padding: 8px 12px; margin-bottom: 10px;">
                     <small style="color: #ffcc00; font-size: 0.8em;">Whisper Translate only supports English as target language. Whisper runs twice per audio chunk (transcribe + translate).</small>
                 </div>
-                <div id="whisper_forced_warning" style="display:none; background: #2a1500; border: 1px solid #664400; border-radius: var(--radius-sm); padding: 8px 12px; margin-bottom: 10px;">
+                <div id="whisper_forced_warning" style="display:none; background: var(--warning-bg); border: 1px solid var(--warning); border-radius: var(--radius-sm); padding: 8px 12px; margin-bottom: 10px;">
                     <small style="color: #ff9900; font-size: 0.8em;">Experimental: Forces Whisper to output in the target language. Quality varies by language pair. Whisper runs twice per audio chunk.</small>
                 </div>
 
@@ -419,7 +419,7 @@
                 </div>
 
                 <!-- Pairing request banner (shown on Machine B when A requests pairing) -->
-                <div id="pair_request_banner" role="status" aria-live="polite" style="display:none; margin-bottom: 12px; padding: 14px; background: #1a2a3a; border: 1px solid #3a6a9a; border-radius: var(--radius-sm);">
+                <div id="pair_request_banner" role="status" aria-live="polite" style="display:none; margin-bottom: 12px; padding: 14px; background: var(--info-bg); border: 1px solid var(--info); border-radius: var(--radius-sm);">
                     <strong>🔗 Pairing request from <span id="pair_request_ip" style="color: #7ab8f5;"></span></strong>
                     <div style="margin-top: 8px; font-size: 0.9em; color: var(--text-secondary);">Code to give to Machine A:</div>
                     <div id="pair_request_code" style="font-size: 2em; font-weight: bold; letter-spacing: 0.3em; color: #f0e040; margin: 6px 0;"></div>
@@ -610,7 +610,7 @@
                         option.disabled = true;
                         modelSelect.appendChild(option);
                         modelHint.textContent = 'Download NLLB models from the Model Manager page';
-                        modelHint.style.color = '#f56565';
+                        modelHint.style.color = 'var(--danger)';
                     } else {
                         downloadedModels.forEach(model => {
                             const option = document.createElement('option');
@@ -619,7 +619,7 @@
                             modelSelect.appendChild(option);
                         });
                         modelHint.textContent = 'Select from downloaded NLLB models';
-                        modelHint.style.color = '#999';
+                        modelHint.style.color = 'var(--text-muted)';
                     }
                 } else {
                     // Fallback if API fails
@@ -958,9 +958,9 @@
                         const modelEl = document.getElementById('model_loaded');
                         modelEl.textContent = 'Remote (unreachable — ' +
                             (data.remote_fallback === 'local' ? 'using local fallback' : 'skipping translation') + ')';
-                        modelEl.style.color = '#f44336';
+                        modelEl.style.color = 'var(--danger)';
                         document.getElementById('pair_status_text').innerHTML =
-                            '<span style="color: #f44336;">Paired, but unreachable</span>';
+                            '<span style="color: var(--danger);">Paired, but unreachable</span>';
                     } else if (data.remote_active) {
                         // Only fetch Machine B's status if we're actually paired
                         checkPairedStatus().then(paired => {
@@ -969,12 +969,12 @@
                                 if (!lastRemoteModel) {
                                     modelEl.textContent = 'Remote (fetching...)';
                                 }
-                                modelEl.style.color = '#4caf50';
+                                modelEl.style.color = 'var(--success)';
                                 fetchRemoteModel();
                             } else {
                                 lastRemoteModel = '';
                                 document.getElementById('model_loaded').textContent = 'Remote (not paired)';
-                                document.getElementById('model_loaded').style.color = '#ff9800';
+                                document.getElementById('model_loaded').style.color = 'var(--warning)';
                             }
                         });
                     } else {
@@ -1026,7 +1026,7 @@
                         trustedRow.style.display = '';
                         const listEl = document.getElementById('trusted_clients_list');
                         listEl.innerHTML = trustedClients.map(ip =>
-                            `${ip} <button onclick="unpairClient('${ip}')" style="margin-left:6px; padding:1px 6px; font-size:0.75em; background:#5a2020; border:1px solid #a04040; border-radius:3px; color:#eee; cursor:pointer;">Unpair</button>`
+                            `${ip} <button onclick="unpairClient('${ip}')" style="margin-left:6px; padding:1px 6px; font-size:0.75em; background:var(--danger-bg); border:1px solid var(--danger); border-radius:3px; color:var(--danger); cursor:pointer;">Unpair</button>`
                         ).join(' ');
                     } else {
                         trustedRow.style.display = 'none';
@@ -1156,7 +1156,7 @@
             } catch (_) {
                 lastRemoteModel = '';
                 document.getElementById('model_loaded').textContent = 'Remote (unreachable)';
-                document.getElementById('model_loaded').style.color = '#f44336';
+                document.getElementById('model_loaded').style.color = 'var(--danger)';
             }
         }
 
@@ -1168,8 +1168,8 @@
                 if (data.paired) {
                     if (!statusEl.innerHTML.includes('Paired')) {
                         statusEl.innerHTML = '<span style="color: var(--success);">Paired ✓</span> ' +
-                            '<button onclick="syncDictionaryToRemote()" style="margin-left:6px; padding:2px 8px; font-size:0.75em; background:#20395a; border:1px solid #4070a0; border-radius:4px; color:#eee; cursor:pointer;">Sync Dictionary</button>' +
-                            '<button onclick="unpairFromMachineB()" style="margin-left:6px; padding:2px 8px; font-size:0.75em; background:#5a2020; border:1px solid #a04040; border-radius:4px; color:#eee; cursor:pointer;">Unpair</button>';
+                            '<button onclick="syncDictionaryToRemote()" style="margin-left:6px; padding:2px 8px; font-size:0.75em; background:var(--info-bg); border:1px solid var(--info); border-radius:4px; color:var(--info); cursor:pointer;">Sync Dictionary</button>' +
+                            '<button onclick="unpairFromMachineB()" style="margin-left:6px; padding:2px 8px; font-size:0.75em; background:var(--danger-bg); border:1px solid var(--danger); border-radius:4px; color:var(--danger); cursor:pointer;">Unpair</button>';
                     }
                     document.getElementById('pair_code_entry').style.display = 'none';
                     document.getElementById('request_pairing_btn').style.display = 'none';
@@ -1377,22 +1377,22 @@
                     const statusEl = document.getElementById('tts_status_text');
                     if (data.downloading) {
                         statusEl.textContent = 'Downloading model...';
-                        statusEl.style.color = '#ff9800';
+                        statusEl.style.color = 'var(--warning)';
                     } else if (data.model_loading) {
                         statusEl.textContent = 'Loading model...';
-                        statusEl.style.color = '#ff9800';
+                        statusEl.style.color = 'var(--warning)';
                     } else if (!data.enabled) {
                         statusEl.textContent = 'Disabled';
-                        statusEl.style.color = '#999';
+                        statusEl.style.color = 'var(--text-muted)';
                     } else if (backend === 'edge') {
                         statusEl.textContent = 'Edge TTS ready (cloud)';
-                        statusEl.style.color = '#4caf50';
+                        statusEl.style.color = 'var(--success)';
                     } else if (data.model_loaded) {
                         statusEl.textContent = 'Piper model loaded';
-                        statusEl.style.color = '#4caf50';
+                        statusEl.style.color = 'var(--success)';
                     } else {
                         statusEl.textContent = 'Enabled (model loads on first use)';
-                        statusEl.style.color = '#2196f3';
+                        statusEl.style.color = 'var(--info)';
                     }
                 }
             } catch (e) {
