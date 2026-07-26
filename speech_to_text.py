@@ -5700,12 +5700,12 @@ def translate_remote():
     """
     client_ip = request.remote_addr
     if not _is_trusted_translation_client(client_ip):
-        return jsonify({"error": "Not paired. Use the pairing flow in the Translations tab."}), 403
+        return jsonify({"success": False, "error": "Not paired. Use the pairing flow in the Translations tab."}), 403
 
     data = request.get_json() or {}
     text = data.get("text", "").strip()
     if not text:
-        return jsonify({"translated_text": "", "confidence": None, "alternatives": []}), 200
+        return jsonify({"success": True, "translated_text": "", "confidence": None, "alternatives": []}), 200
 
     _register_translation_client(client_ip)
 
@@ -5729,7 +5729,7 @@ def translate_remote():
             _num_beams = int(_gp.get("num_beams", 2))
             _hit = get_server_text_cache().get(text, source_lang, target_lang, _num_beams)
             if _hit is not None:
-                return jsonify({"translated_text": _hit.get("text", text),
+                return jsonify({"success": True, "translated_text": _hit.get("text", text),
                                 "confidence": None, "alternatives": []})
         except Exception:
             pass  # cache must never break translation
@@ -5745,6 +5745,7 @@ def translate_remote():
 
     if return_extras and isinstance(result, dict):
         return jsonify({
+            "success": True,
             "translated_text": result.get("text", text),
             "confidence": result.get("confidence"),
             "alternatives": result.get("alternatives", []),
@@ -5756,7 +5757,7 @@ def translate_remote():
             get_server_text_cache().set(text, source_lang, target_lang, _num_beams, {"text": translated})
         except Exception:
             pass
-    return jsonify({"translated_text": translated, "confidence": None, "alternatives": []})
+    return jsonify({"success": True, "translated_text": translated, "confidence": None, "alternatives": []})
 
 
 @app.route("/api/translate/unload", methods=["POST"])
@@ -7891,22 +7892,22 @@ def hide_item():
 
     try:
         global config
-        data = request.get_json()
+        data = request.get_json(silent=True) or {}
         path = data.get("path")
 
         if not path:
             return jsonify({"success": False, "error": "Path is required"}), 400
 
-        # Normalize path to be relative to working directory
-        abs_path = os.path.abspath(path)
-        working_dir = APP_DIR
-
-        # Get relative path
+        # Confine to the managed tree (rejects ../ and symlink escapes) — same
+        # guard the sibling file-manager handlers use — then store relative to APP_DIR.
+        resolved = safe_managed_path(path)
+        if resolved is None:
+            return jsonify({"success": False, "error": "Access denied"}), 403
         try:
-            rel_path = os.path.relpath(abs_path, working_dir)
+            rel_path = os.path.relpath(resolved, APP_DIR)
         except ValueError:
             # On Windows, relpath fails if paths are on different drives
-            rel_path = abs_path
+            rel_path = resolved
 
         # Get current hidden items
         if "file_manager" not in config:
@@ -7939,21 +7940,20 @@ def unhide_item():
 
     try:
         global config
-        data = request.get_json()
+        data = request.get_json(silent=True) or {}
         path = data.get("path")
 
         if not path:
             return jsonify({"success": False, "error": "Path is required"}), 400
 
-        # Normalize path to be relative to working directory
-        abs_path = os.path.abspath(path)
-        working_dir = APP_DIR
-
-        # Get relative path
+        # Confine to the managed tree, then store relative to APP_DIR.
+        resolved = safe_managed_path(path)
+        if resolved is None:
+            return jsonify({"success": False, "error": "Access denied"}), 403
         try:
-            rel_path = os.path.relpath(abs_path, working_dir)
+            rel_path = os.path.relpath(resolved, APP_DIR)
         except ValueError:
-            rel_path = abs_path
+            rel_path = resolved
 
         # Get current hidden items
         if "file_manager" not in config:
