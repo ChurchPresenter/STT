@@ -5221,6 +5221,8 @@ def get_health():
             "audio_db": ts.get("audio_db"),
             "audio_type": ts.get("audio_type") if running else None,
             "detection_mode": ts.get("detection_mode") if running else None,
+            "audio_tag": ts.get("audio_tag") if running else None,      # PANNs top CNN14 class
+            "music_prob": ts.get("music_prob") if running else None,    # 0-1 music score
             "rtf_ema": rtf,
             "rtf_status": _metrics.rtf_status(rtf) if running else "unknown",
             "infer_ms_ema": ts.get("infer_ms_ema") if running else None,

@@ -124,6 +124,7 @@
     <div class="stat-card" id="c-detect">
         <div class="stat-label"><span class="dot"></span>Audio detection</div>
         <div class="stat-value" style="font-size:1.05em" id="m-detect">—</div>
+        <div class="stat-sub" id="m-detect-tag"></div>
         <div class="stat-sub" id="m-detect-sub"></div>
     </div>
     <div class="stat-card">
@@ -367,6 +368,11 @@
         const d = h.detectors || {};
         $("m-detect").textContent = d.detection_mode
             ? (d.detection_mode === "panns" ? "PANNs" : d.detection_mode) : "—";
+        // What the model actually detected (PANNs top CNN14 class + music score)
+        const tag = t.audio_tag;
+        $("m-detect-tag").textContent = tag
+            ? "detected: " + tag + (t.music_prob != null ? ` · ${Math.round(t.music_prob * 100)}% music` : "")
+            : "";
         const detBits = [];
         detBits.push("PANNs " + (d.panns_available ? "ready" : "off"));
         detBits.push("VAD " + (d.vad_available ? "ready" : "off"));
