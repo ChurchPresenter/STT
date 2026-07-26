@@ -342,8 +342,8 @@
                                 <label for="config_context">Configure Model For</label>
                                 <select id="config_context" onchange="updateConfigUI()">
                                     <option value="live">🎙️ Live Transcription</option>
-                                    <option value="file">📁 File Transcription</option>
                                     <option value="translation">🌐 Translation</option>
+                                    <option value="file">📁 File Transcription</option>
                                 </select>
                                 <small>Choose which context to configure</small>
                             </div>
@@ -351,8 +351,8 @@
                             <div class="form-group">
                                 <label for="config_model_type">Model Type</label>
                                 <select id="config_model_type" onchange="updateConfigModelUI()">
-                                    <option value="whisper">Whisper (OpenAI)</option>
                                     <option value="faster_whisper">Faster Whisper (4-10x faster)</option>
+                                    <option value="whisper">Whisper (OpenAI)</option>
                                     <option value="downloaded">Downloaded Models</option>
                                 </select>
                             </div>
@@ -487,16 +487,16 @@
                                 </div>
                             </div>
 
-                            <div class="model-card file compact">
-                                <h4>📁 File Transcription</h4>
-                                <div id="file_model_summary">
+                            <div class="model-card live compact">
+                                <h4>🌐 Translation</h4>
+                                <div id="translation_model_summary">
                                     Loading...
                                 </div>
                             </div>
 
-                            <div class="model-card live compact">
-                                <h4>🌐 Translation</h4>
-                                <div id="translation_model_summary">
+                            <div class="model-card file compact">
+                                <h4>📁 File Transcription</h4>
+                                <div id="file_model_summary">
                                     Loading...
                                 </div>
                             </div>
@@ -536,27 +536,19 @@
                     </div>
 
                     <div class="model-tabs" style="display: flex; align-items: center; gap: 10px;">
-                        <button class="model-tab active" onclick="switchModelTab('whisper')">🤖 Whisper</button>
-                        <button class="model-tab" onclick="switchModelTab('faster_whisper')">⚡ Faster Whisper</button>
-                        <button class="model-tab" onclick="switchModelTab('downloaded')">📥 Add Models</button>
+                        <button class="model-tab active" onclick="switchModelTab('faster_whisper')">⚡ Faster Whisper</button>
+                        <button class="model-tab" onclick="switchModelTab('whisper')">🤖 Whisper</button>
+                        <button class="model-tab" onclick="switchModelTab('translation')">🌐 Translation</button>
+                        <button class="model-tab" onclick="switchModelTab('tts')">🔊 TTS</button>
+                        <button class="model-tab" onclick="switchModelTab('audio_detection')">🎧 Audio Detection</button>
+                        <button class="model-tab" onclick="switchModelTab('add')">📥 Add Models</button>
                         <button class="model-tab" onclick="switchModelTab('my_downloaded')">📦 Downloaded Models</button>
-                        <button id="refresh_whisper_btn" class="model-btn" onclick="refreshWhisperModels()" style="margin-left: auto; background: var(--accent); color: var(--text-primary); padding: 8px 16px; font-size: 0.85em;">🔄 Check for New Models</button>
-                        <button id="refresh_faster_whisper_btn" class="model-btn" onclick="refreshFasterWhisperModels()" style="margin-left: auto; background: var(--warning); color: var(--text-primary); padding: 8px 16px; font-size: 0.85em; display: none;">🔄 Check for New Models</button>
-                    </div>
-
-                    <!-- Whisper Models -->
-                    <div id="whisper_models" class="model-list">
-                        <div id="whisper_models_list" aria-live="polite" aria-label="Whisper model list">
-                            <div class="model-item">
-                                <div class="model-info">
-                                    <div class="model-name">Loading models...</div>
-                                </div>
-                            </div>
-                        </div>
+                        <button id="refresh_faster_whisper_btn" class="model-btn" onclick="refreshFasterWhisperModels()" style="margin-left: auto; background: var(--warning); color: var(--text-primary); padding: 8px 16px; font-size: 0.85em;">🔄 Check for New Models</button>
+                        <button id="refresh_whisper_btn" class="model-btn" onclick="refreshWhisperModels()" style="margin-left: auto; background: var(--accent); color: var(--text-primary); padding: 8px 16px; font-size: 0.85em; display: none;">🔄 Check for New Models</button>
                     </div>
 
                     <!-- Faster Whisper Models -->
-                    <div id="faster_whisper_models" class="model-list" style="display: none;">
+                    <div id="faster_whisper_models" class="model-list">
                         <div id="faster_whisper_models_list" aria-live="polite" aria-label="Faster Whisper model list">
                             <div class="model-item">
                                 <div class="model-info">
@@ -566,8 +558,91 @@
                         </div>
                     </div>
 
-                    <!-- Downloaded Models (combines HuggingFace + Local) -->
-                    <div id="downloaded_models" class="model-list" style="display: none;">
+                    <!-- Whisper Models -->
+                    <div id="whisper_models" class="model-list" style="display: none;">
+                        <div id="whisper_models_list" aria-live="polite" aria-label="Whisper model list">
+                            <div class="model-item">
+                                <div class="model-info">
+                                    <div class="model-name">Loading models...</div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Translation Models (separate tab) -->
+                    <div id="translation_models" class="model-list" style="display: none;">
+                        <!-- Translation Models Section -->
+                        <div style="margin-bottom: 15px;">
+                            <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px;">
+                                <h5 style="margin: 0; color: var(--text-primary);">🌐 Translation Models (NLLB)</h5>
+                                <button class="model-btn" onclick="refreshNLLBModels()" style="background: var(--success); padding: 5px 10px; font-size: 0.8em;">🔄 Check for Updates</button>
+                            </div>
+                            <div id="nllb_models_list" aria-live="polite" aria-label="Translation model list">
+                                <div class="model-item model-item--success">
+                                    <div class="model-info">
+                                        <div class="model-name" style="color: var(--text-secondary);">Loading translation models...</div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
+                    </div>
+
+                    <!-- TTS Models (separate tab) -->
+                    <div id="tts_models" class="model-list" style="display: none;">
+                        <!-- TTS Models Section (Piper - local/offline) -->
+                        <div style="margin-bottom: 15px;">
+                            <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px;">
+                                <h5 style="margin: 0; color: var(--text-primary);">🔊 Text-to-Speech Models (Piper - Local)</h5>
+                                <button class="model-btn" onclick="loadTTSModels(true)" style="background: var(--accent); padding: 5px 10px; font-size: 0.8em;">🔄 Refresh</button>
+                            </div>
+                            <small style="color: var(--text-secondary); display: block; margin-bottom: 10px;">
+                                Piper models run locally/offline. Edge TTS (cloud) requires no downloads.
+                                Configure TTS backend in <a href="/translation" style="color: var(--accent);">Translation Settings</a>.
+                            </small>
+                            <div id="tts_models_list" aria-live="polite" aria-label="Piper TTS model list">
+                                <div class="model-item model-item--accent">
+                                    <div class="model-info">
+                                        <div class="model-name" style="color: var(--text-secondary);">Loading Piper models...</div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Audio Detection Models (separate tab) -->
+                    <div id="audio_detection_models" class="model-list" style="display: none;">
+                        <!-- Voice Activity Detection (VAD) Section -->
+                        <div style="margin-bottom: 15px; padding-bottom: 15px; border-bottom: 1px solid var(--border);">
+                            <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px;">
+                                <h5 style="margin: 0; color: var(--text-primary);">🎤 Voice Activity Detection (VAD)</h5>
+                            </div>
+                            <div id="silero_vad_status" aria-live="polite" aria-label="Silero VAD status">
+                                <div class="model-item model-item--success">
+                                    <div class="model-info">
+                                        <div class="model-name" style="color: var(--text-secondary);">Checking VAD status...</div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Music / Speech Detection (PANNs) Section -->
+                        <div style="margin-bottom: 15px;">
+                            <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px;">
+                                <h5 style="margin: 0; color: var(--text-primary);">🎵 Music / Speech Detection (PANNs)</h5>
+                            </div>
+                            <div id="panns_status" aria-live="polite" aria-label="PANNs status">
+                                <div class="model-item model-item--success">
+                                    <div class="model-info">
+                                        <div class="model-name" style="color: var(--text-secondary);">Checking PANNs status...</div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Add Models (upload + HuggingFace) -->
+                    <div id="add_models" class="model-list" style="display: none;">
                         <!-- Upload Section -->
                         <div class="model-item model-item--header">
                             <div class="model-info" style="flex: 1;">
@@ -591,69 +666,6 @@
                                 <button class="model-btn download" onclick="downloadCustomHuggingFaceModel()">Download</button>
                             </div>
                         </div>
-
-                        <!-- Translation Models Section -->
-                        <div style="margin-bottom: 15px; padding-bottom: 15px; border-bottom: 1px solid var(--border);">
-                            <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px;">
-                                <h5 style="margin: 0; color: var(--text-primary);">🌐 Translation Models (NLLB)</h5>
-                                <button class="model-btn" onclick="refreshNLLBModels()" style="background: var(--success); padding: 5px 10px; font-size: 0.8em;">🔄 Check for Updates</button>
-                            </div>
-                            <div id="nllb_models_list" aria-live="polite" aria-label="Translation model list">
-                                <div class="model-item model-item--success">
-                                    <div class="model-info">
-                                        <div class="model-name" style="color: var(--text-secondary);">Loading translation models...</div>
-                                    </div>
-                                </div>
-                            </div>
-                        </div>
-
-                        <!-- TTS Models Section (Piper - local/offline) -->
-                        <div style="margin-bottom: 15px; padding-bottom: 15px; border-bottom: 1px solid var(--border);">
-                            <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px;">
-                                <h5 style="margin: 0; color: var(--text-primary);">🔊 Text-to-Speech Models (Piper - Local)</h5>
-                                <button class="model-btn" onclick="loadTTSModels(true)" style="background: var(--accent); padding: 5px 10px; font-size: 0.8em;">🔄 Refresh</button>
-                            </div>
-                            <small style="color: var(--text-secondary); display: block; margin-bottom: 10px;">
-                                Piper models run locally/offline. Edge TTS (cloud) requires no downloads.
-                                Configure TTS backend in <a href="/translation" style="color: var(--accent);">Translation Settings</a>.
-                            </small>
-                            <div id="tts_models_list" aria-live="polite" aria-label="Piper TTS model list">
-                                <div class="model-item model-item--accent">
-                                    <div class="model-info">
-                                        <div class="model-name" style="color: var(--text-secondary);">Loading Piper models...</div>
-                                    </div>
-                                </div>
-                            </div>
-                        </div>
-
-                        <!-- Voice Activity Detection (VAD) Section -->
-                        <div style="margin-bottom: 15px; padding-bottom: 15px; border-bottom: 1px solid var(--border);">
-                            <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px;">
-                                <h5 style="margin: 0; color: var(--text-primary);">🎤 Voice Activity Detection (VAD)</h5>
-                            </div>
-                            <div id="silero_vad_status" aria-live="polite" aria-label="Silero VAD status">
-                                <div class="model-item model-item--success">
-                                    <div class="model-info">
-                                        <div class="model-name" style="color: var(--text-secondary);">Checking VAD status...</div>
-                                    </div>
-                                </div>
-                            </div>
-                        </div>
-
-                        <!-- Music / Speech Detection (PANNs) Section -->
-                        <div style="margin-bottom: 15px; padding-bottom: 15px; border-bottom: 1px solid var(--border);">
-                            <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px;">
-                                <h5 style="margin: 0; color: var(--text-primary);">🎵 Music / Speech Detection (PANNs)</h5>
-                            </div>
-                            <div id="panns_status" aria-live="polite" aria-label="PANNs status">
-                                <div class="model-item model-item--success">
-                                    <div class="model-info">
-                                        <div class="model-name" style="color: var(--text-secondary);">Checking PANNs status...</div>
-                                    </div>
-                                </div>
-                            </div>
-                        </div>
-
                     </div>
 
                     <!-- Downloaded Models (separate tab) -->
@@ -1375,8 +1387,8 @@
 
             // Update model type options - both Whisper and Faster Whisper available for all contexts
             modelTypeSelect.innerHTML = `
-                <option value="whisper">Whisper (OpenAI)</option>
                 <option value="faster_whisper">Faster Whisper (4-10x faster)</option>
+                <option value="whisper">Whisper (OpenAI)</option>
                 <option value="downloaded">Downloaded Models</option>
             `;
 
@@ -1750,9 +1762,14 @@
                 refreshFasterWhisperBtn.style.display = tabName === 'faster_whisper' ? 'block' : 'none';
             }
 
-            // Load downloaded models and check NLLB status if switching to downloaded tab
-            if (tabName === 'downloaded') {
-                checkNLLBStatus();
+            // Load translation models when switching to the translation tab
+            if (tabName === 'translation') {
+                loadNLLBModels();
+            }
+
+            // Load Piper TTS models when switching to the TTS tab
+            if (tabName === 'tts') {
+                loadTTSModels();
             }
 
             // Load downloaded models when switching to my_downloaded tab
@@ -1998,11 +2015,6 @@
             } catch (error) {
                 showAlert('❌ Remove error: ' + error.message, 'error');
             }
-        }
-
-        // Legacy function for backward compatibility
-        function checkNLLBStatus() {
-            loadNLLBModels();
         }
 
         // ============== TTS Models (Piper - Local) ==============

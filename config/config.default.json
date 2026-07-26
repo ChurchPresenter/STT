@@ -23,8 +23,8 @@
       ],
       "_model_comment": "Whisper model size. Use .en suffix for English-only (e.g., small.en). tiny/base for real-time, medium/large for accuracy"
     },
-    "backend": "whisper",
-    "_backend_comment": "Whisper backend: 'whisper' (OpenAI) or 'faster-whisper' (CTranslate2, faster)",
+    "backend": "faster-whisper",
+    "_backend_comment": "Whisper backend: 'faster-whisper' (CTranslate2, 4-10x faster, default) or 'whisper' (OpenAI)",
     "huggingface": {
       "model_id": "openai/whisper-tiny",
       "_model_id_comment": "Hugging Face model ID. Popular options below",
