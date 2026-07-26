@@ -1584,16 +1584,17 @@
             if (!data.is_running) updateAudioTag(null, null);
         });
 
-        // Only process audio_level when page is visible (optimization)
+        // Data capture runs always; rendering is gated on visibility (optimization).
         let isPageVisible = !document.hidden;
         let audioLevelCount = 0;
         let lastAudioEnergy = 0;
         let sameEnergyCount = 0;
+        let lastAudioData = null;  // most recent audio_level payload, for repaint-on-return
 
         document.addEventListener('visibilitychange', () => {
-            const wasVisible = isPageVisible;
             isPageVisible = !document.hidden;
-            // console.log(`[VISIBILITY] Page visibility changed: ${wasVisible ? 'visible' : 'hidden'} -> ${isPageVisible ? 'visible' : 'hidden'}`);
+            // Became visible again — paint the history that accumulated while hidden.
+            if (isPageVisible) updateVolumeIndicator(lastAudioData || {});
         });
 
         socket.on('audio_level', (data) => {
@@ -1623,7 +1624,10 @@
             //     console.log(`[AUDIO] #${audioLevelCount} energy=${data.energy?.toFixed(0)} level=${data.level?.toFixed(1)} visible=${isPageVisible}`);
             // }
 
-            // Only update visualization if page is visible
+            // Always record into the rolling history (keeps accumulating while the
+            // tab is backgrounded); only paint the meter/canvas when visible.
+            recordAudioSample(data);
+            lastAudioData = data;
             if (isPageVisible) {
                 updateVolumeIndicator(data);
             }
@@ -1765,19 +1769,15 @@
         const timelineData = [];
         const maxTimelinePoints = 120; // 60 seconds of history
 
-        // Update audio visualization
-        function updateVolumeIndicator(data) {
-            const level = data.level || 0;
-            const db = data.db !== undefined ? data.db : -60;
+        // Record one audio sample into the rolling history + peak meter. This runs
+        // on EVERY audio_level event, even when the tab is hidden, so the timeline
+        // keeps a continuous last-60s window instead of freezing when you switch
+        // away. (Rendering is separate and stays visible-only — see below.)
+        function recordAudioSample(data) {
             const energy = data.energy !== undefined ? data.energy : 0;
-
-            // Debug logging
-            //console.log('updateVolumeIndicator called - energy:', energy, 'level:', level, 'db:', db);
 
             // Peak-hold meter: jump up instantly to new maxima, hold the peak for
             // PEAK_HOLD_DURATION, then decay smoothly toward the current level.
-            // (Previously it hard-reset the peak to the instantaneous energy once the
-            // hold expired, which made the peak collapse every couple of seconds.)
             const currentTime = Date.now();
             if (energy >= peakEnergy) {
                 peakEnergy = energy;
@@ -1786,25 +1786,23 @@
                 peakEnergy = Math.max(energy, peakEnergy * PEAK_DECAY);
             }
 
-            // Update text displays
-            const volumeCurrent = document.getElementById('volume_current');
-            const volumePeak = document.getElementById('volume_peak');
-
-            if (volumeCurrent) volumeCurrent.textContent = Math.round(energy);
-            if (volumePeak) volumePeak.textContent = Math.round(peakEnergy);
-
-            // Add to timeline data
-            timelineData.push({
-                energy: energy,
-                timestamp: currentTime
-            });
-
-            // Keep only last N points
+            // Append to the rolling window (kept to the last maxTimelinePoints).
+            timelineData.push({ energy: energy, timestamp: currentTime });
             if (timelineData.length > maxTimelinePoints) {
                 timelineData.shift();
             }
+        }
 
-            // Draw timeline
+        // Render the meter text + timeline canvas from current state. Visible-only:
+        // no point painting a hidden tab (recordAudioSample already kept the data).
+        function updateVolumeIndicator(data) {
+            const energy = (data && data.energy !== undefined) ? data.energy : 0;
+
+            const volumeCurrent = document.getElementById('volume_current');
+            const volumePeak = document.getElementById('volume_peak');
+            if (volumeCurrent) volumeCurrent.textContent = Math.round(energy);
+            if (volumePeak) volumePeak.textContent = Math.round(peakEnergy);
+
             drawTimeline();
         }
 
