@@ -5358,27 +5358,38 @@ def save_translation_settings():
     })
 
 
-@app.route("/api/translation/language", methods=["POST"])
-def hot_switch_translation_language():
-    """Hot-switch target language without restart - clears cache and re-translates"""
-    if not check_ip_whitelist():
-        return jsonify({"success": False, "error": "Access Denied"}), 403
-
+def _apply_transcription_language_switch(new_language):
+    """Set the live transcription language and hot-reload the transcription
+    subprocess. Shared by /api/transcription/language and /api/language so the
+    two can't drift. Returns the previous language."""
     global config
-    data = request.json
-    new_language = data.get("target_language")
+    old_language = config.get("audio", {}).get("language", "auto")
+    if "audio" not in config:
+        config["audio"] = {}
+    config["audio"]["language"] = new_language
+    save_config(config)
+    if config_queue:
+        try:
+            config_queue.put({"type": "config_update", "config": config.copy()})
+        except (OSError, ValueError):
+            pass
+    print(f"[TRANSCRIPTION] Hot-switched language: {old_language} -> {new_language}")
+    return old_language
 
-    if not new_language:
-        return jsonify({"success": False, "error": "target_language required"}), 400
 
-    if new_language not in NLLB_LANG_CODES:
-        return jsonify({"success": False, "error": f"Invalid language: {new_language}"}), 400
+def _apply_translation_language_switch(new_language):
+    """Switch the live-translation target language and fan out every side effect:
+    TTS voice/model swap, transcription-subprocess reload, remote Machine B
+    propagation, and the language_switched client event. Shared by
+    /api/translation/language and /api/language so both stay in lock-step —
+    critically, so a paired Machine B is always notified. Caller must have
+    validated ``new_language`` is in NLLB_LANG_CODES.
 
+    Returns (old_language, new_tts_voice, backend)."""
+    global config
     old_language = config.get("live_translation", {}).get("target_language", "en")
-
     if "live_translation" not in config:
         config["live_translation"] = {}
-
     config["live_translation"]["target_language"] = new_language
 
     # Auto-switch TTS voice/model to match the new language
@@ -5447,6 +5458,27 @@ def hot_switch_translation_language():
         "language_name": language_name,
     })
 
+    return old_language, new_tts_voice, backend
+
+
+@app.route("/api/translation/language", methods=["POST"])
+def hot_switch_translation_language():
+    """Hot-switch target language without restart - clears cache and re-translates"""
+    if not check_ip_whitelist():
+        return jsonify({"success": False, "error": "Access Denied"}), 403
+
+    data = request.json
+    new_language = data.get("target_language")
+
+    if not new_language:
+        return jsonify({"success": False, "error": "target_language required"}), 400
+
+    if new_language not in NLLB_LANG_CODES:
+        return jsonify({"success": False, "error": f"Invalid language: {new_language}"}), 400
+
+    old_language, new_tts_voice, backend = _apply_translation_language_switch(new_language)
+
+    language_name = TRANSLATION_LANGUAGES.get(new_language, new_language)
     result = {
         "success": True,
         "message": f"Switched to {language_name}. Translations will update shortly.",
@@ -6423,26 +6455,13 @@ def hot_switch_transcription_language():
     if not check_ip_whitelist():
         return jsonify({"success": False, "error": "Access Denied"}), 403
 
-    global config
     data = request.json
     new_language = data.get("language")
 
     if not new_language:
         return jsonify({"success": False, "error": "language required"}), 400
 
-    old_language = config.get("audio", {}).get("language", "auto")
-
-    if "audio" not in config:
-        config["audio"] = {}
-
-    config["audio"]["language"] = new_language
-    save_config(config)
-
-    # Push to config queue for hot-reload
-    if config_queue:
-        config_queue.put({"type": "config_update", "config": config.copy()})
-
-    print(f"[TRANSCRIPTION] Hot-switched language: {old_language} -> {new_language}")
+    old_language = _apply_transcription_language_switch(new_language)
 
     return jsonify({
         "success": True,
@@ -6476,7 +6495,6 @@ def hot_switch_all_languages():
     if not check_ip_whitelist():
         return jsonify({"success": False, "error": "Access Denied"}), 403
 
-    global config
     data = request.json
 
     transcription_lang = data.get("transcription")
@@ -6485,43 +6503,27 @@ def hot_switch_all_languages():
     if not transcription_lang and not translation_lang:
         return jsonify({"success": False, "error": "At least one of 'transcription' or 'translation' required"}), 400
 
+    # Validate the translation language before mutating anything, so a bad value
+    # can't leave transcription switched but translation rejected.
+    if translation_lang and translation_lang not in NLLB_LANG_CODES:
+        return jsonify({"success": False, "error": f"Invalid translation language: {translation_lang}"}), 400
+
     results = {}
 
-    # Update transcription language
+    # Delegate to the same helpers the dedicated single-language routes use, so
+    # every side effect (TTS voice, subprocess reload, remote Machine B
+    # propagation, client event) fires identically no matter which route is hit.
     if transcription_lang:
-        old_trans = config.get("audio", {}).get("language", "auto")
-        if "audio" not in config:
-            config["audio"] = {}
-        config["audio"]["language"] = transcription_lang
-        results["transcription"] = {
-            "old": old_trans,
-            "new": transcription_lang
-        }
-        print(f"[TRANSCRIPTION] Hot-switched language: {old_trans} -> {transcription_lang}")
+        old_trans = _apply_transcription_language_switch(transcription_lang)
+        results["transcription"] = {"old": old_trans, "new": transcription_lang}
 
-    # Update translation language
     if translation_lang:
-        if translation_lang not in NLLB_LANG_CODES:
-            return jsonify({"success": False, "error": f"Invalid translation language: {translation_lang}"}), 400
-
-        old_target = config.get("live_translation", {}).get("target_language", "en")
-        if "live_translation" not in config:
-            config["live_translation"] = {}
-        config["live_translation"]["target_language"] = translation_lang
-
-        language_name = TRANSLATION_LANGUAGES.get(translation_lang, translation_lang)
+        old_target, _tts_voice, _backend = _apply_translation_language_switch(translation_lang)
         results["translation"] = {
             "old": old_target,
             "new": translation_lang,
-            "language_name": language_name
+            "language_name": TRANSLATION_LANGUAGES.get(translation_lang, translation_lang),
         }
-        print(f"[LIVE-TRANSLATION] Hot-switched language: {old_target} -> {translation_lang}")
-
-    save_config(config)
-
-    # Push to config queue for transcription hot-reload
-    if config_queue and transcription_lang:
-        config_queue.put({"type": "config_update", "config": config.copy()})
 
     return jsonify({
         "success": True,
