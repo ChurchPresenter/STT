@@ -343,6 +343,22 @@ CONFIG_TEMPLATE_FILE = os.path.join(BUNDLE_DIR, "config", "config.default.json")
 # interleave and corrupt the file.
 _config_file_lock = threading.Lock()
 
+# Guards in-memory read-modify-write of the global `config` dict at the hotspots
+# (the deep-merge in update_config, save_config's serialization, and the
+# snapshots pushed to the transcription worker) so a reader never observes a
+# half-mutated config. Reentrant: nested save_config / snapshot calls on one
+# thread must not deadlock. Acquire order is always _config_lock -> _config_file_lock.
+_config_lock = threading.RLock()
+
+
+def _config_snapshot():
+    """A coherent deep copy of the global config, taken under _config_lock, for
+    pushing to the hot-reload queue (a shallow copy would still share nested
+    dicts and could be observed mid-mutation)."""
+    import copy as _copy
+    with _config_lock:
+        return _copy.deepcopy(config)
+
 
 # Config/validation/version helpers live in stt/config_utils.py (importable,
 # unit-tested); names are re-imported here so call sites stay unchanged.
@@ -359,7 +375,7 @@ from stt.config_utils import (  # noqa: F401
 def save_config(config_to_save):
     """Save configuration to config.json atomically with error handling."""
     try:
-        with _config_file_lock:
+        with _config_lock, _config_file_lock:
             _atomic_write_json(CONFIG_FILE, config_to_save)
         print(f"[OK] Configuration saved to '{CONFIG_FILE}'")
         return True
@@ -4057,7 +4073,8 @@ def update_config():
         _prev_lt_target = _lt_prev.get("target_language")
 
         # Merge new config into existing config (preserves backend and other fields)
-        config = deep_merge(config, new_config)
+        with _config_lock:
+            config = deep_merge(config, new_config)
 
         # Live transcription requires temperature 0: nonzero output varies between
         # re-transcription passes, so same_output_threshold finalization never
@@ -4102,7 +4119,7 @@ def update_config():
 
         # Send config update through queue for hot-reload
         try:
-            config_queue.put({"type": "config_update", "config": config})
+            config_queue.put({"type": "config_update", "config": _config_snapshot()})
         except (OSError, ValueError):
             pass  # Queue might be full or process not ready
 
@@ -4198,7 +4215,7 @@ def reset_config():
 
         # Send config update through queue
         try:
-            config_queue.put({"type": "config_update", "config": config})
+            config_queue.put({"type": "config_update", "config": _config_snapshot()})
         except (OSError, ValueError):
             pass
 
@@ -5421,7 +5438,7 @@ def save_translation_settings():
     # Push to config queue for hot-reload (so transcription subprocess picks up translation_method changes)
     if config_queue:
         try:
-            config_queue.put({"type": "config_update", "config": config.copy()})
+            config_queue.put({"type": "config_update", "config": _config_snapshot()})
         except (OSError, ValueError):
             pass
 
@@ -5558,7 +5575,7 @@ def _apply_transcription_language_switch(new_language):
     save_config(config)
     if config_queue:
         try:
-            config_queue.put({"type": "config_update", "config": config.copy()})
+            config_queue.put({"type": "config_update", "config": _config_snapshot()})
         except (OSError, ValueError):
             pass
     print(f"[TRANSCRIPTION] Hot-switched language: {old_language} -> {new_language}")
@@ -5616,7 +5633,7 @@ def _apply_translation_language_switch(new_language):
     # Push to config queue so transcription subprocess picks up the new target language
     if config_queue:
         try:
-            config_queue.put({"type": "config_update", "config": config.copy()})
+            config_queue.put({"type": "config_update", "config": _config_snapshot()})
         except (OSError, ValueError):
             pass
 
