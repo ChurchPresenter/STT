@@ -766,7 +766,7 @@
             </nav>
         </div>
 
-        <div id="sysreq_warning" role="alert" aria-live="polite" style="display: none; margin-bottom: 15px; padding: 10px 14px; background: rgba(245,158,11,0.08); border: 1px solid rgba(245,158,11,0.3); border-radius: var(--radius-sm); color: var(--warning);"></div>
+        {% block sysreq_banner %}<div id="sysreq_warning" role="alert" aria-live="polite" style="display: none; margin-bottom: 15px; padding: 10px 14px; background: rgba(245,158,11,0.08); border: 1px solid rgba(245,158,11,0.3); border-radius: var(--radius-sm); color: var(--warning);"></div>{% endblock %}
 
         <div class="content" id="main-content">
             {% block content %}{% endblock %}
@@ -782,6 +782,7 @@
                 .then(function (r) { return r.json(); })
                 .then(function (d) {
                     var el = document.getElementById('sysreq_warning');
+                    if (!el) return;  // page opted out of the banner (e.g. health)
                     if (d && d.warnings && d.warnings.length) {
                         // One warning per line (build DOM so each stays on its own
                         // row) instead of mashing them together with separators.

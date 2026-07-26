@@ -47,6 +47,19 @@ def classify_source(path: str, *, api_prefix: str = "/api/") -> str:
     return SOURCE_WEB
 
 
+def _percentile(sorted_values: List[float], q: float) -> Optional[float]:
+    """Nearest-rank percentile of an already-ascending list, or ``None``.
+
+    ``q`` is a fraction in [0, 1]. Small samples are fine — the nearest-rank
+    method avoids interpolation surprises for the handful of requests a single
+    operator box sees in a short window.
+    """
+    if not sorted_values:
+        return None
+    rank = max(0, min(len(sorted_values) - 1, round(q * (len(sorted_values) - 1))))
+    return round(float(sorted_values[rank]), 2)
+
+
 class RequestLog:
     """SQLite-backed, size-capped access log."""
 
@@ -138,12 +151,15 @@ class RequestLog:
         source: Optional[str] = None,
         kind: Optional[str] = None,
         search: Optional[str] = None,
+        exclude_paths: Optional[List[str]] = None,
         limit: int = 200,
     ) -> List[Dict[str, Any]]:
         """Return the most recent matching rows, newest first, as dicts.
 
         ``source``/``kind`` are exact-match filters; ``search`` is a
-        case-insensitive substring match against path, IP, and detail.
+        case-insensitive substring match against path, IP, and detail;
+        ``exclude_paths`` drops rows whose path exactly equals any of the given
+        paths (used to hide high-frequency dashboard polling from the view).
         """
         clauses: List[str] = []
         params: List[Any] = []
@@ -157,6 +173,10 @@ class RequestLog:
             like = f"%{search}%"
             clauses.append("(path LIKE ? OR ip LIKE ? OR detail LIKE ?)")
             params.extend([like, like, like])
+        if exclude_paths:
+            placeholders = ", ".join("?" for _ in exclude_paths)
+            clauses.append(f"(path IS NULL OR path NOT IN ({placeholders}))")
+            params.extend(exclude_paths)
         where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
         sql = f"SELECT {', '.join(FIELDS)} FROM access_log{where} ORDER BY id DESC LIMIT ?"
         params.append(max(1, int(limit)))
@@ -170,6 +190,48 @@ class RequestLog:
         with self._lock:
             cursor = self._conn.execute("SELECT COUNT(*) FROM access_log")
             return int(cursor.fetchone()[0])
+
+    def stats(self, window_seconds: float, *, now: Optional[float] = None) -> Dict[str, Any]:
+        """Aggregate request health over the last ``window_seconds``.
+
+        Returns request count, per-minute rate, error count/rate (HTTP status
+        >= 400), and p50/p95 response-latency in milliseconds — everything the
+        health dashboard needs from the access log in one query. ``now`` is
+        injectable for deterministic tests. Rows with a NULL ``duration_ms``
+        (e.g. socket connections) are excluded from the latency percentiles but
+        still counted as requests.
+
+        An empty window yields zeros / ``None`` percentiles, never an error.
+        """
+        now_ts = time.time() if now is None else now
+        cutoff = now_ts - max(0.0, float(window_seconds))
+        with self._lock:
+            total = int(self._conn.execute(
+                "SELECT COUNT(*) FROM access_log WHERE ts >= ?", (cutoff,),
+            ).fetchone()[0])
+            errors = int(self._conn.execute(
+                "SELECT COUNT(*) FROM access_log WHERE ts >= ? AND status >= 400",
+                (cutoff,),
+            ).fetchone()[0])
+            durations = [
+                row[0] for row in self._conn.execute(
+                    "SELECT duration_ms FROM access_log "
+                    "WHERE ts >= ? AND duration_ms IS NOT NULL "
+                    "ORDER BY duration_ms ASC",
+                    (cutoff,),
+                ).fetchall()
+            ]
+
+        minutes = window_seconds / 60.0 if window_seconds > 0 else 0.0
+        return {
+            "window_seconds": int(window_seconds),
+            "requests": total,
+            "req_per_min": round(total / minutes, 1) if minutes > 0 else 0.0,
+            "error_count": errors,
+            "error_rate": round(errors / total, 3) if total else 0.0,
+            "p50_ms": _percentile(durations, 0.50),
+            "p95_ms": _percentile(durations, 0.95),
+        }
 
     def clear(self) -> None:
         """Delete every row."""

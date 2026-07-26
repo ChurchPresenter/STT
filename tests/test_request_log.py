@@ -131,3 +131,69 @@ def test_persistence_across_reopen(tmp_path):
         assert reopened.query()[0]["path"] == "/api/x"
     finally:
         reopened.close()
+
+
+def _seed(log, *, ts, status=200, duration_ms=1.0, path="/api/x"):
+    log.log(source=SOURCE_API, kind=KIND_HTTP, method="GET", path=path,
+            status=status, duration_ms=duration_ms, ts=ts)
+
+
+def test_stats_empty_window_is_zeros(log):
+    s = log.stats(300, now=1000.0)
+    assert s["requests"] == 0
+    assert s["error_count"] == 0
+    assert s["error_rate"] == 0.0
+    assert s["req_per_min"] == 0.0
+    assert s["p50_ms"] is None
+    assert s["p95_ms"] is None
+
+
+def test_stats_counts_rate_and_errors(log):
+    now = 10_000.0
+    # 6 requests inside a 60s window: 2 errors (500, 404), 4 ok.
+    _seed(log, ts=now - 5, status=200, duration_ms=10)
+    _seed(log, ts=now - 4, status=200, duration_ms=20)
+    _seed(log, ts=now - 3, status=200, duration_ms=30)
+    _seed(log, ts=now - 2, status=200, duration_ms=40)
+    _seed(log, ts=now - 1, status=500, duration_ms=50)
+    _seed(log, ts=now - 1, status=404, duration_ms=60)
+    # One request OUTSIDE the window must be excluded.
+    _seed(log, ts=now - 120, status=200, duration_ms=999)
+
+    s = log.stats(60, now=now)
+    assert s["requests"] == 6
+    assert s["error_count"] == 2
+    assert s["error_rate"] == round(2 / 6, 3)
+    assert s["req_per_min"] == 6.0  # 6 requests over a 60s window
+    # durations 10..60 sorted; nearest-rank p50 -> index round(0.5*5)=2 -> 30
+    assert s["p50_ms"] == 30.0
+    # p95 -> index round(0.95*5)=5 -> 60
+    assert s["p95_ms"] == 60.0
+
+
+def test_stats_ignores_null_durations_in_percentiles(log):
+    now = 5000.0
+    _seed(log, ts=now - 1, status=200, duration_ms=10)
+    # a socket-style row with no duration
+    log.log(source=SOURCE_SOCKET, kind=KIND_CONNECTION, ts=now - 1)
+    s = log.stats(60, now=now)
+    assert s["requests"] == 2      # both counted as requests
+    assert s["p50_ms"] == 10.0     # only the timed one feeds the percentile
+
+
+def test_query_exclude_paths(log):
+    log.log(source=SOURCE_API, kind=KIND_HTTP, path="/api/logs", status=200)
+    log.log(source=SOURCE_API, kind=KIND_HTTP, path="/api/health", status=200)
+    log.log(source=SOURCE_API, kind=KIND_HTTP, path="/api/translate", status=200)
+    log.log(source=SOURCE_WEB, kind=KIND_HTTP, path="/server-settings", status=200)
+    # a socket action row has no path — must survive the exclusion
+    log.log(source=SOURCE_SOCKET, kind=KIND_ACTION, detail="start")
+
+    rows = log.query(exclude_paths=["/api/logs", "/api/health"])
+    paths = sorted(r["path"] for r in rows if r["path"])
+    assert paths == ["/api/translate", "/server-settings"]
+    # the null-path socket row is still returned
+    assert any(r["path"] is None for r in rows)
+
+    # no exclusion returns everything
+    assert len(log.query()) == 5

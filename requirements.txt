@@ -45,6 +45,8 @@ piper-tts>=1.2.0
 pytz>=2023.3
 silero-vad>=4.0.0
 smbprotocol>=1.10.0
+# Live CPU/RAM metrics for the health dashboard (optional — degrades to "n/a" if absent)
+psutil>=5.9.0
 # Optional error reporting — only active when crash_reporting.sentry_dsn is set
 sentry-sdk[flask]>=2.0,<3
 

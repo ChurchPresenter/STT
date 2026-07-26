@@ -841,7 +841,12 @@ def translate_text(text, source_lang, target_lang, model, tokenizer, return_conf
             generate_kwargs["num_beams"] = max(5, num_alternatives + 1)
 
     # Generate translation
+    _tr_t0 = time.perf_counter()
     translated = model.generate(**inputs, **generate_kwargs)
+    try:
+        _record_local_translate_ms((time.perf_counter() - _tr_t0) * 1000.0)
+    except Exception:
+        pass
 
     if return_confidence or num_alternatives > 0:
         # Extract sequences and scores
@@ -1020,6 +1025,19 @@ _live_translation_target_lang = None
 # the lock and aborts if a preload re-requested the model in the meantime, so a
 # quick stop->start doesn't ack "already loaded" and then lose the model.
 _live_translation_model_wanted = False
+
+# EMA of local NLLB translate time (ms), surfaced on the health dashboard. Set in
+# translate_text() around model.generate; read in get_translation_status().
+_local_translate_ms_ema = None
+_local_translate_ms_lock = threading.Lock()
+
+
+def _record_local_translate_ms(elapsed_ms, alpha=0.3):
+    """Fold one local translation timing into the running EMA (thread-safe)."""
+    global _local_translate_ms_ema
+    with _local_translate_ms_lock:
+        prev = _local_translate_ms_ema
+        _local_translate_ms_ema = elapsed_ms if prev is None else alpha * elapsed_ms + (1 - alpha) * prev
 
 
 def is_live_translation_ready():
@@ -2323,6 +2341,14 @@ if multiprocessing.current_process().name == 'MainProcess':
             "audio_stream_enabled": False,  # Whether to stream audio to web clients
             "audio_type": None,  # "Speaking", "Music", or "Quiet" — PANNs detection (no_speech_prob fallback)
             "detection_mode": None,  # "panns" (tagger live) or "energy" (fallback) — which detector is actually running
+            "loaded_model_device": None,  # "cuda" / "mps" / "cpu" the ASR model landed on
+            "model_load_ms": None,  # How long the ASR model took to load (ms)
+            "infer_ms_ema": None,  # EMA of per-chunk transcribe time (ms) — health dashboard
+            "rtf_ema": None,  # EMA real-time factor (transcribe_s / audio_s); <1 keeps up
+            "segments_total": 0,  # Chunks transcribed this session (throughput numerator)
+            "segments_per_min": None,  # Throughput over the session window
+            "rows_saved": 0,  # Finalized transcript lines saved to the session DB
+            "queue_depth": None,  # audio_stream_queue depth, when readable
         }
     )
 
@@ -3093,6 +3119,7 @@ socketio = SocketIO(app, async_mode="threading", static_url_path="/static", stat
 # and SocketIO action, into a size-capped SQLite table under APP_DIR/logs.
 # Viewed at /logs (page) and /api/logs (JSON). Thin wrapper over stt.request_log.
 from stt import request_log as _request_log  # noqa: E402
+from stt import metrics as _metrics  # noqa: E402
 
 try:
     os.makedirs(os.path.join(APP_DIR, "logs"), exist_ok=True)
@@ -3829,11 +3856,25 @@ def get_config():
         return jsonify({"success": False, "error": str(e)}), 500
 
 
+# High-frequency endpoints the web UI polls on a timer — they flood the access
+# log and drown out meaningful traffic, so the log viewer hides them by default.
+POLLING_LOG_PATHS = [
+    "/api/logs",
+    "/api/health",
+    "/api/health/remote",
+    "/api/transcription/status",
+    "/api/server/time",
+    "/api/system/requirements",
+    "/api/translation/status",
+    "/api/tts/status",
+]
+
+
 @app.route("/api/logs", methods=["GET"])
 def api_logs():
     """Return recent access-log entries (newest first), with optional filters:
     ?source=web|api|socket, ?kind=http|connection|action, ?search=<substr>,
-    ?limit=<n>."""
+    ?hide_polling=1 (drop high-frequency dashboard polling), ?limit=<n>."""
     if not check_ip_whitelist():
         return jsonify({"success": False, "error": "Access Denied"}), 403
     if request_logger is None:
@@ -3844,10 +3885,12 @@ def api_logs():
         limit = 200
     limit = max(1, min(limit, 2000))
     try:
+        hide_polling = request.args.get("hide_polling") in ("1", "true", "yes")
         entries = request_logger.query(
             source=(request.args.get("source") or None),
             kind=(request.args.get("kind") or None),
             search=(request.args.get("search") or None),
+            exclude_paths=POLLING_LOG_PATHS if hide_polling else None,
             limit=limit,
         )
         return jsonify({
@@ -4949,6 +4992,171 @@ def get_server_time():
     })
 
 
+def _safe(getter, default=None):
+    """Call a status getter, swallowing any error so one bad section never
+    fails the whole /api/health aggregation."""
+    try:
+        return getter()
+    except Exception:
+        return default
+
+
+@app.route("/health")
+def health_page():
+    """Render the health / metrics dashboard page"""
+    if not check_ip_whitelist():
+        return render_template("auth-required.html"), 403
+    return render_template("health.html")
+
+
+@app.route("/api/health", methods=["GET"])
+def get_health():
+    """Aggregate live health/metrics from the existing status getters plus the
+    new performance and system-resource instrumentation into one payload the
+    dashboard polls. Each numeric metric carries a server-computed status so the
+    client only paints colours."""
+    if not check_ip_whitelist():
+        return jsonify({"success": False, "error": "Access Denied"}), 403
+    try:
+        ts = _ts_snapshot()
+        hw = _safe(_probe_hardware, {}) or {}
+        sysres = _safe(_metrics.sample_system_resources, {}) or {}
+
+        # --- transcription ---
+        rtf = ts.get("rtf_ema")
+        _start = ts.get("start_time") or 0
+        _session_seconds = round(time.time() - _start) if (ts.get("running") and _start) else None
+        transcription = {
+            "session_id": ts.get("session_id"),
+            "db_name": ts.get("db_name"),
+            "session_seconds": _session_seconds,
+            "session_display": _metrics.format_uptime(_session_seconds) if _session_seconds is not None else None,
+            "rows_saved": ts.get("rows_saved", 0),
+            "running": ts.get("running", False),
+            "status": ts.get("status", "stopped"),
+            "message": ts.get("message", ""),
+            "loaded_model": ts.get("loaded_model") or None,
+            "loaded_model_device": ts.get("loaded_model_device"),
+            "model_load_ms": ts.get("model_load_ms"),
+            "audio_level": ts.get("audio_level", 0),
+            "audio_db": ts.get("audio_db"),
+            "audio_type": ts.get("audio_type"),
+            "detection_mode": ts.get("detection_mode"),
+            "rtf_ema": rtf,
+            "rtf_status": _metrics.rtf_status(rtf),
+            "infer_ms_ema": ts.get("infer_ms_ema"),
+            "segments_total": ts.get("segments_total", 0),
+            "segments_per_min": ts.get("segments_per_min"),
+            "queue_depth": ts.get("queue_depth"),
+        }
+
+        # --- system resources (live used vs. static totals) ---
+        ram_used = sysres.get("ram_used_bytes")
+        ram_total = sysres.get("ram_total_bytes") or hw.get("ram_bytes")
+        vram_used = sysres.get("vram_used_bytes")
+        vram_total = hw.get("vram_bytes")
+        cpu_pct = sysres.get("cpu_pct")
+        # Disk: total/used/free so the UI can show GB + percent with a status colour.
+        _disk_total = _disk_used = _disk_free = None
+        try:
+            import shutil as _shutil
+            _du = _shutil.disk_usage(APP_DIR)
+            _disk_total, _disk_used, _disk_free = _du.total, _du.used, _du.free
+        except Exception:
+            _disk_free = hw.get("disk_free_bytes")
+        system = {
+            "cpu_pct": cpu_pct,
+            "cpu_cores": hw.get("cpu_cores"),
+            "cpu_status": _metrics.fraction_status(cpu_pct, 100.0),
+            "ram_used_bytes": ram_used,
+            "ram_total_bytes": ram_total,
+            "ram_status": _metrics.fraction_status(ram_used, ram_total),
+            "gpu_util_pct": sysres.get("gpu_util_pct"),
+            "has_cuda": hw.get("has_cuda", False),
+            "vram_used_bytes": vram_used,
+            "vram_total_bytes": vram_total,
+            "vram_status": _metrics.fraction_status(vram_used, vram_total),
+            "disk_free_bytes": _disk_free,
+            "disk_used_bytes": _disk_used,
+            "disk_total_bytes": _disk_total,
+            "disk_percent": round(100 * _disk_used / _disk_total, 1) if (_disk_used and _disk_total) else None,
+            "disk_status": _metrics.fraction_status(_disk_used, _disk_total),
+            "apple_silicon": hw.get("apple_silicon", False),
+        }
+
+        # --- requests (access log) ---
+        requests_stats = None
+        if _access_log_enabled() and request_logger is not None:
+            requests_stats = _safe(lambda: request_logger.stats(300))
+            if requests_stats is not None:
+                requests_stats["error_status"] = _metrics.fraction_status(
+                    requests_stats.get("error_count"),
+                    max(1, requests_stats.get("requests", 0)),
+                    degraded_above=0.02, error_above=0.10,
+                )
+
+        # --- audio detectors (music/speech tagging + VAD) ---
+        _panns = _safe(lambda: panns_status().get_json()) or {}
+        _vad = _safe(lambda: silero_vad_status().get_json()) or {}
+        detectors = {
+            "detection_mode": ts.get("detection_mode"),
+            "panns_available": _panns.get("downloaded"),
+            "panns_message": _panns.get("message"),
+            "vad_available": _vad.get("downloaded"),
+            "vad_message": _vad.get("message"),
+        }
+
+        health = {
+            "server": {
+                "uptime_seconds": round(time.time() - SERVER_START_TIME),
+                "uptime_display": _metrics.format_uptime(time.time() - SERVER_START_TIME),
+                "version": SERVER_VERSION,
+                "commit": SERVER_COMMIT,
+                "display_version": SERVER_DISPLAY_VERSION,
+            },
+            "transcription": transcription,
+            "detectors": detectors,
+            "translation": _safe(get_translation_status, {}),
+            "tts": _safe(get_tts_status, {}),
+            "file_mover": _safe(get_file_mover_runtime, {}),
+            "system": system,
+            "requests": requests_stats,
+        }
+        return jsonify({"success": True, "health": health})
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@app.route("/api/health/remote", methods=["GET"])
+def get_health_remote():
+    """Proxy the remote translation machine's ("Machine B") /api/health so the
+    local dashboard can show its metrics too. Kept separate from /api/health so
+    a slow or unreachable remote never stalls the local poll. IP-trusted on the
+    remote side, so no auth token is forwarded."""
+    if not check_ip_whitelist():
+        return jsonify({"success": False, "error": "Access Denied"}), 403
+    endpoint = _safe(_get_remote_endpoint_safe)
+    if not endpoint:
+        return jsonify({"success": False, "error": "No remote endpoint configured",
+                        "configured": False}), 200
+    import requests as _req
+    try:
+        r = _req.get(endpoint.rstrip("/") + "/api/health", timeout=3)
+        try:
+            data = r.json()
+        except ValueError:
+            return jsonify({"success": False, "configured": True, "endpoint": endpoint,
+                            "error": "Invalid response from remote"}), 200
+        # Tag the endpoint on so the UI can label the section.
+        if isinstance(data, dict):
+            data["endpoint"] = endpoint
+            data["configured"] = True
+        return jsonify(data), 200
+    except Exception as e:
+        return jsonify({"success": False, "configured": True, "endpoint": endpoint,
+                        "reachable": False, "error": str(e)}), 200
+
+
 # Live Translation API Endpoints
 
 
@@ -5244,6 +5452,9 @@ def get_translation_status():
         # null until loaded). 'cpu' on a machine meant to accelerate is the
         # classic cause of seconds-per-sentence translations.
         "model_device": _live_translation_device if not (remote_active or _using_whisper) else None,
+        # EMA of local NLLB per-translation latency (ms); null until a local
+        # translation has run. High values flag the seconds-per-sentence problem.
+        "local_translate_ms_ema": round(_local_translate_ms_ema, 1) if _local_translate_ms_ema is not None else None,
     }
 
     # Only expose sensitive info (clients, pairs) to local/whitelisted or paired callers
@@ -13341,10 +13552,22 @@ def thread1_function(ts, cq, cfq, cal_state, cal_data, cal_step1, asq):
                     )
 
                     try:
+                        _model_load_t0 = time.perf_counter()
                         audio_model, processor, model_type = ModelFactory.load_model(
                             model_config, use_gpu
                         )
+                        _model_load_ms = round((time.perf_counter() - _model_load_t0) * 1000, 1)
                         print(f"[OK] Model loaded successfully: {model_config.get('type', 'whisper')}")
+
+                        # Best-effort: which device did the ASR model actually land on?
+                        _model_device = None
+                        try:
+                            _m = getattr(audio_model, "model", audio_model)
+                            _dev = getattr(_m, "device", None)
+                            if _dev is not None:
+                                _model_device = str(_dev).split(":")[0]  # "cuda:0" -> "cuda"
+                        except Exception:
+                            _model_device = None
 
                         # Determine the actual loaded model name for display
                         loaded_model_name = ""
@@ -13366,6 +13589,8 @@ def thread1_function(ts, cq, cfq, cal_state, cal_data, cal_step1, asq):
                         # Update transcription state with loaded model name
                         with _transcription_state_lock:
                             transcription_state["loaded_model"] = loaded_model_name
+                            transcription_state["loaded_model_device"] = _model_device
+                            transcription_state["model_load_ms"] = _model_load_ms
 
                     except Exception as e:
                         error_msg = f"Model loading failed: {e!s}"
@@ -13809,7 +14034,20 @@ def thread1_function(ts, cq, cfq, cal_state, cal_data, cal_step1, asq):
                         transcription_state["message"] = "Transcription is active and ready"
                         transcription_state["error"] = None
                         transcription_state["start_time"] = time.time()
+                        # Zero the health-perf counters for the new session
+                        transcription_state["infer_ms_ema"] = None
+                        transcription_state["rtf_ema"] = None
+                        transcription_state["segments_total"] = 0
+                        transcription_state["segments_per_min"] = None
+                        transcription_state["rows_saved"] = 0
+                        transcription_state["queue_depth"] = None
                     print("[READY] Transcription system initialized successfully!")
+
+                    # Health-dashboard performance accounting (worker-local; pushed
+                    # to the shared state periodically so /api/health can read it).
+                    _perf_state = None       # EMA dict from stt.metrics.update_perf_ema
+                    _perf_first_ts = None    # epoch of the first transcribed chunk (throughput window)
+                    _perf_last_push = 0.0    # last time we wrote perf fields to shared state
 
                     while True:
                         try:
@@ -14253,6 +14491,7 @@ def thread1_function(ts, cq, cfq, cal_state, cal_data, cal_step1, asq):
 
                                     # Transcribe the audio chunk and get segments with timestamps
                                     # This is key to avoiding overlaps - Whisper knows segment boundaries
+                                    _infer_t0 = time.perf_counter()
                                     segments = ModelFactory.transcribe(
                                         audio_model,
                                         processor,
@@ -14262,6 +14501,35 @@ def thread1_function(ts, cq, cfq, cal_state, cal_data, cal_step1, asq):
                                         whisper_params=whisper_params,
                                         return_segments=True
                                     )
+                                    # Health metrics: fold this chunk's transcribe time into the
+                                    # running EMA / real-time-factor and push to shared state at
+                                    # most ~1/s. Never let instrumentation break transcription.
+                                    try:
+                                        _infer_ms = (time.perf_counter() - _infer_t0) * 1000.0
+                                        _now = time.time()
+                                        if _perf_first_ts is None:
+                                            _perf_first_ts = _now
+                                        _perf_state = _metrics.update_perf_ema(
+                                            _perf_state, _infer_ms, chunk_duration
+                                        )
+                                        if _now - _perf_last_push >= 1.0:
+                                            _perf_last_push = _now
+                                            try:
+                                                _qd = audio_stream_queue.qsize()
+                                            except (NotImplementedError, OSError):
+                                                _qd = None
+                                            transcription_state.update({
+                                                "infer_ms_ema": _perf_state["infer_ms_ema"],
+                                                "rtf_ema": _perf_state["rtf_ema"],
+                                                "segments_total": _perf_state["segments_total"],
+                                                "segments_per_min": _metrics.segments_per_minute(
+                                                    _perf_state["segments_total"], _perf_first_ts, _now
+                                                ),
+                                                "rows_saved": len(saved_sentences),
+                                                "queue_depth": _qd,
+                                            })
+                                    except Exception:
+                                        pass
 
                                     # === Whisper Translation Pass (dual-pass) ===
                                     # If Whisper-based translation is active, run a second pass on the same audio

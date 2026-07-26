@@ -2,6 +2,7 @@
 
 {% block title %}Access Logs - Speech to Text{% endblock %}
 {% block page_title %}Access Logs{% endblock %}
+{% block sysreq_banner %}{% endblock %}
 
 {% block extra_css %}
         .logs-toolbar {
@@ -10,6 +11,11 @@
             gap: 10px;
             align-items: center;
             margin-bottom: 16px;
+        }
+        .logs-filters {
+            display: flex;
+            flex-wrap: nowrap;
+            gap: 10px;
         }
         .logs-toolbar select,
         .logs-toolbar input[type="text"] {
@@ -99,25 +105,28 @@
 
 {% block content %}
 <div class="logs-toolbar">
-    <select id="filter-source">
-        <option value="">All sources</option>
-        <option value="web">Web interface</option>
-        <option value="api">API</option>
-        <option value="socket">WebSocket</option>
-    </select>
-    <select id="filter-kind">
-        <option value="">All events</option>
-        <option value="http">HTTP request</option>
-        <option value="connection">WS connection</option>
-        <option value="action">Action</option>
-    </select>
+    <div class="logs-filters">
+        <select id="filter-source">
+            <option value="">All sources</option>
+            <option value="web">Web interface</option>
+            <option value="api">API</option>
+            <option value="socket">WebSocket</option>
+        </select>
+        <select id="filter-kind">
+            <option value="">All events</option>
+            <option value="http">HTTP request</option>
+            <option value="connection">WS connection</option>
+            <option value="action">Action</option>
+        </select>
+        <select id="filter-limit">
+            <option value="200">200 rows</option>
+            <option value="500">500 rows</option>
+            <option value="1000">1000 rows</option>
+            <option value="2000">2000 rows</option>
+        </select>
+    </div>
     <input type="text" id="filter-search" placeholder="Search path, IP, or detail…">
-    <select id="filter-limit">
-        <option value="200">200 rows</option>
-        <option value="500">500 rows</option>
-        <option value="1000">1000 rows</option>
-        <option value="2000">2000 rows</option>
-    </select>
+    <label><input type="checkbox" id="hide-polling" checked> Hide dashboard polling</label>
     <label><input type="checkbox" id="auto-refresh" checked> Auto-refresh</label>
     <button class="logs-btn" id="refresh-btn">Refresh</button>
     <button class="logs-btn danger" id="clear-btn">Clear</button>
@@ -198,6 +207,7 @@
         if (source) params.set("source", source);
         if (kind) params.set("kind", kind);
         if (search) params.set("search", search);
+        if ($("hide-polling").checked) params.set("hide_polling", "1");
         params.set("limit", limit);
         try {
             const res = await fetch("/api/logs?" + params.toString());
@@ -237,7 +247,7 @@
     $("refresh-btn").addEventListener("click", load);
     $("clear-btn").addEventListener("click", clearLogs);
     $("auto-refresh").addEventListener("change", scheduleAuto);
-    ["filter-source", "filter-kind", "filter-limit"].forEach(
+    ["filter-source", "filter-kind", "filter-limit", "hide-polling"].forEach(
         (id) => $(id).addEventListener("change", load));
     let searchTimer = null;
     $("filter-search").addEventListener("input", () => {
