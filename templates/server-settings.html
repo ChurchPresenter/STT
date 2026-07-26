@@ -173,25 +173,7 @@
             }
         }
 
-        .unsaved-bar {
-            position: fixed;
-            bottom: 0;
-            left: 0;
-            right: 0;
-            background: rgba(10, 10, 12, 0.95);
-            backdrop-filter: blur(8px);
-            border-top: 1px solid var(--border);
-            padding: 10px 24px;
-            z-index: 1000;
-        }
-        .unsaved-bar-inner {
-            max-width: 1300px;
-            margin: 0 auto;
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
-        }
-        .unsaved-bar span { color: var(--warning); font-size: 0.85em; font-weight: 600; }
+        /* .unsaved-bar styles are shared from base.html */
 
         /* Body-anchored tooltip: escapes the scrollable endpoints list (which
            would clip a CSS ::after) and works on hover, keyboard focus, and tap. */
@@ -576,10 +558,11 @@
             </div>
         </div>
 
-        <div id="unsaved-bar" class="unsaved-bar" style="display:none;">
+        <div id="unsaved-bar" class="unsaved-bar" role="status" aria-live="polite">
             <div class="unsaved-bar-inner">
-                <span>Unsaved changes</span>
-                <button type="button" onclick="document.getElementById('serverForm').requestSubmit()" class="btn-save" style="margin:0; width:auto; padding:8px 24px; background: var(--accent);">Save</button>
+                <span class="unsaved-dot" aria-hidden="true"></span>
+                <span class="unsaved-label">Unsaved changes</span>
+                <button type="button" onclick="document.getElementById('serverForm').requestSubmit()" class="btn-save unsaved-save">Save</button>
             </div>
         </div>
 {% endblock %}
@@ -970,14 +953,14 @@
             if (!unsavedChanges) {
                 unsavedChanges = true;
                 if (!saveBtnVisible) {
-                    document.getElementById('unsaved-bar').style.display = 'flex';
+                    document.getElementById('unsaved-bar').classList.add('is-visible');
                 }
             }
         }
 
         function markClean() {
             unsavedChanges = false;
-            document.getElementById('unsaved-bar').style.display = 'none';
+            document.getElementById('unsaved-bar').classList.remove('is-visible');
         }
 
         (function() {
@@ -989,7 +972,7 @@
             const observer = new IntersectionObserver(([entry]) => {
                 saveBtnVisible = entry.isIntersecting;
                 if (unsavedChanges) {
-                    document.getElementById('unsaved-bar').style.display = saveBtnVisible ? 'none' : 'flex';
+                    document.getElementById('unsaved-bar').classList.toggle('is-visible', !saveBtnVisible);
                 }
             });
             observer.observe(saveBtn);

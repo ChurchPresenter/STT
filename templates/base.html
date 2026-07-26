@@ -471,6 +471,67 @@
             box-shadow: 0 4px 16px var(--accent-glow);
         }
 
+        /* --- Unsaved-changes floating pill (shared by settings pages) ---------
+           Fixed layer pinned to the bottom, centered; the pill floats ~16px up.
+           Shown by toggling .is-visible (see the per-page dirty-state JS). */
+        .unsaved-bar {
+            position: fixed;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            display: flex;
+            justify-content: center;
+            padding-bottom: 16px;
+            z-index: 1000;
+            pointer-events: none;               /* click-through around the pill */
+            opacity: 0;
+            visibility: hidden;
+            transform: translateY(12px);
+            transition: opacity 0.18s var(--ease-out),
+                        transform 0.18s var(--ease-out),
+                        visibility 0.18s var(--ease-out);
+        }
+        .unsaved-bar.is-visible {
+            opacity: 1;
+            visibility: visible;
+            transform: translateY(0);
+        }
+        .unsaved-bar-inner {
+            pointer-events: auto;
+            display: flex;
+            align-items: center;
+            gap: 14px;
+            background: #0e0e11;                 /* opaque: floats over content, no blur */
+            border: 1px solid var(--border-hover);
+            border-radius: var(--radius-md);
+            padding: 9px 10px 9px 18px;
+            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.45);  /* floating-overlay lift */
+            max-width: calc(100vw - 32px);
+        }
+        .unsaved-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: var(--warning);
+            box-shadow: 0 0 0 3px rgba(245, 158, 11, 0.15);
+            flex: none;
+        }
+        .unsaved-label {
+            color: var(--warning);
+            font-size: var(--fs-sm);
+            font-weight: 600;
+            margin-right: auto;                 /* pushes Save to the right edge */
+        }
+        .unsaved-save {
+            margin: 0;
+            width: auto;
+            padding: 7px 20px;
+        }
+        @media (prefers-reduced-motion: reduce) {
+            .unsaved-bar { transform: none; transition: opacity 0.12s linear, visibility 0.12s linear; }
+            .unsaved-bar.is-visible { transform: none; }
+        }
+
         .btn-save.btn-warning {
             background: var(--warning);
             color: #0a0a0c;
