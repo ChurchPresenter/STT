@@ -1817,6 +1817,10 @@
             const accentColor = style.getPropertyValue('--accent').trim();
             const bgColor = style.getPropertyValue('--bg-base').trim();
             const mutedColor = style.getPropertyValue('--text-muted').trim();
+            const gridColor = style.getPropertyValue('--border').trim();
+            const infoColor = style.getPropertyValue('--info').trim();
+            const successColor = style.getPropertyValue('--success').trim();
+            const warningColor = style.getPropertyValue('--warning').trim();
             const ctx = canvas.getContext('2d');
             const width = canvas.width;
             const height = canvas.height;
@@ -1836,7 +1840,7 @@
             }
 
             // Draw grid lines (horizontal)
-            ctx.strokeStyle = 'rgba(255,255,255,0.06)';
+            ctx.strokeStyle = gridColor;
             ctx.lineWidth = 1;
             for (let i = 0; i <= 4; i++) {
                 const y = (height / 4) * i;
@@ -1873,9 +1877,9 @@
 
                 // Draw the line with gradient color
                 const gradient = ctx.createLinearGradient(0, 0, width, 0);
-                gradient.addColorStop(0, '#3B82F6');
-                gradient.addColorStop(0.5, '#22C55E');
-                gradient.addColorStop(1, '#F59E0B');
+                gradient.addColorStop(0, infoColor);
+                gradient.addColorStop(0.5, successColor);
+                gradient.addColorStop(1, warningColor);
                 ctx.strokeStyle = gradient;
 
                 const pointSpacing = width / maxTimelinePoints;
@@ -1929,6 +1933,10 @@
         setTimeout(() => {
             drawTimeline();
         }, 100);
+
+        // Repaint immediately on a theme toggle (the canvas re-reads tokens each draw).
+        new MutationObserver(() => drawTimeline())
+            .observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
 
         // Load model status from model manager
         async function loadModelStatus() {
