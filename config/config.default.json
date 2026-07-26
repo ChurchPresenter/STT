@@ -381,8 +381,8 @@
     "translation_method": "nllb",
     "_translation_method_comment": "Translation engine to use (currently 'nllb').",
     "generation_params": {
-      "num_beams": 5,
-      "_num_beams_comment": "Beam search width. Higher = better quality but slower.",
+      "num_beams": 2,
+      "_num_beams_comment": "Beam search width. Higher = better quality but slower; 1 = greedy (fastest). 2 balances quality against latency for real-time captioning.",
       "length_penalty": 1.0,
       "_length_penalty_comment": "Exponential penalty on sequence length. >1.0 favors longer output, <1.0 shorter.",
       "no_repeat_ngram_size": 0,

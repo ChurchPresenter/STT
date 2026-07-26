@@ -808,7 +808,7 @@ def translate_text(text, source_lang, target_lang, model, tokenizer, return_conf
 
     # Merge user generation params with defaults
     gp = generation_params or {}
-    num_beams = gp.get("num_beams", 5)
+    num_beams = gp.get("num_beams", 2)
     length_penalty = gp.get("length_penalty", 1.0)
     no_repeat_ngram_size = gp.get("no_repeat_ngram_size", 0)
     repetition_penalty = gp.get("repetition_penalty", 1.0)
@@ -5279,7 +5279,7 @@ def save_translation_settings():
     if "generation_params" in data:
         gp = data["generation_params"]
         config["live_translation"]["generation_params"] = {
-            "num_beams": max(1, min(20, int(gp.get("num_beams", 5)))),
+            "num_beams": max(1, min(20, int(gp.get("num_beams", 2)))),
             "length_penalty": max(0.1, min(3.0, float(gp.get("length_penalty", 1.0)))),
             "no_repeat_ngram_size": max(0, min(10, int(gp.get("no_repeat_ngram_size", 0)))),
             "repetition_penalty": max(0.5, min(3.0, float(gp.get("repetition_penalty", 1.0)))),

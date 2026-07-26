@@ -284,8 +284,8 @@
                 </div>
 
                 <div class="form-group">
-                    <label for="num_beams">Beam Search Width: <span id="numBeamsValue">5</span></label>
-                    <input type="range" id="num_beams" min="1" max="20" value="5" step="1"
+                    <label for="num_beams">Beam Search Width: <span id="numBeamsValue">2</span></label>
+                    <input type="range" id="num_beams" min="1" max="20" value="2" step="1"
                            oninput="document.getElementById('numBeamsValue').textContent = this.value"
                            style="width:100%;">
                     <small style="color: var(--text-secondary); font-size: 0.75em;">Higher = better quality but slower. 1 = greedy (fastest), 5 = default, 10+ = high quality</small>
@@ -699,7 +699,7 @@
 
                     // Translation quality settings
                     const genParams = currentSettings.generation_params || {};
-                    const numBeams = genParams.num_beams ?? 5;
+                    const numBeams = genParams.num_beams ?? 2;
                     document.getElementById('num_beams').value = numBeams;
                     document.getElementById('numBeamsValue').textContent = numBeams;
 
