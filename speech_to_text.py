@@ -57,6 +57,7 @@ for _mig_name in ("config.json", "custom_dictionary.json", "word_highlighting.js
 # safe_model_path is re-imported and safe_managed_path keeps its APP_DIR default.
 from stt import paths as _paths
 from stt.paths import safe_model_path  # noqa: F401
+from stt.coercion import coerce_int
 from stt.model_disk import dir_has_weights, dir_is_writable, has_weight_file, is_weight_file  # noqa: F401
 
 
@@ -4194,7 +4195,9 @@ def start_calibration():
     try:
         # Get duration and skip_step1 from request
         request_data = request.get_json() or {}
-        duration = request_data.get("duration", 15)
+        # Clamp to a numeric range: this flows to the transcription worker
+        # (elapsed >= duration, duration * 2); a non-numeric value would crash it.
+        duration = coerce_int(request_data.get("duration"), 15, lo=3, hi=120)
         skip_step1 = request_data.get("skip_step1", False)
 
         # Auto-start transcription if not running (calibration needs audio data)
@@ -4389,7 +4392,7 @@ def add_highlighted_word():
     if not check_ip_whitelist():
         return jsonify({"success": False, "error": "Access Denied"}), 403
 
-    req_data = request.json
+    req_data = request.get_json(silent=True) or {}
     word = req_data.get("word", "").strip()
     color = req_data.get("color", "#ffff00")  # Default yellow
     case_sensitive = req_data.get("case_sensitive", False)
@@ -4461,7 +4464,7 @@ def update_highlighted_word(index):
     if not check_ip_whitelist():
         return jsonify({"success": False, "error": "Access Denied"}), 403
 
-    req_data = request.json
+    req_data = request.get_json(silent=True) or {}
     wh_data = load_word_highlighting()
     words = wh_data.get("words", [])
 
@@ -4523,7 +4526,7 @@ def toggle_color_group():
     if not check_ip_whitelist():
         return jsonify({"success": False, "error": "Access Denied"}), 403
 
-    req_data = request.json
+    req_data = request.get_json(silent=True) or {}
     color = req_data.get("color", "").strip().lower()
 
     if not color:
@@ -4849,7 +4852,7 @@ def save_file_transcription_settings():
         return jsonify({"success": False, "error": "Access Denied"}), 403
 
     global config
-    data = request.json
+    data = request.get_json(silent=True) or {}
 
     if "file_transcription" not in config:
         config["file_transcription"] = {}
@@ -4933,7 +4936,7 @@ def save_timezone_settings():
         return jsonify({"success": False, "error": "Access Denied"}), 403
 
     global config
-    data = request.json
+    data = request.get_json(silent=True) or {}
 
     if "timezone" not in config:
         config["timezone"] = {}
@@ -5320,7 +5323,7 @@ def save_translation_settings():
         return jsonify({"success": False, "error": "Access Denied"}), 403
 
     global config
-    data = request.json
+    data = request.get_json(silent=True) or {}
 
     if "live_translation" not in config:
         config["live_translation"] = {}
@@ -5370,7 +5373,7 @@ def save_translation_settings():
 
     # Save translation alternatives count to corrections config
     if "translation_count" in data:
-        config.setdefault("corrections", {}).setdefault("n_best_alternatives", {})["translation_count"] = int(data["translation_count"])
+        config.setdefault("corrections", {}).setdefault("n_best_alternatives", {})["translation_count"] = coerce_int(data.get("translation_count"), 3, lo=1, hi=10)
 
     save_config(config)
 
@@ -5575,7 +5578,7 @@ def hot_switch_translation_language():
     if not check_ip_whitelist():
         return jsonify({"success": False, "error": "Access Denied"}), 403
 
-    data = request.json
+    data = request.get_json(silent=True) or {}
     new_language = data.get("target_language")
 
     if not new_language:
@@ -5710,7 +5713,7 @@ def translate_remote():
     source_lang = data.get("source_lang", cfg.get("source_language", "auto"))
     target_lang = data.get("target_lang", cfg.get("target_language", "en"))
     return_extras = bool(data.get("return_extras", False))
-    num_alternatives = int(data.get("num_alternatives", 0))
+    num_alternatives = coerce_int(data.get("num_alternatives"), 0, lo=0, hi=10)
     # Use generation_params from request (Machine A's settings) if provided
     generation_params = data.get("generation_params")
 
@@ -6112,7 +6115,7 @@ def save_tts_settings():
         return jsonify({"success": False, "error": "Access Denied"}), 403
 
     global config
-    data = request.json
+    data = request.get_json(silent=True) or {}
 
     if "live_translation" not in config:
         config["live_translation"] = {}
@@ -6647,7 +6650,7 @@ def hot_switch_transcription_language():
     if not check_ip_whitelist():
         return jsonify({"success": False, "error": "Access Denied"}), 403
 
-    data = request.json
+    data = request.get_json(silent=True) or {}
     new_language = data.get("language")
 
     if not new_language:
@@ -6687,7 +6690,7 @@ def hot_switch_all_languages():
     if not check_ip_whitelist():
         return jsonify({"success": False, "error": "Access Denied"}), 403
 
-    data = request.json
+    data = request.get_json(silent=True) or {}
 
     transcription_lang = data.get("transcription")
     translation_lang = data.get("translation")
@@ -6782,7 +6785,7 @@ def file_transcription_settings_endpoint():
     elif request.method == "POST":
         # Update file transcription settings
         try:
-            new_settings = request.json
+            new_settings = request.get_json(silent=True) or {}
 
             # Update config
             if "file_transcription" not in config:
