@@ -6264,6 +6264,29 @@ def _probe_remote_port(base_url):
 _remote_reachable_cache = {}  # {endpoint: (reachable: bool, checked_at: float)}
 _remote_reachable_cache_lock = threading.Lock()
 
+_remote_http_session = None
+_remote_http_session_lock = threading.Lock()
+
+
+def _get_remote_http_session():
+    """Shared pooled requests.Session for the offload path (reachability GET +
+    translate POST), so connections are kept alive/reused instead of a fresh
+    TCP handshake per request. requests.Session is safe for concurrent use; the
+    lock only guards one-time construction. max_retries=0 keeps fail-fast so the
+    existing fallback logic fires immediately on a dead peer."""
+    global _remote_http_session
+    if _remote_http_session is None:
+        with _remote_http_session_lock:
+            if _remote_http_session is None:
+                import requests
+                from requests.adapters import HTTPAdapter
+                s = requests.Session()
+                adapter = HTTPAdapter(pool_connections=4, pool_maxsize=8, max_retries=0)
+                s.mount("http://", adapter)
+                s.mount("https://", adapter)
+                _remote_http_session = s
+    return _remote_http_session
+
 
 def _check_remote_reachable(endpoint, timeout=1.5, ttl=5.0):
     """Cheap, cached liveness check for a paired remote translation endpoint."""
@@ -6275,8 +6298,7 @@ def _check_remote_reachable(endpoint, timeout=1.5, ttl=5.0):
         if cached and (now - cached[1]) < ttl:
             return cached[0]
     try:
-        import requests as _requests
-        r = _requests.get(endpoint.rstrip("/") + "/api/translation/status", timeout=timeout)
+        r = _get_remote_http_session().get(endpoint.rstrip("/") + "/api/translation/status", timeout=timeout)
         reachable = r.status_code == 200
     except Exception:
         reachable = False
@@ -12418,7 +12440,6 @@ def _translate_via_remote(text, source_lang, target_lang, endpoint,
                           return_extras=False, num_alternatives=0, generation_params=None,
                           raise_on_error=False):
     """Send text to a remote machine's /api/translate endpoint."""
-    import requests as _requests
     try:
         payload = {
             "text": text,
@@ -12430,7 +12451,7 @@ def _translate_via_remote(text, source_lang, target_lang, endpoint,
         if generation_params:
             payload["generation_params"] = generation_params
         _rt_t0 = time.perf_counter()
-        resp = _requests.post(
+        resp = _get_remote_http_session().post(
             endpoint.rstrip("/") + "/api/translate",
             json=payload,
             timeout=15,
