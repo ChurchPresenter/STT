@@ -5054,31 +5054,36 @@ def get_health():
         sysres = _safe(_metrics.sample_system_resources, {}) or {}
 
         # --- transcription ---
-        rtf = ts.get("rtf_ema")
+        # Live-perf metrics (RTF, inference, throughput, queue) are only
+        # meaningful while transcribing. When stopped, report them as null /
+        # unknown instead of the last session's stale EMA, so the dots don't
+        # stay green on an idle box.
+        running = ts.get("running", False)
+        rtf = ts.get("rtf_ema") if running else None
         _start = ts.get("start_time") or 0
-        _session_seconds = round(time.time() - _start) if (ts.get("running") and _start) else None
+        _session_seconds = round(time.time() - _start) if (running and _start) else None
         transcription = {
             "session_id": ts.get("session_id"),
             "db_name": ts.get("db_name"),
             "session_seconds": _session_seconds,
             "session_display": _metrics.format_uptime(_session_seconds) if _session_seconds is not None else None,
             "rows_saved": ts.get("rows_saved", 0),
-            "running": ts.get("running", False),
+            "running": running,
             "status": ts.get("status", "stopped"),
             "message": ts.get("message", ""),
             "loaded_model": ts.get("loaded_model") or None,
             "loaded_model_device": ts.get("loaded_model_device"),
             "model_load_ms": ts.get("model_load_ms"),
-            "audio_level": ts.get("audio_level", 0),
+            "audio_level": ts.get("audio_level", 0) if running else 0,
             "audio_db": ts.get("audio_db"),
-            "audio_type": ts.get("audio_type"),
-            "detection_mode": ts.get("detection_mode"),
+            "audio_type": ts.get("audio_type") if running else None,
+            "detection_mode": ts.get("detection_mode") if running else None,
             "rtf_ema": rtf,
-            "rtf_status": _metrics.rtf_status(rtf),
-            "infer_ms_ema": ts.get("infer_ms_ema"),
+            "rtf_status": _metrics.rtf_status(rtf) if running else "unknown",
+            "infer_ms_ema": ts.get("infer_ms_ema") if running else None,
             "segments_total": ts.get("segments_total", 0),
-            "segments_per_min": ts.get("segments_per_min"),
-            "queue_depth": ts.get("queue_depth"),
+            "segments_per_min": ts.get("segments_per_min") if running else None,
+            "queue_depth": ts.get("queue_depth") if running else None,
         }
 
         # --- system resources (live used vs. static totals) ---

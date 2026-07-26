@@ -335,10 +335,11 @@
         detBits.push("PANNs " + (d.panns_available ? "ready" : "off"));
         detBits.push("VAD " + (d.vad_available ? "ready" : "off"));
         $("m-detect-sub").textContent = detBits.join(" · ");
-        // Green only when the actually-selected detector is available.
+        // Grey when not detecting (stopped → detection_mode null); green when
+        // the accurate PANNs tagger is live; amber on the energy fallback.
         let detStatus = "unknown";
-        if (d.detection_mode === "panns") detStatus = d.panns_available ? "healthy" : "degraded";
-        else if (d.detection_mode) detStatus = "healthy";
+        if (d.detection_mode === "panns") detStatus = "healthy";
+        else if (d.detection_mode) detStatus = "degraded";
         setStatus("c-detect", detStatus);
 
         // Models
