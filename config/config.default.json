@@ -408,7 +408,9 @@
       "server_cache_enabled": true,
       "_server_cache_enabled_comment": "On the machine SERVING offloaded translations, cache results by (text, langs, beams) so repeated phrases skip the model. Independent of the segment cache.",
       "server_cache_size": 512,
-      "_server_cache_size_comment": "Max entries in the server-side text translation cache (LRU)."
+      "_server_cache_size_comment": "Max entries in the server-side text translation cache (LRU).",
+      "sync_dictionary_on_edit": true,
+      "_sync_dictionary_on_edit_comment": "When offloading, push glossary/dictionary edits to the remote server immediately so it doesn't keep translating with a stale glossary."
     },
     "trusted_clients": [],
     "_trusted_clients_comment": "IPs allowed to use this machine for remote translation (managed automatically via pairing)",

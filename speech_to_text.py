@@ -57,7 +57,7 @@ for _mig_name in ("config.json", "custom_dictionary.json", "word_highlighting.js
 # safe_model_path is re-imported and safe_managed_path keeps its APP_DIR default.
 from stt import paths as _paths
 from stt.paths import safe_model_path  # noqa: F401
-from stt.coercion import coerce_int
+from stt.coercion import coerce_float, coerce_int
 from stt.model_disk import dir_has_weights, dir_is_writable, has_weight_file, is_weight_file  # noqa: F401
 
 
@@ -771,11 +771,18 @@ def _apply_glossary(text, source_lang, target_lang):
     """Apply NLLB glossary post-processing replacements from custom dictionary."""
     try:
         dict_config = config.get("custom_dictionary", {})
-        if not dict_config.get("nllb_glossary_enabled", False):
+        override = _session_glossary_override
+        if override is not None:
+            # Offloaded session: honor the CLIENT's glossary-enabled flag when it
+            # sent one, else fall back to this machine's own config.
+            enabled = override.get("nllb_glossary_enabled")
+            if enabled is None:
+                enabled = dict_config.get("nllb_glossary_enabled", False)
+            if not enabled:
+                return text
+            dictionary = override
+        elif not dict_config.get("nllb_glossary_enabled", False):
             return text
-
-        if _session_glossary_override is not None:
-            dictionary = _session_glossary_override
         else:
             dict_file = dict_config.get("file", "custom_dictionary.json")
             if not os.path.isabs(dict_file):
@@ -4040,6 +4047,14 @@ def update_config():
         # hot-reloadable (model/VAD are bound at worker init).
         _prev_whisper_model = config.get("whisper", {}).get("model")
         _prev_vad_enabled = config.get("vad", {}).get("enabled")
+        # Snapshot live-translation model/language too, so a change made via the
+        # generic /api/config editor (not the Translations tab) still propagates
+        # to a paired offload server. Scalars are captured by value here.
+        _lt_prev = config.get("live_translation", {})
+        _prev_lt_model = _lt_prev.get("translation_model")
+        _prev_lt_fp16 = _lt_prev.get("use_fp16")
+        _prev_lt_gpu = _lt_prev.get("use_gpu")
+        _prev_lt_target = _lt_prev.get("target_language")
 
         # Merge new config into existing config (preserves backend and other fields)
         config = deep_merge(config, new_config)
@@ -4090,6 +4105,28 @@ def update_config():
             config_queue.put({"type": "config_update", "config": config})
         except (OSError, ValueError):
             pass  # Queue might be full or process not ready
+
+        # Propagate live-translation model/language changes to a paired offload
+        # server — these can't ride the per-request payload, so without this the
+        # remote keeps its old model/precision/voice after a /api/config edit.
+        try:
+            _lt_now = config.get("live_translation", {})
+            if (_prev_lt_model != _lt_now.get("translation_model")
+                    or _prev_lt_fp16 != _lt_now.get("use_fp16")
+                    or _prev_lt_gpu != _lt_now.get("use_gpu")):
+                _propagate_model_settings_to_remote(
+                    _lt_now.get("use_fp16", False),
+                    _lt_now.get("translation_model", ""),
+                    _lt_now.get("use_gpu", True),
+                )
+            _new_target = _lt_now.get("target_language")
+            if _new_target and _new_target != _prev_lt_target and _new_target in NLLB_LANG_CODES:
+                # The helper needs config to hold the OLD language so its old!=new
+                # side-effects fire; deep_merge already wrote the new value.
+                config["live_translation"]["target_language"] = _prev_lt_target
+                _apply_translation_language_switch(_new_target)
+        except Exception as e:
+            print(f"[REMOTE] Could not propagate live_translation change to remote: {e}")
 
         # Determine which settings need restart (compare pre-merge snapshot
         # against the now-merged config)
@@ -5337,8 +5374,11 @@ def save_translation_settings():
     old_method = config.get("live_translation", {}).get("translation_method", "nllb")
     old_use_fp16 = config.get("live_translation", {}).get("use_fp16", False)
 
-    # Update settings
-    for key in ["enabled", "target_language", "source_language", "translate_in_progress",
+    # Update settings. NOTE: target_language is deliberately NOT merged here — it
+    # is applied below via _apply_translation_language_switch, which needs config
+    # to still hold the OLD language so its old!=new side-effects (TTS, remote
+    # push, client reset) fire.
+    for key in ["enabled", "source_language", "translate_in_progress",
                 "display_mode", "translation_model", "use_gpu", "translation_method"]:
         if key in data:
             config["live_translation"][key] = data[key]
@@ -5387,7 +5427,6 @@ def save_translation_settings():
 
     # Handle model loading/unloading based on enabled state
     now_enabled = config["live_translation"].get("enabled", False)
-    new_target_lang = config["live_translation"].get("target_language", "en")
     new_model = config["live_translation"].get("translation_model", "")
     new_use_gpu = config["live_translation"].get("use_gpu", True)
     new_method = config["live_translation"].get("translation_method", "nllb")
@@ -5425,13 +5464,14 @@ def save_translation_settings():
     # Don't clear on language change — stale-lang fallback keeps old translations.
     if model_changed or method_changed:
         get_translation_cache().clear()
-    elif new_target_lang != old_target_lang:
-        # Notify clients to reset display for clean language transition
-        socketio.emit("language_switched", {
-            "old_language": old_target_lang,
-            "new_language": new_target_lang,
-            "language_name": TRANSLATION_LANGUAGES.get(new_target_lang, new_target_lang),
-        })
+
+    # Target-language change: route through the shared helper (same as
+    # /api/language) so TTS voice, the client display reset, AND a paired remote's
+    # config all update — not just the translated text. Config still holds the OLD
+    # language here (excluded from the merge loop above), so old!=new fires.
+    if "target_language" in data and data["target_language"] != old_target_lang \
+            and data["target_language"] in NLLB_LANG_CODES:
+        _apply_translation_language_switch(data["target_language"])
 
     # Propagate model-load settings (precision / model / GPU) to a paired remote
     # translation server. These can't ride on the per-request payload (which only
@@ -5466,6 +5506,42 @@ def _propagate_model_settings_to_remote(use_fp16, translation_model, use_gpu):
             )
         except Exception as e:
             print(f"[REMOTE] Could not propagate model settings to remote: {e}")
+
+    threading.Thread(target=_push, daemon=True).start()
+
+
+def _dictionary_sync_payload():
+    """Payload for /api/translate/sync-dictionary: the custom dictionary plus the
+    glossary-enabled flag (top-level, so old receivers that only read
+    ``dictionary.glossary`` ignore it) — so the remote applies both."""
+    return {
+        "dictionary": load_custom_dictionary(),
+        "nllb_glossary_enabled": bool(config.get("custom_dictionary", {}).get("nllb_glossary_enabled", False)),
+    }
+
+
+def _propagate_dictionary_to_remote():
+    """Push the custom dictionary (+ glossary-enabled flag) to a paired remote so
+    a mid-session glossary edit takes effect there too. Best-effort, off-thread;
+    no-op when offload isn't enabled or ``sync_dictionary_on_edit`` is off."""
+    remote_cfg = config.get("live_translation", {}).get("remote", {})
+    if not (remote_cfg.get("enabled") and remote_cfg.get("endpoint")):
+        return
+    if not remote_cfg.get("sync_dictionary_on_edit", True):
+        return
+    payload = _dictionary_sync_payload()  # build on this thread (config is stable)
+
+    def _push():
+        try:
+            ep = _get_remote_endpoint_safe()
+            if not ep:
+                return
+            _get_remote_http_session().post(
+                ep.rstrip("/") + "/api/translate/sync-dictionary",
+                json=payload, timeout=5,
+            )
+        except Exception as e:
+            print(f"[REMOTE] Could not propagate dictionary to remote: {e}")
 
     threading.Thread(target=_push, daemon=True).start()
 
@@ -5840,7 +5916,12 @@ def translate_sync_dictionary():
         return jsonify({"error": "Not paired"}), 403
     global _session_glossary_override
     data = request.get_json() or {}
-    _session_glossary_override = {"glossary": data.get("dictionary", {}).get("glossary", {})}
+    _session_glossary_override = {
+        "glossary": data.get("dictionary", {}).get("glossary", {}),
+        # Client's glossary-enabled flag (None from an older client → fall back
+        # to this machine's own config in _apply_glossary).
+        "nllb_glossary_enabled": data.get("nllb_glossary_enabled"),
+    }
     return jsonify({"success": True})
 
 
@@ -6604,7 +6685,7 @@ def proxy_sync_dictionary():
     import requests as _req
     try:
         r = _req.post(endpoint + "/api/translate/sync-dictionary",
-                      json={"dictionary": load_custom_dictionary()}, timeout=10)
+                      json=_dictionary_sync_payload(), timeout=10)
         try:
             data = r.json()
         except ValueError:
@@ -8374,7 +8455,7 @@ def start_transcription():
                     r = _req.post(ep + "/api/translate/preload", timeout=10)
                     print(f"[START] Remote translation preload: {r.json()}")
                     r2 = _req.post(ep + "/api/translate/sync-dictionary",
-                                   json={"dictionary": load_custom_dictionary()}, timeout=10)
+                                   json=_dictionary_sync_payload(), timeout=10)
                     print(f"[START] Remote dictionary sync: {r2.json()}")
                 except Exception as e:
                     print(f"[START] Remote translation preload/sync failed: {e}")
@@ -8860,6 +8941,7 @@ def update_dictionary():
 
     dictionary = data.get("dictionary", {})
     if save_custom_dictionary(dictionary):
+        _propagate_dictionary_to_remote()  # keep a paired offload server in sync
         return jsonify({"success": True})
     return jsonify({"success": False, "error": "Failed to save dictionary"}), 500
 
@@ -8884,6 +8966,7 @@ def update_glossary():
     dictionary = load_custom_dictionary()
     dictionary.setdefault("glossary", {}).setdefault(lang_pair, {})[source_term] = target_term
     save_custom_dictionary(dictionary)
+    _propagate_dictionary_to_remote()  # keep a paired offload server in sync
 
     return jsonify({"success": True, "glossary": dictionary["glossary"]})
 
@@ -8909,6 +8992,7 @@ def remove_glossary_entry():
     if source_term in glossary:
         del glossary[source_term]
         save_custom_dictionary(dictionary)
+        _propagate_dictionary_to_remote()  # keep a paired offload server in sync
 
     return jsonify({"success": True, "glossary": dictionary.get("glossary", {})})
 
