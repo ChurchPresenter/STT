@@ -5,6 +5,11 @@
 # waiting for the nightly auto-update. Restart is delegated to restart_server.sh
 # (no duplicated logic). Run as the checkout owner; on systemd Linux run with
 # sudo, like restart_server.sh.
+#
+# Two phases: the first pulls, then RE-EXECs the freshly-pulled copy of this
+# script for the post-pull work (dependency sync + restart). Without the
+# re-exec, bash runs the old in-memory copy for everything after `git pull`, so
+# changes to the sync/restart logic wouldn't take effect until the *next* run.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
@@ -14,16 +19,22 @@ RED='\033[0;31m'
 YELLOW='\033[1;33m'
 NC='\033[0m'
 
-echo "[UPDATE] Pulling latest code (git pull --ff-only)..."
-if ! git -C "$SCRIPT_DIR" pull --ff-only; then
-    echo -e "${RED}[ERROR]${NC} git pull --ff-only failed."
-    echo "  The working tree is probably dirty or the branch has diverged/unpushed"
-    echo "  commits. Commit/stash your changes (or push) and try again — nothing was"
-    echo "  changed and the server was NOT restarted."
-    exit 1
+if [ "$STT_UPDATE_PHASE" != "post" ]; then
+    echo "[UPDATE] Pulling latest code (git pull --ff-only)..."
+    if ! git -C "$SCRIPT_DIR" pull --ff-only; then
+        echo -e "${RED}[ERROR]${NC} git pull --ff-only failed."
+        echo "  The working tree is probably dirty or the branch has diverged/unpushed"
+        echo "  commits. Commit/stash your changes (or push) and try again — nothing was"
+        echo "  changed and the server was NOT restarted."
+        exit 1
+    fi
+    echo -e "${GREEN}[UPDATE]${NC} Now at: $(git -C "$SCRIPT_DIR" log --oneline -1)"
+    # Re-exec the just-pulled script so the sync/restart logic below always comes
+    # from the new code, not the old copy bash loaded before the pull.
+    exec env STT_UPDATE_PHASE=post bash "$SCRIPT_DIR/update_server.sh"
 fi
 
-echo -e "${GREEN}[UPDATE]${NC} Now at: $(git -C "$SCRIPT_DIR" log --oneline -1)"
+# --- post-pull phase (runs from the freshly-pulled script) -------------------
 
 # Sync dependencies when requirements.txt changed, so a pull that adds a new
 # package (e.g. psutil) doesn't leave the venv behind. Hash-gated against the
@@ -45,7 +56,8 @@ sync_deps() {
     fi
 
     if [ -f "$marker" ] && [ "$(tr -d '[:space:]' < "$marker")" = "$sha" ]; then
-        return 0  # venv already matches requirements.txt
+        echo "[UPDATE] Dependencies already in sync."
+        return 0
     fi
 
     local uv_bin
