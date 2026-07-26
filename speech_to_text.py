@@ -5589,6 +5589,27 @@ def _propagate_dictionary_to_remote():
     threading.Thread(target=_push, daemon=True).start()
 
 
+def _remote_heartbeat_loop():
+    """On a machine that offloads translation, ping the paired remote server
+    every ~20s while transcription is running, so the server knows this machine
+    is live even during silent stretches with no translate traffic. Self-gates
+    on offload config, so it's a cheap no-op on non-offloading machines."""
+    while True:
+        try:
+            time.sleep(20)
+            if not _ts_get("running", False):
+                continue
+            remote_cfg = config.get("live_translation", {}).get("remote", {})
+            if not (remote_cfg.get("enabled") and remote_cfg.get("endpoint")):
+                continue
+            ep = _get_remote_endpoint_safe()
+            if not ep:
+                continue
+            _get_remote_http_session().post(ep.rstrip("/") + "/api/translate/heartbeat", timeout=5)
+        except Exception:
+            pass  # best-effort; never let the heartbeat crash
+
+
 def _apply_transcription_language_switch(new_language):
     """Set the live transcription language and hot-reload the transcription
     subprocess. Shared by /api/transcription/language and /api/language so the
@@ -6136,6 +6157,18 @@ def translate_remote_nllb_models():
     if not _is_trusted_translation_client(request.remote_addr):
         return jsonify({"error": "Not paired"}), 403
     return jsonify({"success": True, "models": _downloaded_nllb_models()})
+
+
+@app.route("/api/translate/heartbeat", methods=["POST"])
+def translate_remote_heartbeat():
+    """A paired Machine A pings this while its transcription is running, so this
+    offload server knows A is live even during silent stretches (no translate
+    traffic). Refreshes the client's last-seen so it shows in remote_clients."""
+    client_ip = request.remote_addr
+    if not _is_trusted_translation_client(client_ip):
+        return jsonify({"error": "Not paired"}), 403
+    _register_translation_client(client_ip)
+    return jsonify({"success": True})
 
 
 @app.route("/api/translate/language", methods=["POST"])
@@ -16272,6 +16305,10 @@ if __name__ == "__main__":
     # never spawns a duplicate updater.
     if not _is_watchdog_managed() and _self_update_enabled():
         threading.Thread(target=_self_update_loop, daemon=True, name="SelfUpdate").start()
+
+    # Heartbeat to a paired offload server while transcription runs (main process
+    # only — the worker re-imports this module but doesn't run __main__).
+    threading.Thread(target=_remote_heartbeat_loop, daemon=True, name="RemoteHeartbeat").start()
 
     # Use a loop with timeout instead of blocking join
     # This makes the main process responsive to signals
