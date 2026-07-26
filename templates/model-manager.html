@@ -514,7 +514,7 @@
                         <span><strong>Used:</strong> <span id="disk-space-used">-</span></span>
                     </div>
                     <div style="display: flex; align-items: center; gap: 10px;">
-                        <div style="width: 150px; height: 6px; background: var(--bg-elevated); border-radius: 3px; overflow: hidden;">
+                        <div style="width: 150px; height: 6px; background: var(--overlay-active); border-radius: 3px; overflow: hidden;">
                             <div id="disk-space-bar" style="height: 100%; width: 100%; background: var(--success); transform: scaleX(0); transform-origin: left; transition: transform 0.3s, background 0.3s;"></div>
                         </div>
                         <span id="disk-space-percent" style="min-width: 40px; font-weight: 600;">0%</span>
@@ -709,7 +709,7 @@
                     💡 <strong>Tip:</strong> Include all required files: config.json, model weights (pytorch_model.bin, model.safetensors), tokenizer files (tokenizer.json, vocab files), and any other configuration files. The files will be uploaded to the models directory.
                 </div>
                 <div id="upload_progress" style="display: none; margin-top: 15px;">
-                    <div style="background: var(--bg-elevated); border-radius: 10px; height: 20px; overflow: hidden;">
+                    <div style="background: var(--overlay-active); border-radius: 10px; height: 20px; overflow: hidden;">
                         <div id="upload_progress_bar" style="background: var(--success); height: 100%; width: 100%; transform: scaleX(0); transform-origin: left; transition: transform 0.3s;"></div>
                     </div>
                     <div id="upload_status" style="margin-top: 8px; font-size: 0.85em; color: var(--text-muted);"></div>
@@ -2808,7 +2808,7 @@
                             </div>
                             <div style="font-size: 0.8em; color: var(--text-secondary); margin-bottom: 4px;">${progressDisplay}</div>
                             <div style="font-size: 0.75em; color: var(--text-muted);">Time: ${minutes}:${seconds.toString().padStart(2, '0')}</div>
-                            <div style="background: var(--bg-elevated); border-radius: 10px; height: 6px; overflow: hidden; margin-top: 4px;">
+                            <div style="background: var(--overlay-active); border-radius: 10px; height: 6px; overflow: hidden; margin-top: 4px;">
                                 <div style="background: ${progressBarColor}; height: 100%; width: 100%; transform: scaleX(${progressBarScale}); transform-origin: left; transition: transform 0.3s;${progressBarAnimation}"></div>
                             </div>
                         </div>
