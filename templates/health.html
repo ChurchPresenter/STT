@@ -48,6 +48,9 @@
             margin-top: 6px;
             font-size: 0.78em;
             color: var(--text-muted);
+            /* long values (session names, model names, paths) wrap inside the
+               card instead of overflowing it */
+            overflow-wrap: anywhere;
         }
         /* status → colour, applied to the label dot + value */
         .st-healthy  .dot { background: var(--success); }
@@ -310,7 +313,12 @@
         // Transcription
         const t = h.transcription;
         $("m-session-dur").textContent = t.session_display || (t.running ? "—" : "not running");
-        $("m-session-name").textContent = t.db_name || t.session_id || "";
+        // Show just the session/file name, not the full backup path — strip any
+        // directory and the .db extension. Full path stays on hover (title).
+        const rawName = t.db_name || t.session_id || "";
+        const nameEl = $("m-session-name");
+        nameEl.textContent = rawName.split(/[/\\]/).pop().replace(/\.db$/i, "");
+        nameEl.title = rawName;
         $("m-session-rows").textContent = (t.rows_saved || 0) + " lines saved";
         $("m-rtf").textContent = t.rtf_ema === null || t.rtf_ema === undefined
             ? "—" : Number(t.rtf_ema).toFixed(2) + "×";
