@@ -925,6 +925,9 @@
         body.serving-mode .server-lock-banner { display: block; }
         /* Non-form containers (e.g. the language grid) can't use :disabled. */
         .a-locked { opacity: 0.5; pointer-events: none; }
+        /* A locked checkbox is only 16px, so also dim its adjacent label —
+           otherwise the row still reads as active even though it's disabled. */
+        .a-locked + label { opacity: 0.5; pointer-events: none; }
 
         {% block extra_css %}{% endblock %}
     </style>
