@@ -6,6 +6,7 @@ from stt.translation_utils import (
     TextTranslationCache,
     TranslationCache,
     apply_glossary,
+    should_cache_translation,
     should_use_fp16,
 )
 
@@ -149,6 +150,24 @@ class TestTextTranslationCache:
         assert c.get("hello", "en", "fr", 2) is None       # different target
         assert c.get("hello", "en", "es", 5) is None       # different num_beams
 
+    def test_key_sensitivity_generation_params(self):
+        c = TextTranslationCache()
+        c.set("hello", "en", "es", 2, self.RESULT,
+              length_penalty=1.0, no_repeat_ngram_size=0, repetition_penalty=1.0)
+        # exact hit with matching gen params
+        assert c.get("hello", "en", "es", 2,
+                     length_penalty=1.0, no_repeat_ngram_size=0, repetition_penalty=1.0) is not None
+        # each differing param misses
+        assert c.get("hello", "en", "es", 2, length_penalty=1.5) is None
+        assert c.get("hello", "en", "es", 2, no_repeat_ngram_size=3) is None
+        assert c.get("hello", "en", "es", 2, repetition_penalty=1.2) is None
+
+    def test_float_params_rounded_for_keying(self):
+        c = TextTranslationCache()
+        c.set("hello", "en", "es", 2, self.RESULT, length_penalty=1.0001)
+        # 1.0001 and 1.0002 both round to 1.0 → same key
+        assert c.get("hello", "en", "es", 2, length_penalty=1.0002) == self.RESULT
+
     def test_lru_eviction_bounds_size_and_drops_oldest(self):
         c = TextTranslationCache(max_size=3)
         for i in range(5):
@@ -190,6 +209,15 @@ class TestTextTranslationCache:
         for t in threads:
             t.join()
         assert c.get_size() <= 50
+
+
+class TestShouldCacheTranslation:
+    def test_echo_is_not_cached(self):
+        assert should_cache_translation("hello", "hello") is False
+        assert should_cache_translation("hello", "  hello  ") is False  # whitespace-only diff
+
+    def test_real_translation_is_cached(self):
+        assert should_cache_translation("hello", "hola") is True
 
 
 class TestShouldUseFp16:

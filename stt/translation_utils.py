@@ -137,16 +137,26 @@ class TextTranslationCache:
     """
 
     def __init__(self, max_size: int = 512) -> None:
-        self._cache: "OrderedDict[Tuple[str, str, str, int], dict]" = OrderedDict()
+        self._cache: "OrderedDict[Tuple[str, str, str, int, float, int, float], dict]" = OrderedDict()
         self._max_size = max(1, max_size)
         self._lock = threading.Lock()
 
-    def _make_key(self, text: str, source_lang: str, target_lang: str, num_beams: int) -> Tuple[str, str, str, int]:
-        return (text.strip(), source_lang, target_lang, int(num_beams))
+    def _make_key(self, text: str, source_lang: str, target_lang: str, num_beams: int,
+                  length_penalty: float = 1.0, no_repeat_ngram_size: int = 0,
+                  repetition_penalty: float = 1.0) -> Tuple[str, str, str, int, float, int, float]:
+        # Every generation param that changes the output is part of the key —
+        # otherwise a penalty change on the client serves stale cached results.
+        # Floats are rounded so jitter can't explode the keyspace.
+        return (text.strip(), source_lang, target_lang, int(num_beams),
+                round(float(length_penalty), 3), int(no_repeat_ngram_size),
+                round(float(repetition_penalty), 3))
 
-    def get(self, text: str, source_lang: str, target_lang: str, num_beams: int) -> Optional[dict]:
+    def get(self, text: str, source_lang: str, target_lang: str, num_beams: int, *,
+            length_penalty: float = 1.0, no_repeat_ngram_size: int = 0,
+            repetition_penalty: float = 1.0) -> Optional[dict]:
         """Return the cached result dict (marking it most-recently-used), or None."""
-        key = self._make_key(text, source_lang, target_lang, num_beams)
+        key = self._make_key(text, source_lang, target_lang, num_beams,
+                             length_penalty, no_repeat_ngram_size, repetition_penalty)
         with self._lock:
             entry = self._cache.get(key)
             if entry is None:
@@ -154,9 +164,12 @@ class TextTranslationCache:
             self._cache.move_to_end(key)  # mark as most-recently-used
             return dict(entry)
 
-    def set(self, text: str, source_lang: str, target_lang: str, num_beams: int, result: dict) -> None:
+    def set(self, text: str, source_lang: str, target_lang: str, num_beams: int, result: dict, *,
+            length_penalty: float = 1.0, no_repeat_ngram_size: int = 0,
+            repetition_penalty: float = 1.0) -> None:
         """Store a result dict, evicting the least-recently-used entry when full."""
-        key = self._make_key(text, source_lang, target_lang, num_beams)
+        key = self._make_key(text, source_lang, target_lang, num_beams,
+                             length_penalty, no_repeat_ngram_size, repetition_penalty)
         with self._lock:
             self._cache[key] = dict(result)
             self._cache.move_to_end(key)
@@ -172,6 +185,16 @@ class TextTranslationCache:
         """Current number of cached entries."""
         with self._lock:
             return len(self._cache)
+
+
+def should_cache_translation(text: str, translated: str) -> bool:
+    """Whether a translation result is worth caching.
+
+    Skips the untranslated echo (result == input), which is what the offload
+    server returns when translation fails/falls back — caching it would pin a
+    wrong (untranslated) answer for that phrase.
+    """
+    return translated.strip() != text.strip()
 
 
 def should_use_fp16(use_fp16: bool, device: str) -> bool:

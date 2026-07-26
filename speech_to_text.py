@@ -762,6 +762,7 @@ from stt.translation_utils import (
     TranslationCache,
     TextTranslationCache,
     apply_glossary as _apply_glossary_dict,
+    should_cache_translation as _should_cache_translation,
     should_use_fp16 as _should_use_fp16,
 )
 
@@ -5722,12 +5723,18 @@ def translate_remote():
     # extras/alternatives requests carry confidence data we don't want to stale.
     _cache_on = (not return_extras and num_alternatives == 0
                  and (cfg.get("remote", {}) or {}).get("server_cache_enabled", True))
-    _num_beams = 2
+    # Every generation param that changes the output is part of the cache key,
+    # so e.g. a length_penalty change doesn't serve stale results.
+    _gp = generation_params or cfg.get("generation_params", {}) or {}
+    _cache_kw = {
+        "length_penalty": coerce_float(_gp.get("length_penalty"), 1.0),
+        "no_repeat_ngram_size": coerce_int(_gp.get("no_repeat_ngram_size"), 0),
+        "repetition_penalty": coerce_float(_gp.get("repetition_penalty"), 1.0),
+    }
+    _num_beams = coerce_int(_gp.get("num_beams"), 2)
     if _cache_on:
         try:
-            _gp = generation_params or cfg.get("generation_params", {}) or {}
-            _num_beams = int(_gp.get("num_beams", 2))
-            _hit = get_server_text_cache().get(text, source_lang, target_lang, _num_beams)
+            _hit = get_server_text_cache().get(text, source_lang, target_lang, _num_beams, **_cache_kw)
             if _hit is not None:
                 return jsonify({"success": True, "translated_text": _hit.get("text", text),
                                 "confidence": None, "alternatives": []})
@@ -5752,9 +5759,10 @@ def translate_remote():
         })
 
     translated = result if isinstance(result, str) else text
-    if _cache_on and isinstance(result, str):
+    # Skip caching a failed/echoed translation (would pin an untranslated answer).
+    if _cache_on and isinstance(result, str) and _should_cache_translation(text, translated):
         try:
-            get_server_text_cache().set(text, source_lang, target_lang, _num_beams, {"text": translated})
+            get_server_text_cache().set(text, source_lang, target_lang, _num_beams, {"text": translated}, **_cache_kw)
         except Exception:
             pass
     return jsonify({"success": True, "translated_text": translated, "confidence": None, "alternatives": []})

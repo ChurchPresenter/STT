@@ -1,6 +1,6 @@
 """Safe numeric coercion (stt/coercion.py)."""
 
-from stt.coercion import coerce_int
+from stt.coercion import coerce_float, coerce_int
 
 
 class TestCoerceInt:
@@ -40,3 +40,23 @@ class TestCoerceInt:
     def test_only_one_bound(self):
         assert coerce_int(1, 0, lo=5) == 5
         assert coerce_int(9, 0, hi=5) == 5
+
+
+class TestCoerceFloat:
+    def test_valid_and_string(self):
+        assert coerce_float(1.5, 0.0) == 1.5
+        assert coerce_float("2.5", 0.0) == 2.5
+        assert coerce_float(3, 0.0) == 3.0
+
+    def test_bad_values_fall_back(self):
+        assert coerce_float(None, 1.0) == 1.0
+        assert coerce_float("abc", 1.0) == 1.0
+        assert coerce_float({}, 1.0) == 1.0
+
+    def test_clamp(self):
+        assert coerce_float(0.05, 1.0, lo=0.1, hi=3.0) == 0.1
+        assert coerce_float(5.0, 1.0, lo=0.1, hi=3.0) == 3.0
+        assert coerce_float(1.5, 1.0, lo=0.1, hi=3.0) == 1.5
+
+    def test_default_not_re_clamped(self):
+        assert coerce_float("x", 1.0, lo=10.0, hi=20.0) == 1.0
