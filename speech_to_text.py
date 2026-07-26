@@ -5427,10 +5427,41 @@ def save_translation_settings():
             "language_name": TRANSLATION_LANGUAGES.get(new_target_lang, new_target_lang),
         })
 
+    # Propagate model-load settings (precision / model / GPU) to a paired remote
+    # translation server. These can't ride on the per-request payload (which only
+    # carries text/langs/generation_params), so without this the offload box keeps
+    # its old model + precision even after you change them here.
+    if old_use_fp16 != new_use_fp16 or old_model != new_model or old_use_gpu != new_use_gpu:
+        _propagate_model_settings_to_remote(new_use_fp16, new_model, new_use_gpu)
+
     return jsonify({
         "success": True,
         "message": "Translation settings saved. Changes take effect immediately."
     })
+
+
+def _propagate_model_settings_to_remote(use_fp16, translation_model, use_gpu):
+    """Push model-load settings to a paired remote translation server so it
+    reloads with them. Best-effort, off the request thread — never blocks or
+    breaks the local save. No-op when offload isn't enabled/configured."""
+    remote_cfg = config.get("live_translation", {}).get("remote", {})
+    if not (remote_cfg.get("enabled") and remote_cfg.get("endpoint")):
+        return
+
+    def _push():
+        try:
+            ep = _get_remote_endpoint_safe()
+            if not ep:
+                return
+            _get_remote_http_session().post(
+                ep.rstrip("/") + "/api/translate/model-settings",
+                json={"use_fp16": bool(use_fp16), "translation_model": translation_model, "use_gpu": bool(use_gpu)},
+                timeout=5,
+            )
+        except Exception as e:
+            print(f"[REMOTE] Could not propagate model settings to remote: {e}")
+
+    threading.Thread(target=_push, daemon=True).start()
 
 
 def _apply_transcription_language_switch(new_language):
@@ -5886,6 +5917,45 @@ def translation_unpair():
         _session_glossary_override = None
     socketio.emit("translation_pair_denied", {"ip": ip})
     return jsonify({"success": True})
+
+
+@app.route("/api/translate/model-settings", methods=["POST"])
+def translate_remote_model_settings():
+    """Paired Machine A pushes model-load settings (precision / model / GPU) that
+    can't ride on per-request translate payloads. Apply them to this server's
+    config and reload the model so offloaded translations use them."""
+    client_ip = request.remote_addr
+    if not _is_trusted_translation_client(client_ip):
+        return jsonify({"error": "Not paired"}), 403
+
+    global config
+    data = request.get_json() or {}
+    lt = config.setdefault("live_translation", {})
+
+    changed = []
+    if "use_fp16" in data:
+        val = bool(data["use_fp16"])
+        if val != lt.get("use_fp16", False):
+            lt["use_fp16"] = val
+            changed.append("use_fp16")
+    if data.get("translation_model"):
+        val = str(data["translation_model"])
+        if val != lt.get("translation_model", ""):
+            lt["translation_model"] = val
+            changed.append("translation_model")
+    if "use_gpu" in data:
+        val = bool(data["use_gpu"])
+        if val != lt.get("use_gpu", True):
+            lt["use_gpu"] = val
+            changed.append("use_gpu")
+
+    if changed:
+        save_config(config)
+        print(f"[REMOTE] Model settings updated by Machine A: {', '.join(changed)} — reloading model")
+        # Unload now; the model reloads with the new settings on the next
+        # offloaded request (this box serves paired clients, so no eager reload).
+        threading.Thread(target=unload_live_translation_model, daemon=True).start()
+    return jsonify({"success": True, "changed": changed})
 
 
 @app.route("/api/translate/language", methods=["POST"])
