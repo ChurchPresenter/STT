@@ -3893,6 +3893,8 @@ def corrections_page():
 @app.route("/url-builder")
 def url_builder_page():
     """Render the URL builder page"""
+    if not check_ip_whitelist():
+        return render_template("auth-required.html"), 403
     return render_template("url-builder.html")
 
 
