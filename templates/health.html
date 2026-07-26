@@ -361,6 +361,8 @@
             $("m-trans").textContent = "offloaded";
             trSub.push("→ Machine B");
             trSub.push(tr.remote_reachable ? "reachable" : "UNREACHABLE");
+            if (tr.remote_translate_ms_ema !== null && tr.remote_translate_ms_ema !== undefined)
+                trSub.push(num(tr.remote_translate_ms_ema, 0) + " ms round-trip");
             setStatus("c-trans", tr.remote_reachable ? "healthy" : "error");
         } else {
             $("m-trans").textContent = tr.model_loading ? "loading…" : (tr.model_loaded ? "loaded" : "idle");

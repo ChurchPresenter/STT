@@ -1040,6 +1040,22 @@ def _record_local_translate_ms(elapsed_ms, alpha=0.3):
         _local_translate_ms_ema = elapsed_ms if prev is None else alpha * elapsed_ms + (1 - alpha) * prev
 
 
+# EMA of the round-trip time (ms) for an OFFLOADED translation as seen by this
+# machine (Machine A): network + serialization + Machine B's inference. Compared
+# against Machine B's own local_translate_ms_ema, it separates network overhead
+# from remote inference. Set in _translate_via_remote on success.
+_remote_translate_ms_ema = None
+_remote_translate_ms_lock = threading.Lock()
+
+
+def _record_remote_translate_ms(elapsed_ms, alpha=0.3):
+    """Fold one remote-translation round-trip timing into the EMA (thread-safe)."""
+    global _remote_translate_ms_ema
+    with _remote_translate_ms_lock:
+        prev = _remote_translate_ms_ema
+        _remote_translate_ms_ema = elapsed_ms if prev is None else alpha * elapsed_ms + (1 - alpha) * prev
+
+
 def is_live_translation_ready():
     """True when a live translation can actually be produced right now: a remote
     endpoint is configured, or the local NLLB model has finished loading. Used to
@@ -5471,6 +5487,10 @@ def get_translation_status():
         # EMA of local NLLB per-translation latency (ms); null until a local
         # translation has run. High values flag the seconds-per-sentence problem.
         "local_translate_ms_ema": round(_local_translate_ms_ema, 1) if _local_translate_ms_ema is not None else None,
+        # EMA of the offloaded round-trip latency (ms) this machine sees when it
+        # sends a translation to the remote (network + remote inference); null
+        # until an offloaded translation has run.
+        "remote_translate_ms_ema": round(_remote_translate_ms_ema, 1) if _remote_translate_ms_ema is not None else None,
     }
 
     # Only expose sensitive info (clients, pairs) to local/whitelisted or paired callers
@@ -12311,6 +12331,7 @@ def _translate_via_remote(text, source_lang, target_lang, endpoint,
         }
         if generation_params:
             payload["generation_params"] = generation_params
+        _rt_t0 = time.perf_counter()
         resp = _requests.post(
             endpoint.rstrip("/") + "/api/translate",
             json=payload,
@@ -12318,6 +12339,12 @@ def _translate_via_remote(text, source_lang, target_lang, endpoint,
         )
         resp.raise_for_status()
         data = resp.json()
+        # Round-trip latency Machine A experiences for this offloaded translation
+        # (network + serialization + Machine B inference). Only successful calls.
+        try:
+            _record_remote_translate_ms((time.perf_counter() - _rt_t0) * 1000.0)
+        except Exception:
+            pass
         if return_extras:
             return {
                 "text": data.get("translated_text", text),
