@@ -5329,12 +5329,17 @@ def save_translation_settings():
     old_model = config.get("live_translation", {}).get("translation_model", "")
     old_use_gpu = config.get("live_translation", {}).get("use_gpu", True)
     old_method = config.get("live_translation", {}).get("translation_method", "nllb")
+    old_use_fp16 = config.get("live_translation", {}).get("use_fp16", False)
 
     # Update settings
     for key in ["enabled", "target_language", "source_language", "translate_in_progress",
                 "display_mode", "translation_model", "use_gpu", "translation_method"]:
         if key in data:
             config["live_translation"][key] = data[key]
+
+    # fp16 is applied at model load, so a change requires a reload (handled below).
+    if "use_fp16" in data:
+        config["live_translation"]["use_fp16"] = bool(data["use_fp16"])
 
     # Clamp to match the UI slider (1-5); larger windows approach NLLB's 1024-token truncation
     if "context_window" in data:
@@ -5380,8 +5385,10 @@ def save_translation_settings():
     new_model = config["live_translation"].get("translation_model", "")
     new_use_gpu = config["live_translation"].get("use_gpu", True)
     new_method = config["live_translation"].get("translation_method", "nllb")
+    new_use_fp16 = config["live_translation"].get("use_fp16", False)
 
-    model_changed = old_model != new_model or old_use_gpu != new_use_gpu
+    # fp16 change needs a reload too — it's applied when the model loads.
+    model_changed = old_model != new_model or old_use_gpu != new_use_gpu or old_use_fp16 != new_use_fp16
     method_changed = old_method != new_method
     using_whisper = new_method in ("whisper_translate", "whisper_forced_lang")
 
