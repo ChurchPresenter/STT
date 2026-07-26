@@ -4993,10 +4993,23 @@ def get_server_time():
 
 
 def _safe(getter, default=None):
-    """Call a status getter, swallowing any error so one bad section never
-    fails the whole /api/health aggregation."""
+    """Call a status getter and return a plain JSON-serializable value.
+
+    Some "getters" are actually Flask route handlers that return a ``Response``
+    (from ``jsonify``) or a ``(Response, status)`` tuple rather than a dict, so
+    unwrap those to their JSON body — embedding a Response in the health payload
+    would make the final ``jsonify`` fail. Any error is swallowed so one bad
+    section never fails the whole /api/health aggregation."""
     try:
-        return getter()
+        result = getter()
+    except Exception:
+        return default
+    try:
+        if isinstance(result, tuple):
+            result = result[0]
+        if hasattr(result, "get_json"):
+            return result.get_json(silent=True) or default
+        return result
     except Exception:
         return default
 
@@ -5096,8 +5109,8 @@ def get_health():
                 )
 
         # --- audio detectors (music/speech tagging + VAD) ---
-        _panns = _safe(lambda: panns_status().get_json()) or {}
-        _vad = _safe(lambda: silero_vad_status().get_json()) or {}
+        _panns = _safe(panns_status, {}) or {}
+        _vad = _safe(silero_vad_status, {}) or {}
         detectors = {
             "detection_mode": ts.get("detection_mode"),
             "panns_available": _panns.get("downloaded"),
