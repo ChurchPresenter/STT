@@ -1439,6 +1439,19 @@ def _synthesize_piper_tts(text, language="en"):
         return None, None
 
 
+# EMA of TTS synthesis time (ms), surfaced on the health dashboard.
+_tts_synth_ms_ema = None
+_tts_synth_ms_lock = threading.Lock()
+
+
+def _record_tts_ms(elapsed_ms, alpha=0.3):
+    """Fold a TTS synth timing into the EMA (thread-safe)."""
+    global _tts_synth_ms_ema
+    with _tts_synth_ms_lock:
+        prev = _tts_synth_ms_ema
+        _tts_synth_ms_ema = elapsed_ms if prev is None else alpha * elapsed_ms + (1 - alpha) * prev
+
+
 def synthesize_tts(text, language="en"):
     """Synthesize speech from text. Returns (audio_bytes, sample_rate) or (None, None).
     Audio format: mp3 for edge-tts, wav for piper.
@@ -1447,13 +1460,20 @@ def synthesize_tts(text, language="en"):
     speed = tts_config.get("speed", 1.0)
     backend = _get_tts_backend()
 
+    _t0 = time.perf_counter()
     if backend == "edge":
-        return _synthesize_edge_tts(text, speed=speed)
+        result = _synthesize_edge_tts(text, speed=speed)
     elif backend == "piper":
-        return _synthesize_piper_tts(text, language=language)
+        result = _synthesize_piper_tts(text, language=language)
     else:
         print(f"[TTS ERROR] Unknown backend: {backend}")
         return None, None
+    try:
+        if result and result[0] is not None:
+            _record_tts_ms((time.perf_counter() - _t0) * 1000.0)
+    except Exception:
+        pass
+    return result
 
 
 # Global translation cache instance
@@ -6292,6 +6312,8 @@ def get_tts_status():
         "model_loading": is_tts_model_loading(),
         "downloading": _tts_download_status.get("status") == "downloading",
         "speed": tts_config.get("speed", 1.0),
+        # EMA of TTS synthesis time (ms); null until TTS has run.
+        "synth_ms_ema": round(_tts_synth_ms_ema, 1) if _tts_synth_ms_ema is not None else None,
     }
 
     if backend == "edge":

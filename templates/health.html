@@ -436,7 +436,8 @@
         $("m-tts").textContent = !tts.enabled ? "disabled"
             : (tts.model_loading || tts.downloading ? "loading…" : (tts.model_loaded ? "ready" : "idle"));
         $("m-tts-sub").textContent = tts.enabled && tts.backend
-            ? (tts.backend + (tts.edge_voice ? ` · ${tts.edge_voice}` : "")) : "";
+            ? (tts.backend + (tts.edge_voice ? ` · ${tts.edge_voice}` : "")
+               + (tts.synth_ms_ema != null ? ` · ${num(tts.synth_ms_ema, 0)} ms` : "")) : "";
 
         const fm = h.file_mover || {};
         $("m-mover").textContent = fm.state || "idle";
