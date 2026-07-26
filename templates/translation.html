@@ -474,14 +474,11 @@
         let currentSettings = {};
         let lastRemoteModel = '';
         let unsavedChanges = false;
-        let saveBtnVisible = true;
 
         function markDirty() {
             if (!unsavedChanges) {
                 unsavedChanges = true;
-                if (!saveBtnVisible) {
-                    document.getElementById('unsaved-bar').classList.add('is-visible');
-                }
+                document.getElementById('unsaved-bar').classList.add('is-visible');
             }
         }
 
@@ -591,15 +588,6 @@
             const panel = document.querySelector('.settings-panel');
             panel.addEventListener('input', markDirty);
             panel.addEventListener('change', markDirty);
-
-            const saveBtn = document.getElementById('main-save-btn');
-            const observer = new IntersectionObserver(([entry]) => {
-                saveBtnVisible = entry.isIntersecting;
-                if (unsavedChanges) {
-                    document.getElementById('unsaved-bar').classList.toggle('is-visible', !saveBtnVisible);
-                }
-            });
-            observer.observe(saveBtn);
         });
 
         async function loadNLLBModels() {
