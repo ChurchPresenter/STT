@@ -211,6 +211,29 @@ class TestTextTranslationCache:
         assert c.get_size() <= 50
 
 
+class TestTextTranslationCacheStats:
+    def test_hits_misses_and_rate(self):
+        c = TextTranslationCache()
+        assert c.get_stats() == {"size": 0, "hits": 0, "misses": 0, "hit_rate": 0.0}
+        c.get("x", "en", "es", 2)                       # miss
+        c.set("x", "en", "es", 2, {"text": "y"})
+        c.get("x", "en", "es", 2)                       # hit
+        c.get("x", "en", "es", 2)                       # hit
+        st = c.get_stats()
+        assert st["size"] == 1
+        assert st["hits"] == 2
+        assert st["misses"] == 1
+        assert st["hit_rate"] == round(2 / 3, 3)
+
+    def test_clear_resets_counters(self):
+        c = TextTranslationCache()
+        c.set("x", "en", "es", 2, {"text": "y"})
+        c.get("x", "en", "es", 2)
+        c.get("z", "en", "es", 2)
+        c.clear()
+        assert c.get_stats() == {"size": 0, "hits": 0, "misses": 0, "hit_rate": 0.0}
+
+
 class TestShouldCacheTranslation:
     def test_echo_is_not_cached(self):
         assert should_cache_translation("hello", "hello") is False

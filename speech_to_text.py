@@ -5776,6 +5776,16 @@ def get_translation_status():
     else:
         _status_model = trans_config.get("translation_model", "facebook/nllb-200-distilled-600M")
 
+    # Effective precision the local model actually loaded at (fp16/fp32), probed
+    # off the live model; null when no local model is loaded (e.g. this box only
+    # offloads). Distinct from the use_fp16 config flag (intent vs reality).
+    _model_dtype = None
+    try:
+        if _live_translation_model is not None:
+            _model_dtype = str(next(_live_translation_model.parameters()).dtype).replace("torch.", "")
+    except Exception:
+        pass
+
     result = {
         "success": True,
         "enabled": trans_config.get("enabled", False),
@@ -5804,6 +5814,12 @@ def get_translation_status():
         # sends a translation to the remote (network + remote inference); null
         # until an offloaded translation has run.
         "remote_translate_ms_ema": round(_remote_translate_ms_ema, 1) if _remote_translate_ms_ema is not None else None,
+        # Server-side offload cache stats (size/hits/misses/hit_rate) — how much
+        # the offloaded-translation cache is saving on this box.
+        "server_cache": get_server_text_cache().get_stats(),
+        # Precision: intended (config flag) vs actually loaded (probed above).
+        "use_fp16": bool(trans_config.get("use_fp16", False)),
+        "model_dtype": _model_dtype,
     }
 
     # Only expose sensitive info (clients, pairs) to local/whitelisted or paired callers
@@ -5814,10 +5830,14 @@ def get_translation_status():
             if time.time() < v["expires"]
         ]
         result["remote_clients"] = list(active.keys())
+        # Same clients with last-seen age (seconds) — a paired A that heartbeats
+        # while transcribing keeps a small age here even during silence.
+        result["remote_clients_detail"] = [{"ip": ip, "age_s": round(now - ts)} for ip, ts in active.items()]
         result["trusted_clients"] = list(_trusted_translation_clients)
         result["pending_pairs"] = pending
     else:
         result["remote_clients"] = []
+        result["remote_clients_detail"] = []
         result["trusted_clients"] = []
         result["pending_pairs"] = []
 

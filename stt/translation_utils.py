@@ -140,6 +140,8 @@ class TextTranslationCache:
         self._cache: "OrderedDict[Tuple[str, str, str, int, float, int, float], dict]" = OrderedDict()
         self._max_size = max(1, max_size)
         self._lock = threading.Lock()
+        self._hits = 0
+        self._misses = 0
 
     def _make_key(self, text: str, source_lang: str, target_lang: str, num_beams: int,
                   length_penalty: float = 1.0, no_repeat_ngram_size: int = 0,
@@ -160,7 +162,9 @@ class TextTranslationCache:
         with self._lock:
             entry = self._cache.get(key)
             if entry is None:
+                self._misses += 1
                 return None
+            self._hits += 1
             self._cache.move_to_end(key)  # mark as most-recently-used
             return dict(entry)
 
@@ -177,14 +181,28 @@ class TextTranslationCache:
                 self._cache.popitem(last=False)  # drop least-recently-used
 
     def clear(self) -> None:
-        """Drop all cached translations."""
+        """Drop all cached translations and reset hit/miss counters (a model
+        change makes prior hit rates meaningless)."""
         with self._lock:
             self._cache.clear()
+            self._hits = 0
+            self._misses = 0
 
     def get_size(self) -> int:
         """Current number of cached entries."""
         with self._lock:
             return len(self._cache)
+
+    def get_stats(self) -> dict:
+        """Snapshot of size + cumulative hits/misses/hit_rate (0.0-1.0)."""
+        with self._lock:
+            total = self._hits + self._misses
+            return {
+                "size": len(self._cache),
+                "hits": self._hits,
+                "misses": self._misses,
+                "hit_rate": round(self._hits / total, 3) if total else 0.0,
+            }
 
 
 def should_cache_translation(text: str, translated: str) -> bool:

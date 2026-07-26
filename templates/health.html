@@ -291,6 +291,7 @@
     const STATUSES = ["st-healthy", "st-degraded", "st-error"];
     let timer = null;
     let remoteTimer = null;
+    let _remoteLocalMs = null;  // Machine B's last-seen generate time (for network-overhead calc)
 
     function dash(v) { return (v === null || v === undefined) ? "—" : v; }
     function num(v, d) { return (v === null || v === undefined) ? "—" : Number(v).toFixed(d === undefined ? 0 : d); }
@@ -410,15 +411,23 @@
             $("m-trans").textContent = "offloaded";
             trSub.push("→ Machine B");
             trSub.push(tr.remote_reachable ? "reachable" : "UNREACHABLE");
-            if (tr.remote_translate_ms_ema !== null && tr.remote_translate_ms_ema !== undefined)
+            if (tr.remote_translate_ms_ema !== null && tr.remote_translate_ms_ema !== undefined) {
                 trSub.push(num(tr.remote_translate_ms_ema, 0) + " ms round-trip");
+                // Network overhead = round-trip here − B's actual generate time
+                // (from the Machine B panel); the rest is model inference on B.
+                if (_remoteLocalMs != null && tr.remote_translate_ms_ema >= _remoteLocalMs)
+                    trSub.push(num(tr.remote_translate_ms_ema - _remoteLocalMs, 0) + " ms network");
+            }
             setStatus("c-trans", tr.remote_reachable ? "healthy" : "error");
         } else {
             $("m-trans").textContent = tr.model_loading ? "loading…" : (tr.model_loaded ? "loaded" : "idle");
             if (tr.translation_model) trSub.push(tr.translation_model.split("/").pop());
             if (tr.model_device) trSub.push(tr.model_device.toUpperCase());
+            if (tr.model_dtype) trSub.push(tr.model_dtype);
             if (tr.local_translate_ms_ema !== null && tr.local_translate_ms_ema !== undefined)
                 trSub.push(num(tr.local_translate_ms_ema, 0) + " ms/translation");
+            if (tr.server_cache && (tr.server_cache.hits + tr.server_cache.misses) > 0)
+                trSub.push("cache " + Math.round(tr.server_cache.hit_rate * 100) + "% (" + tr.server_cache.size + ")");
             setStatus("c-trans", tr.model_loaded ? "healthy" : "unknown");
         }
         $("m-trans-sub").textContent = trSub.join(" · ");
@@ -558,14 +567,18 @@
         renderGpu("mb", "mb-c-vram", s);
 
         const tr = h.translation || {};
+        // Remember B's generate time so Machine A's card can show network overhead.
+        _remoteLocalMs = (tr.local_translate_ms_ema != null) ? tr.local_translate_ms_ema : null;
         $("mb-trans").textContent = !tr.enabled ? "disabled"
             : (tr.model_loading ? "loading…" : (tr.model_loaded ? "loaded" : "idle"));
         const tb = [];
         if (tr.translation_model) tb.push(tr.translation_model.split("/").pop());
         if (tr.model_device) tb.push(tr.model_device.toUpperCase());
+        if (tr.model_dtype) tb.push(tr.model_dtype);
         if (tr.local_translate_ms_ema !== null && tr.local_translate_ms_ema !== undefined)
             tb.push(num(tr.local_translate_ms_ema, 0) + " ms");
-        if (tr.cache_size !== undefined && tr.cache_size !== null) tb.push("cache " + tr.cache_size);
+        if (tr.server_cache && (tr.server_cache.hits + tr.server_cache.misses) > 0)
+            tb.push("cache " + Math.round(tr.server_cache.hit_rate * 100) + "% (" + tr.server_cache.size + ")");
         $("mb-trans-sub").textContent = tb.join(" · ");
         setStatus("mb-c-trans", tr.model_loaded ? "healthy" : "unknown");
 
