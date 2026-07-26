@@ -205,7 +205,17 @@ def sample_system_resources() -> Dict[str, Any]:
 
         if torch.cuda.is_available():
             result["gpu_kind"] = "cuda"
-            result["vram_used_bytes"] = float(torch.cuda.memory_reserved(0))
+            # Device-wide used VRAM = total - free. `mem_get_info` reports the
+            # whole device, so it captures memory held by non-PyTorch allocators
+            # (e.g. CTranslate2 / faster-whisper), which `memory_reserved` — being
+            # scoped to this process's PyTorch caching allocator — reports as 0.
+            try:
+                free_b, total_b = torch.cuda.mem_get_info(0)
+                result["vram_used_bytes"] = float(total_b - free_b)
+            except Exception:
+                # Old torch or a driver hiccup: fall back to the process-scoped
+                # figure (blind to other allocators, but better than nothing).
+                result["vram_used_bytes"] = float(torch.cuda.memory_reserved(0))
             try:
                 util = torch.cuda.utilization(0)  # needs pynvml; optional
                 result["gpu_util_pct"] = float(util)

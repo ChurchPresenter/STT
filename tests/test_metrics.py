@@ -168,6 +168,74 @@ def test_sample_system_resources_detects_mps(monkeypatch):
     assert result["gpu_util_pct"] is None  # no utilisation counter on MPS
 
 
+def test_sample_system_resources_cuda_uses_device_wide_memory(monkeypatch):
+    # Fake a CUDA torch where the process's PyTorch allocator holds nothing
+    # (memory_reserved == 0) but the device is 8 GiB total / 2 GiB free — as
+    # happens when faster-whisper/CTranslate2 owns the VRAM. Used must reflect
+    # the device-wide figure (6 GiB), not the process-scoped 0.
+    import builtins
+    import types
+
+    gib = 1024 ** 3
+    fake_torch = types.SimpleNamespace()
+    fake_torch.cuda = types.SimpleNamespace(
+        is_available=lambda: True,
+        mem_get_info=lambda _dev: (2 * gib, 8 * gib),
+        memory_reserved=lambda _dev: 0,
+        utilization=lambda _dev: 99,
+    )
+
+    real_import = builtins.__import__
+
+    def fake_import(name, *args, **kwargs):
+        if name == "torch":
+            return fake_torch
+        if name == "psutil":
+            raise ImportError(name)
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+    monkeypatch.setattr(metrics.shutil, "which", lambda _exe: None)
+
+    result = sample_system_resources()
+    assert result["gpu_kind"] == "cuda"
+    assert result["vram_used_bytes"] == float(6 * gib)
+    assert result["gpu_util_pct"] == 99.0
+
+
+def test_sample_system_resources_cuda_falls_back_when_mem_get_info_unavailable(monkeypatch):
+    # Old torch without mem_get_info: fall back to the process-scoped figure.
+    import builtins
+    import types
+
+    def _raise(_dev):
+        raise AttributeError("mem_get_info")
+
+    fake_torch = types.SimpleNamespace()
+    fake_torch.cuda = types.SimpleNamespace(
+        is_available=lambda: True,
+        mem_get_info=_raise,
+        memory_reserved=lambda _dev: 4096.0,
+        utilization=lambda _dev: 50,
+    )
+
+    real_import = builtins.__import__
+
+    def fake_import(name, *args, **kwargs):
+        if name == "torch":
+            return fake_torch
+        if name == "psutil":
+            raise ImportError(name)
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+    monkeypatch.setattr(metrics.shutil, "which", lambda _exe: None)
+
+    result = sample_system_resources()
+    assert result["gpu_kind"] == "cuda"
+    assert result["vram_used_bytes"] == 4096.0
+
+
 def test_sample_system_resources_uses_nvidia_smi_fallback(monkeypatch):
     import builtins
 
