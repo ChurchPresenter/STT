@@ -170,21 +170,21 @@
                 <div id="nllb_remote_section">
                 <div id="local_translation_settings">
                 <div class="checkbox-group">
-                    <input type="checkbox" id="translation_use_gpu" data-a-controlled checked>
+                    <input type="checkbox" id="translation_use_gpu" checked>
                     <label for="translation_use_gpu">Use GPU for Translation</label>
                 </div>
                 <small style="color: var(--text-secondary); font-size: 0.75em; margin-left: 22px; display: block; margin-top: -5px; margin-bottom: 10px;">
                     Disable to run NLLB on CPU, freeing GPU VRAM for Whisper
                 </small>
                 <div class="checkbox-group">
-                    <input type="checkbox" id="translation_use_fp16" data-a-controlled>
+                    <input type="checkbox" id="translation_use_fp16">
                     <label for="translation_use_fp16">Half precision (fp16) on GPU</label>
                 </div>
                 <small style="color: var(--text-secondary); font-size: 0.75em; margin-left: 22px; display: block; margin-top: -5px; margin-bottom: 10px;">
                     Faster and uses ~half the VRAM (GPU only). MPS fp16 can occasionally garble output — turn off if translations look wrong. Reloads the model.
                 </small>
                 <div class="checkbox-group">
-                    <input type="checkbox" id="translation_use_ctranslate2" data-a-controlled>
+                    <input type="checkbox" id="translation_use_ctranslate2">
                     <label for="translation_use_ctranslate2">Use CTranslate2 (int8)</label>
                 </div>
                 <small style="color: var(--text-secondary); font-size: 0.75em; margin-left: 22px; display: block; margin-top: -5px; margin-bottom: 10px;">
