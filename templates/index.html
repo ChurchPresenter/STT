@@ -225,7 +225,7 @@
          const uppercase = urlParams.get('uppercase') === 'true';
          const inProgressStyle = urlParams.get('inProgressStyle') || 'italic';
          const inProgressOpacity = parseFloat(urlParams.get('inProgressOpacity')) || 0.7;
-         const dripSpeed = parseInt(urlParams.get('dripSpeed')) || 140;  // ms per word drip-feed when in-progress is hidden (0 = disabled)
+         const dripSpeed = parseInt(urlParams.get('dripSpeed')) || 30;  // ms per character drip-feed when in-progress is hidden (0 = disabled)
          const maxLines = parseInt(urlParams.get('maxLines')) || 0;  // 0 = unlimited, 1-10 = caption mode
 
          // Translation mode: 'transcribe' (default), 'translate', 'both'
@@ -1371,7 +1371,7 @@
        // and clears the "actually displayed" tracker. Must be called anywhere
        // finalized/segment state is invalidated (reconnect, corrections, a new
        // session) — otherwise a stale baseline survives into the next reveal
-       // and dripFeedWords glues old text in front of unrelated new content
+       // and dripFeedText glues old text in front of unrelated new content
        // until that reveal finishes.
        function resetDripState(isTranslation) {
          if (isTranslation) {
@@ -1383,8 +1383,8 @@
          }
        }
 
-       function dripFeedWords(newFullHTML, prevFullHTML, element, isTranslation) {
-         const dripSpeed = window.displayConfig?.dripSpeed || 140;
+       function dripFeedText(newFullHTML, prevFullHTML, element, isTranslation) {
+         const dripSpeed = window.displayConfig?.dripSpeed || 30;
 
          // Baseline off what's ACTUALLY on screen right now, not prevFullHTML
          // (the previous call's target). If a prior drip was interrupted
@@ -1419,16 +1419,16 @@
          let newPortion = '';
          if (newText.startsWith(oldText)) {
            baseText = oldText;
-           newPortion = newText.slice(oldText.length).trim();
+           // Keep the raw remainder (incl. its leading space) so baseText +
+           // newPortion === newText exactly and the space drips in naturally.
+           newPortion = newText.slice(oldText.length);
          } else {
            // Revealed text diverged from the new state (a correction or a
-           // retranslation changed words already on screen). Fix the changed
-           // words IN PLACE instantly — never re-animate text the viewer has
-           // already read — and drip only the net-new words at the end:
-           // re-base on the revealed word COUNT, not the common prefix.
-           const oldWords = oldText.split(/\s+/).filter(w => w.length > 0);
-           const allNewWords = newText.split(/\s+/).filter(w => w.length > 0);
-           if (allNewWords.length <= oldWords.length) {
+           // retranslation changed characters already on screen). Fix the
+           // changed text IN PLACE instantly — never re-animate text the viewer
+           // has already read — and drip only the net-new tail: re-base on the
+           // revealed character COUNT, not the common prefix.
+           if (newText.length <= oldText.length) {
              // Same length or shrank: pure in-place correction, nothing to
              // drip. Stop any mid-flight drip first so its timer can't
              // overwrite the corrected text with stale partials.
@@ -1439,11 +1439,12 @@
              else { _dripRevealedHTML = newFullHTML; }
              return;
            }
-           baseText = allNewWords.slice(0, oldWords.length).join(' ');
-           newPortion = allNewWords.slice(oldWords.length).join(' ');
+           baseText = newText.slice(0, oldText.length);
+           newPortion = newText.slice(oldText.length);
          }
 
-         if (!newPortion) {
+         if (!newPortion.trim()) {
+           // Only whitespace to add — reveal instantly rather than tick on it.
            element.innerHTML = newFullHTML;
            if (isTranslation) { _transDripRevealedHTML = newFullHTML; }
            else { _dripRevealedHTML = newFullHTML; }
@@ -1453,8 +1454,6 @@
          // HTML for the base: on the prefix path it's exactly what's on screen;
          // after a divergence re-base it must be rebuilt from baseText.
          const baseHTML = baseText === oldText ? actualPrevHTML : applyWordHighlighting(baseText);
-
-         const newWords = newPortion.split(/\s+/).filter(w => w.length > 0);
 
          // Flush any existing timer
          if (isTranslation && _transDripTimer) {
@@ -1470,17 +1469,18 @@
          if (isTranslation) { _transDripRevealedHTML = baseHTML; }
          else { _dripRevealedHTML = baseHTML; }
 
-         let wordIndex = 0;
+         let charIndex = 0;
          const timer = setInterval(() => {
-           if (wordIndex >= newWords.length) {
+           if (charIndex >= newPortion.length) {
              clearInterval(timer);
              if (isTranslation) { _transDripTimer = null; _transDripRevealedHTML = newFullHTML; }
              else { _dripTimer = null; _dripRevealedHTML = newFullHTML; }
              element.innerHTML = newFullHTML;
              return;
            }
-           wordIndex++;
-           const partialNewText = baseText + (baseText ? ' ' : '') + newWords.slice(0, wordIndex).join(' ');
+           charIndex++;
+           // newPortion carries its own leading space, so no separator needed.
+           const partialNewText = baseText + newPortion.slice(0, charIndex);
            const partialHTML = applyWordHighlighting(partialNewText);
            element.innerHTML = partialHTML;
            if (isTranslation) { _transDripRevealedHTML = partialHTML; }
@@ -1634,7 +1634,7 @@
                  _finalizedTextEl.innerHTML = highlightedText;
                  _dripRevealedHTML = highlightedText;
                } else {
-                 dripFeedWords(highlightedText, prevHTML, _finalizedTextEl, false);
+                 dripFeedText(highlightedText, prevHTML, _finalizedTextEl, false);
                }
              } else {
                _finalizedTextEl.innerHTML = highlightedText;
@@ -1828,7 +1828,7 @@
                    _translationFinalizedEl.innerHTML = highlightedText;
                    _transDripRevealedHTML = highlightedText;
                  } else {
-                   dripFeedWords(highlightedText, prevHTML, _translationFinalizedEl, true);
+                   dripFeedText(highlightedText, prevHTML, _translationFinalizedEl, true);
                  }
                } else {
                  _translationFinalizedEl.innerHTML = highlightedText;

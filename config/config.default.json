@@ -294,7 +294,7 @@
     "paddingRight": "20",
     "maxWidth": "100",
     "inProgressOpacity": "0.9",
-    "dripSpeed": "80",
+    "dripSpeed": "30",
     "layout": "side_by_side",
     "inverse": "true"
   },

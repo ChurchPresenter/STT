@@ -400,9 +400,9 @@
                 </div>
 
                 <div class="form-group">
-                    <label for="url_dripSpeed">Word Drip Speed (ms)</label>
-                    <input type="number" id="url_dripSpeed" min="0" max="500" step="10" value="140" oninput="updateCustomURL()">
-                    <small>When in-progress is hidden, words appear one-by-one at this interval. 0 = disabled (instant).</small>
+                    <label for="url_dripSpeed">Character Drip Speed (ms)</label>
+                    <input type="number" id="url_dripSpeed" min="0" max="200" step="5" value="30" oninput="updateCustomURL()">
+                    <small>When in-progress is hidden, characters appear one-by-one at this interval. 0 = disabled (instant).</small>
                 </div>
 
                 <div class="form-group">
@@ -524,7 +524,7 @@
             translationLayout: 'stacked',   // full select value, incl. any _inverse suffix
             hideInProgress: false,
             hideTranslateInProgress: false,
-            dripSpeed: '140',
+            dripSpeed: '30',
             showAll: false,
             hideMusicSegments: false,
             audioStream: false,
