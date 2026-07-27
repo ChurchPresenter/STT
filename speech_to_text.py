@@ -14744,6 +14744,7 @@ def thread1_function(ts, cq, cfq, cal_state, cal_data, cal_step1, asq):
                     _perf_state = None       # EMA dict from stt.metrics.update_perf_ema
                     _perf_first_ts = None    # epoch of the first transcribed chunk (throughput window)
                     _perf_last_push = 0.0    # last time we wrote perf fields to shared state
+                    _eof_stop_deadline = None  # set when a played file hits EOF; grace to finalize the tail
 
                     while True:
                         try:
@@ -14779,6 +14780,28 @@ def thread1_function(ts, cq, cfq, cal_state, cal_data, cal_step1, asq):
                             # Check again after processing control queue
                             if not is_running:
                                 break
+
+                            # End of a played audio file: finalize the last phrase
+                            # via the existing phrase-timeout path, then stop just
+                            # like a user stop. A mic never sets playback_finished,
+                            # so live capture is unaffected.
+                            if (_eof_stop_deadline is None and source is not None
+                                    and getattr(source, "playback_finished", None) is not None
+                                    and source.playback_finished.is_set()):
+                                print("[LOOP] Audio file reached end of stream — finalizing tail, then stopping")
+                                if hasattr(source, "flush_buffer"):
+                                    source.flush_buffer()
+                                _eof_stop_deadline = time.time() + float(phrase_timeout) + 1.0
+                            if _eof_stop_deadline is not None:
+                                # Feed trailing silence so the drain/phrase-timeout
+                                # path runs (it's gated on a non-empty queue) and
+                                # finalizes the last phrase.
+                                if data_queue.empty() and time.time() < _eof_stop_deadline:
+                                    data_queue.put(b"\x00" * (source.chunk_size * source.SAMPLE_WIDTH))
+                                if time.time() >= _eof_stop_deadline:
+                                    print("[LOOP] End-of-file grace elapsed — stopping transcription")
+                                    is_running = False
+                                    break
 
                             # Check for config updates (hot-reload) with non-blocking operations
                             try:
@@ -16093,6 +16116,11 @@ def thread1_function(ts, cq, cfq, cal_state, cal_data, cal_step1, asq):
                     transcription_state["status"] = "stopped"
                     transcription_state["message"] = "Transcription stopped"
                     transcription_state["error"] = None
+                    # Drop file-playback markers so the live-settings trackbar
+                    # doesn't linger after an end-of-file (or any) stop.
+                    transcription_state["is_file_playback"] = False
+                    transcription_state["playback_source"] = None
+                    transcription_state["playback_duration"] = None
                     # db_name already cleared in cleanup code above
                 print("[INFO] Transcription stopped successfully")
 

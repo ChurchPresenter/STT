@@ -4,6 +4,7 @@ of unit-test scope."""
 
 import os
 import sys
+import threading
 
 from stt.audio_capture import (
     FFmpegAudioCapture,
@@ -100,6 +101,24 @@ class TestInit:
         assert not cap._flush_event.is_set()
         cap.flush_buffer()
         assert cap._flush_event.is_set()
+
+    def test_playback_finished_event_starts_unset(self):
+        cap = FFmpegAudioCapture(ts_enabled=False)
+        assert isinstance(cap.playback_finished, threading.Event)
+        assert not cap.playback_finished.is_set()
+
+    def test_signal_eof_sets_event_only_for_a_file_source(self, tmp_path):
+        # A real file path -> EOF means the file ended -> event set.
+        f = tmp_path / "clip.wav"
+        f.write_bytes(b"RIFF")
+        cap_file = FFmpegAudioCapture(device_name=str(f), ts_enabled=False)
+        cap_file._signal_eof_if_file()
+        assert cap_file.playback_finished.is_set()
+
+        # A mic device name is not a file -> EOF must NOT auto-stop the session.
+        cap_mic = FFmpegAudioCapture(device_name="plughw:1,0", ts_enabled=False)
+        cap_mic._signal_eof_if_file()
+        assert not cap_mic.playback_finished.is_set()
 
 
 class TestGetFfmpegCommand:

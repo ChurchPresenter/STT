@@ -95,6 +95,9 @@ class FFmpegAudioCapture:
         self.SAMPLE_WIDTH = 2  # 16-bit = 2 bytes per sample
         # Buffer flush support for phrase timeout
         self._flush_event = threading.Event()
+        # Set when a played FILE reaches EOF (never for a mic) so the consumer
+        # can auto-stop the session at end of file.
+        self.playback_finished = threading.Event()
         # Audio backup file path (for power-fail recovery)
         self.backup_file = None
         # Track how many .ts files have been created this session (for split detection)
@@ -133,6 +136,17 @@ class FFmpegAudioCapture:
         get sent to the queue immediately (padded with silence if needed).
         """
         self._flush_event.set()
+
+    def _signal_eof_if_file(self):
+        """Mark end-of-stream, but only when the source is a played FILE.
+
+        ffmpeg only closes stdout (empty read) at a file's natural end; a mic
+        stream never ends this way, and a mic's transient ffmpeg death must
+        trigger a restart, not a session stop — so this is gated on the source
+        being an on-disk file, exactly as file-playback mode is selected.
+        """
+        if self.device_name and os.path.isfile(self.device_name):
+            self.playback_finished.set()
 
     def _get_ffmpeg_command(self):
         """Build ffmpeg command for the current platform with optional MPEG-TS backup"""
@@ -419,11 +433,13 @@ class FFmpegAudioCapture:
                         # data already read from queue above
                         if not data:
                             print("[FFMPEG] No more audio data (EOF)", flush=True)
+                            self._signal_eof_if_file()
                             break
                     else:
                         data = os.read(self.process.stdout.fileno(), bytes_per_chunk)
                         if not data:
                             print("[FFMPEG] No more audio data (EOF)", flush=True)
+                            self._signal_eof_if_file()
                             break
                     buffer += data
                     bytes_received_total += len(data)
@@ -496,6 +512,7 @@ class FFmpegAudioCapture:
 
         # Reset file count for new session
         self._ts_file_count = 0
+        self.playback_finished.clear()
 
         if self.running:
             raise RuntimeError("Already capturing")
