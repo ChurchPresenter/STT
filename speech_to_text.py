@@ -4252,8 +4252,6 @@ def update_config():
         # to a paired offload server. Scalars are captured by value here.
         _lt_prev = config.get("live_translation", {})
         _prev_lt_model = _lt_prev.get("translation_model")
-        _prev_lt_fp16 = _lt_prev.get("use_fp16")
-        _prev_lt_gpu = _lt_prev.get("use_gpu")
         _prev_lt_target = _lt_prev.get("target_language")
         _prev_lt_remote_model = (_lt_prev.get("remote", {}) or {}).get("model", "")
 
@@ -4314,14 +4312,13 @@ def update_config():
         try:
             _lt_now = config.get("live_translation", {})
             _now_remote_model = (_lt_now.get("remote", {}) or {}).get("model", "")
+            # Only the model/engine B runs is propagated; B owns its own
+            # precision/backend (fp16, CTranslate2, GPU).
             if (_prev_lt_model != _lt_now.get("translation_model")
-                    or _prev_lt_fp16 != _lt_now.get("use_fp16")
-                    or _prev_lt_gpu != _lt_now.get("use_gpu")
                     or _prev_lt_remote_model != _now_remote_model):
                 _propagate_model_settings_to_remote(
-                    _lt_now.get("use_fp16", False),
                     _now_remote_model or _lt_now.get("translation_model", ""),
-                    _lt_now.get("use_gpu", True),
+                    _lt_now.get("translation_method", "nllb"),
                 )
             _new_target = _lt_now.get("target_language")
             if _new_target and _new_target != _prev_lt_target and _new_target in NLLB_LANG_CODES:
@@ -5716,14 +5713,13 @@ def save_translation_settings():
     # its old model + precision even after you change them here. B runs the
     # explicitly-chosen remote.model when set, else falls back to this machine's
     # own model.
+    # Only WHICH model + engine B runs is A's decision; precision/backend (fp16,
+    # CTranslate2, GPU) are B's own hardware-local settings and are NOT pushed —
+    # A (CUDA) and B (e.g. a 16 GB Mac) want different ones.
     new_remote_model = (config.get("live_translation", {}).get("remote", {}) or {}).get("model", "")
     _b_model = new_remote_model or new_model
-    new_ct2_compute = config.get("live_translation", {}).get("ct2_compute_type", "auto")
-    if (old_use_fp16 != new_use_fp16 or old_use_gpu != new_use_gpu
-            or old_model != new_model or old_remote_model != new_remote_model
-            or method_changed or old_use_ct2 != new_use_ct2):
-        _propagate_model_settings_to_remote(new_use_fp16, _b_model, new_use_gpu, new_method,
-                                            new_use_ct2, new_ct2_compute)
+    if old_model != new_model or old_remote_model != new_remote_model or method_changed:
+        _propagate_model_settings_to_remote(_b_model, new_method)
 
     return jsonify({
         "success": True,
@@ -5731,15 +5727,14 @@ def save_translation_settings():
     })
 
 
-def _propagate_model_settings_to_remote(use_fp16, translation_model, use_gpu, translation_method=None,
-                                        use_ctranslate2=None, ct2_compute_type=None):
-    """Push model-load settings to a paired remote translation server so it
-    reloads with them. Best-effort, off the request thread — never blocks or
+def _propagate_model_settings_to_remote(translation_model, translation_method=None):
+    """Tell a paired remote translation server WHICH model + engine to run so it
+    reloads to match. Best-effort, off the request thread — never blocks or
     breaks the local save. No-op when offload isn't enabled/configured.
 
-    translation_method ('nllb'/'madlad') and use_ctranslate2 are included so B
-    loads the SAME engine/backend A uses — e.g. the low-RAM Mac offload box also
-    switches to the CTranslate2 int8 backend."""
+    Only the model + engine (correctness) are pushed. Precision/backend (fp16,
+    CTranslate2, GPU) are B's OWN hardware-local settings — A and B are usually
+    different hardware (CUDA client vs a low-RAM Mac), so B keeps its own."""
     remote_cfg = config.get("live_translation", {}).get("remote", {})
     if not (remote_cfg.get("enabled") and remote_cfg.get("endpoint")):
         return
@@ -5749,13 +5744,9 @@ def _propagate_model_settings_to_remote(use_fp16, translation_model, use_gpu, tr
             ep = _get_remote_endpoint_safe()
             if not ep:
                 return
-            _payload = {"use_fp16": bool(use_fp16), "translation_model": translation_model, "use_gpu": bool(use_gpu)}
+            _payload = {"translation_model": translation_model}
             if translation_method:
                 _payload["translation_method"] = translation_method
-            if use_ctranslate2 is not None:
-                _payload["use_ctranslate2"] = bool(use_ctranslate2)
-            if ct2_compute_type:
-                _payload["ct2_compute_type"] = ct2_compute_type
             _get_remote_http_session().post(
                 ep.rstrip("/") + "/api/translate/model-settings",
                 json=_payload,
@@ -6350,12 +6341,10 @@ def translate_remote_model_settings():
     data = request.get_json() or {}
     lt = config.setdefault("live_translation", {})
 
+    # A only tells us WHICH model + engine to run. Precision/backend (fp16,
+    # CTranslate2, GPU) are this machine's own hardware-local settings and are
+    # deliberately NOT accepted here, so A can never override them on reload.
     changed = []
-    if "use_fp16" in data:
-        val = bool(data["use_fp16"])
-        if val != lt.get("use_fp16", False):
-            lt["use_fp16"] = val
-            changed.append("use_fp16")
     if data.get("translation_model"):
         val = str(data["translation_model"])
         if val != lt.get("translation_model", ""):
@@ -6366,21 +6355,6 @@ def translate_remote_model_settings():
         if val != lt.get("translation_method", "nllb"):
             lt["translation_method"] = val
             changed.append("translation_method")
-    if "use_ctranslate2" in data:
-        val = bool(data["use_ctranslate2"])
-        if val != lt.get("use_ctranslate2", False):
-            lt["use_ctranslate2"] = val
-            changed.append("use_ctranslate2")
-    if data.get("ct2_compute_type"):
-        val = str(data["ct2_compute_type"])
-        if val != lt.get("ct2_compute_type", "auto"):
-            lt["ct2_compute_type"] = val
-            changed.append("ct2_compute_type")
-    if "use_gpu" in data:
-        val = bool(data["use_gpu"])
-        if val != lt.get("use_gpu", True):
-            lt["use_gpu"] = val
-            changed.append("use_gpu")
 
     if changed:
         save_config(config)

@@ -225,6 +225,7 @@
                         <select id="remote_model" style="width: 100%; box-sizing: border-box; padding: 6px 8px; background: var(--bg-elevated); border: 1px solid var(--border); border-radius: 4px; color: var(--text-primary); font-size: 0.9em;">
                         </select>
                         <small id="remote_model_note" style="display:block; margin-top:4px; color: var(--text-secondary); font-size: 0.75em;">Chosen from models already downloaded on Machine B.</small>
+                        <small style="display:block; margin-top:4px; color: var(--text-secondary); font-size: 0.75em;">Machine B uses its <strong>own</strong> precision/backend settings (fp16, CTranslate2) — set those on Machine B. Here you only choose which model B runs. (The fp16/CTranslate2 checkboxes above apply to <em>this</em> machine's local model.)</small>
                     </div>
                     <div class="checkbox-group" style="margin-bottom: 8px;">
                         <input type="checkbox" id="remote_sync_dictionary" checked>
