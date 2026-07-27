@@ -1337,6 +1337,17 @@
                     previewContent.innerHTML = `<div class="empty-state"><p>Failed to load text preview: ${error.message}</p></div>`;
                 }
             }
+            // SQLite sidecars (WAL/shared-memory/rollback journal) — not standalone
+            // databases; their contents are already merged when you preview the .db.
+            else if (/\.(db|sqlite|sqlite3)-(wal|shm|journal)$/i.test(name) || /-journal$/i.test(name)) {
+                const base = name.replace(/-(wal|shm|journal)$/i, '');
+                previewContent.innerHTML = `
+                    <div class="empty-state">
+                        <div style="font-size: 3em; margin-bottom: 16px;">🗄️</div>
+                        <h3>SQLite sidecar file</h3>
+                        <p>This is a companion file of <code>${escapeHtml(base)}</code>, not a database on its own. Preview <code>${escapeHtml(base)}</code> instead — its contents are already included there.</p>
+                    </div>`;
+            }
             // Database files — generic, future-proof SQLite dump: every column,
             // every row (capped). Columns come from the live schema, so new
             // migrations show up here automatically.
