@@ -909,6 +909,12 @@
                     markClean();
                     checkStatus();
                     if (window.refreshSysreqBanner) window.refreshSysreqBanner();
+                    // Reflect the saved Machine B model: refresh now, then again
+                    // after B has had a moment to reload the newly-pushed model.
+                    if (document.getElementById('remote_translation_enabled').checked) {
+                        refreshRemoteBStatus();
+                        setTimeout(refreshRemoteBStatus, 2500);
+                    }
                 } else {
                     showAlert('Error saving settings: ' + data.error, 'error');
                 }
