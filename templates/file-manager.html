@@ -1358,8 +1358,11 @@
                         const th = 'text-align:left;padding:6px 10px;position:sticky;top:0;background:var(--bg-base);border-bottom:1px solid var(--border);white-space:nowrap;';
                         const head = `<tr>${data.columns.map(c =>
                             `<th style="${th}">${escapeHtml(c)}</th>`).join('')}</tr>`;
+                        // One line per cell with an ellipsis (full value on hover)
+                        // so blob columns like words_json stay a clean grid column
+                        // instead of a tall skinny one; wide content scrolls sideways.
                         const body = data.rows.map(r => `<tr>${r.map(v =>
-                            `<td style="padding:5px 10px;vertical-align:top;border-bottom:1px solid var(--border);max-width:340px;white-space:pre-wrap;word-break:break-word;font-variant-numeric:tabular-nums;">${escapeHtml(v)}</td>`
+                            `<td title="${escapeHtml(v)}" style="padding:5px 10px;vertical-align:top;border-bottom:1px solid var(--border);max-width:480px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-variant-numeric:tabular-nums;">${escapeHtml(v)}</td>`
                         ).join('')}</tr>`).join('');
                         const note = data.truncated
                             ? `<div style="margin-bottom:8px;color:var(--warning);font-size:0.85em;"><code>${escapeHtml(data.table)}</code> — showing first ${data.rows.length} of ${data.total} rows. Download the file for everything.</div>`
