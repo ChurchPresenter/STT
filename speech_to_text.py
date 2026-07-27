@@ -8290,17 +8290,31 @@ def download_file():
         return jsonify({"success": False, "error": str(e)}), 500
 
 
+# Output formats offered for on-the-fly conversion (fixed allowlist → no shell
+# injection): fmt -> (ffmpeg -f value, file extension, mime type).
+_CONVERT_FORMATS = {
+    "mp3": ("mp3", "mp3", "audio/mpeg"),
+    "wav": ("wav", "wav", "audio/wav"),
+}
+
+
 @app.route("/api/file-manager/convert-download", methods=["GET"])
 def convert_download():
     """Transcode a media file (e.g. the MPEG-TS capture backup, which browsers
-    can't play) to MP3 and stream it as a download. ffmpeg runs on the confined
-    input; output format is fixed, so there's no shell injection or traversal."""
+    can't play) to MP3/WAV and stream it as a download. ffmpeg runs on the
+    confined input with a fixed-allowlist output format — no shell injection or
+    traversal."""
     if not check_ip_whitelist():
         return jsonify({"success": False, "error": "Access denied"}), 403
 
     path = request.args.get("path")
     if not path:
         return jsonify({"success": False, "error": "Path is required"}), 400
+
+    fmt = (request.args.get("format") or "mp3").lower()
+    if fmt not in _CONVERT_FORMATS:
+        return jsonify({"success": False, "error": "Unsupported format"}), 400
+    ff_fmt, ext, mimetype = _CONVERT_FORMATS[fmt]
 
     abs_path = safe_managed_path(path)  # commonpath + realpath confinement
     if abs_path is None:
@@ -8312,7 +8326,7 @@ def convert_download():
     import subprocess
     ffmpeg = _shutil.which("ffmpeg") or "ffmpeg"
     proc = subprocess.Popen(
-        [ffmpeg, "-hide_banner", "-loglevel", "error", "-i", abs_path, "-vn", "-f", "mp3", "pipe:1"],
+        [ffmpeg, "-hide_banner", "-loglevel", "error", "-i", abs_path, "-vn", "-f", ff_fmt, "pipe:1"],
         stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
     )
 
@@ -8333,8 +8347,8 @@ def convert_download():
     stem = os.path.splitext(os.path.basename(abs_path))[0]
     return Response(
         stream_with_context(_gen()),
-        mimetype="audio/mpeg",
-        headers={"Content-Disposition": f'attachment; filename="{stem}.mp3"'},
+        mimetype=mimetype,
+        headers={"Content-Disposition": f'attachment; filename="{stem}.{ext}"'},
     )
 
 
