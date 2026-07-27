@@ -184,7 +184,7 @@
                     Faster and uses ~half the VRAM (GPU only). MPS fp16 can occasionally garble output — turn off if translations look wrong. Reloads the model.
                 </small>
                 <div class="checkbox-group">
-                    <input type="checkbox" id="translation_use_ctranslate2">
+                    <input type="checkbox" id="translation_use_ctranslate2" onchange="syncCt2Fp16()">
                     <label for="translation_use_ctranslate2">Use CTranslate2 (int8)</label>
                 </div>
                 <small style="color: var(--text-secondary); font-size: 0.75em; margin-left: 22px; display: block; margin-top: -5px; margin-bottom: 10px;">
@@ -734,6 +734,7 @@
                     document.getElementById('translation_use_gpu').checked = currentSettings.use_gpu !== false;
                     document.getElementById('translation_use_fp16').checked = currentSettings.use_fp16 === true;
                     document.getElementById('translation_use_ctranslate2').checked = currentSettings.use_ctranslate2 === true;
+                    syncCt2Fp16();
 
                     // Remote translation settings
                     const remoteCfg = currentSettings.remote || {};
@@ -1177,6 +1178,16 @@
             return String(s == null ? '' : s)
                 .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
                 .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+        }
+
+        // CTranslate2 uses its own int8 quantization, so fp16 is ignored when it's
+        // on — keep them mutually exclusive (int8 xor fp16).
+        function syncCt2Fp16() {
+            const ct2 = document.getElementById('translation_use_ctranslate2');
+            const fp16 = document.getElementById('translation_use_fp16');
+            if (!ct2 || !fp16) return;
+            if (ct2.checked) { fp16.checked = false; fp16.disabled = true; }
+            else { fp16.disabled = false; }
         }
 
         function toggleRemoteFields() {

@@ -471,7 +471,7 @@
                         </div>
                         <div class="form-group">
                             <label style="display: flex; align-items: center; gap: 8px; cursor: pointer;">
-                                <input type="checkbox" id="config_use_ctranslate2" style="width:auto;">
+                                <input type="checkbox" id="config_use_ctranslate2" style="width:auto;" onchange="syncCt2Fp16('config_use_ctranslate2','config_use_fp16')">
                                 Use CTranslate2 (int8)
                             </label>
                             <small>int8 CPU backend for NLLB &amp; MADLAD — much smaller/faster (e.g. MADLAD-3B in ~3&nbsp;GB), recommended for low-RAM machines like a 16&nbsp;GB Mac. Converts to int8 once on first use (briefly needs ~model-size RAM). No Apple Metal (CPU int8 there). Reloads the model.</small>
@@ -1686,6 +1686,15 @@
             }
         }
 
+        // CTranslate2 uses its own int8 quantization, so fp16 is ignored when it's
+        // on — keep the two mutually exclusive in the UI (int8 xor fp16).
+        function syncCt2Fp16(ct2Id, fp16Id) {
+            const ct2 = document.getElementById(ct2Id), fp16 = document.getElementById(fp16Id);
+            if (!ct2 || !fp16) return;
+            if (ct2.checked) { fp16.checked = false; fp16.disabled = true; }
+            else { fp16.disabled = false; }
+        }
+
         async function loadTranslationConfig() {
             try {
                 const settingsResp = await fetch('/api/translation/settings');
@@ -1694,13 +1703,18 @@
                 if (settings.success) {
                     const model = settings.settings.translation_model || 'facebook/nllb-200-distilled-600M';
                     await populateTranslationModelDropdown(model);
-                    document.getElementById('config_use_fp16').checked = settings.settings.use_fp16 === true;
-                    document.getElementById('config_use_ctranslate2').checked = settings.settings.use_ctranslate2 === true;
+                    const s = settings.settings || {};
+                    document.getElementById('config_use_fp16').checked = s.use_fp16 === true;
+                    document.getElementById('config_use_ctranslate2').checked = s.use_ctranslate2 === true;
+                    syncCt2Fp16('config_use_ctranslate2', 'config_use_fp16');
 
-                    // Update summary
+                    // Update summary — model + precision/backend (the 8/16 state)
                     const modelName = model.split('/').pop() || model;
+                    let backend;
+                    if (s.use_ctranslate2) backend = 'CTranslate2 (' + (s.ct2_compute_type && s.ct2_compute_type !== 'auto' ? s.ct2_compute_type : 'int8') + ')';
+                    else backend = s.use_fp16 ? 'fp16' : 'fp32';
                     document.getElementById('translation_model_summary').innerHTML =
-                        `<strong>Model:</strong> ${modelName}`;
+                        `<strong>Model:</strong> ${modelName}<br><strong>Precision:</strong> ${backend}`;
                 }
             } catch (error) {
                 console.error('Error loading translation config:', error);
