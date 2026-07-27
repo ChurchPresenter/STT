@@ -1317,8 +1317,11 @@
                     // allow-scripts (without allow-same-origin) lets the page's own
                     // scripts run in an isolated origin — they render the content but
                     // can't reach this app (DOM/cookies/same-origin APIs).
-                    previewContent.style.maxHeight = 'none';  // let it be tall
-                    previewContent.innerHTML = `<iframe title="HTML Preview" sandbox="allow-scripts" style="width: 85vw; max-width: 1100px; height: 78vh; border-radius: var(--radius-sm); border: 0; background: #fff;"></iframe>`;
+                    // Cap to 75vh so the modal (header + this + Close ≈ 88vh) stays
+                    // within its 90vh max and never scrolls — the iframe's OWN content
+                    // scrolls instead, and the Close button stays visible.
+                    previewContent.style.maxHeight = '75vh';
+                    previewContent.innerHTML = `<iframe title="HTML Preview" sandbox="allow-scripts" style="width: 85vw; max-width: 1100px; height: 75vh; border-radius: var(--radius-sm); border: 0; background: #fff;"></iframe>`;
                     previewContent.querySelector('iframe').srcdoc = html;
                 } catch (error) {
                     previewContent.innerHTML = `<div class="empty-state"><p>Failed to load HTML preview: ${error.message}</p></div>`;
