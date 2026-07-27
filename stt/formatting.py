@@ -394,9 +394,13 @@ def convert_db_to_html(db_path: Optional[str], highlight_config_path: Optional[s
                 translation_html = ""
                 if translated_text and translated_text.strip():
                     has_any_translation = True
-                    translation_html = f'<div class="translation">{html.escape(translated_text.strip())}</div>'
+                    # A second timestamp copy on the translation line (same class
+                    # + data attrs so the Timestamps/Elapsed toggles cover it);
+                    # the Time dropdown chooses which copies are visible.
+                    _ts_trans = f'<span class="timestamp ts-trans" data-clock="{clock_time}" data-elapsed="{elapsed_time}">[{clock_time}]</span>'
+                    translation_html = f'<div class="translation">{_ts_trans}{html.escape(translated_text.strip())}</div>'
                 segments_html.append(
-                    f'<div class="{seg_cls}"><span class="timestamp" data-clock="{clock_time}" data-elapsed="{elapsed_time}">[{clock_time}]</span><span class="text">{highlighted_text}</span>{mark_badge}{translation_html}</div>'
+                    f'<div class="{seg_cls}"><span class="timestamp ts-src" data-clock="{clock_time}" data-elapsed="{elapsed_time}">[{clock_time}]</span><span class="text">{highlighted_text}</span>{mark_badge}{translation_html}</div>'
                 )
             except Exception as e:
                 print(f"[HTML] Error parsing entry {i}: {e}")
@@ -416,9 +420,19 @@ def convert_db_to_html(db_path: Optional[str], highlight_config_path: Optional[s
         translation_toggles = (
             '<label><input type="checkbox" id="showTranscription" checked> Transcription</label>'
             '<label><input type="checkbox" id="showTranslation" checked> Translation</label>'
+            '<label>Time: <select id="tsMode">'
+            '<option value="both" selected>Both</option>'
+            '<option value="transcription">Transcription</option>'
+            '<option value="translation">Translation</option>'
+            '<option value="above">Above</option>'
+            '</select></label>'
             if has_any_translation
             else ""
         )
+        # Default the timestamp-placement mode to "both" when translations exist
+        # (so time shows on both lines out of the box); otherwise leave the body
+        # unclassed and the source timestamp always visible.
+        body_class = "tsmode-both" if has_any_translation else "tsmode-transcription"
 
         # Build the HTML document
         html_content = f"""<!DOCTYPE html>
@@ -622,8 +636,27 @@ def convert_db_to_html(db_path: Optional[str], highlight_config_path: Optional[s
             color: #333;
         }}
         /* Hide timestamps */
-        body.hide-timestamps .timestamp {{
+        /* Timestamp placement modes (set by the Time dropdown). Both copies are
+           hidden by default and revealed per mode; "above" puts the source-line
+           copy on its own line above both. */
+        .ts-src, .ts-trans {{
             display: none;
+        }}
+        body.tsmode-transcription .ts-src {{
+            display: inline;
+        }}
+        body.tsmode-translation .ts-trans {{
+            display: inline;
+        }}
+        body.tsmode-both .ts-src,
+        body.tsmode-both .ts-trans {{
+            display: inline;
+        }}
+        body.tsmode-above .ts-src {{
+            display: block;
+        }}
+        body.hide-timestamps .timestamp {{
+            display: none !important;
         }}
         /* No rows - continuous text */
         body.no-rows .segment {{
@@ -686,7 +719,7 @@ def convert_db_to_html(db_path: Optional[str], highlight_config_path: Optional[s
         }}
     </style>
 </head>
-<body>
+<body class="{body_class}">
     <div class="container">
         <h1>Transcription</h1>
         <div class="controls no-print">
@@ -748,6 +781,11 @@ def convert_db_to_html(db_path: Optional[str], highlight_config_path: Optional[s
         }});
         document.getElementById('showTranslation')?.addEventListener('change', function() {{
             document.body.classList.toggle('hide-translation', !this.checked);
+        }});
+        // Time-placement dropdown: swap the tsmode-* body class.
+        document.getElementById('tsMode')?.addEventListener('change', function() {{
+            document.body.classList.remove('tsmode-both', 'tsmode-transcription', 'tsmode-translation', 'tsmode-above');
+            document.body.classList.add('tsmode-' + this.value);
         }});
 
         // Font size controls

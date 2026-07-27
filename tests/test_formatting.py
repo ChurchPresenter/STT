@@ -252,9 +252,16 @@ class TestConvertDbToHtml:
         assert "body.hide-translation .translation" in content
         assert "getElementById('showTranscription')" in content
         assert "getElementById('showTranslation')" in content
-        # Translations rendered in .translation nodes
-        assert '<div class="translation">Primera frase.</div>' in content
-        assert '<div class="translation">Última frase.</div>' in content
+        # Timestamp-placement dropdown, default mode, both copies + mode CSS
+        assert 'id="tsMode"' in content
+        assert '<body class="tsmode-both">' in content
+        assert 'class="timestamp ts-src"' in content
+        assert 'class="timestamp ts-trans"' in content
+        assert "body.tsmode-translation .ts-trans" in content
+        assert "body.tsmode-above .ts-src" in content
+        # Translation line carries its own timestamp with the same clock value
+        assert '<span class="timestamp ts-trans" data-clock="10:00:00" data-elapsed="00:00:00">[10:00:00]</span>Primera frase.' in content
+        assert "Última frase." in content
         # An included row without a translation emits no translation node
         assert "Same-second row." in content
         assert content.count('class="translation"') == 3  # only the 3 translated rows
@@ -283,6 +290,10 @@ class TestConvertDbToHtml:
         assert 'id="showTranscription"' not in content
         assert 'id="showTranslation"' not in content
         assert 'class="translation"' not in content
+        # No Time dropdown; body defaults to transcription-only so the source
+        # timestamp still shows (unchanged behavior).
+        assert 'id="tsMode"' not in content
+        assert '<body class="tsmode-transcription">' in content
 
     def test_old_schema_without_translated_text_column(self, tmp_path):
         db_path = str(tmp_path / "legacy.db")
