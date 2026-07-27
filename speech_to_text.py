@@ -3249,6 +3249,7 @@ socketio = SocketIO(app, async_mode="threading", static_url_path="/static", stat
 # Viewed at /logs (page) and /api/logs (JSON). Thin wrapper over stt.request_log.
 from stt import request_log as _request_log  # noqa: E402
 from stt import metrics as _metrics  # noqa: E402
+from stt import audio_file as _audio_file  # noqa: E402
 
 try:
     os.makedirs(os.path.join(APP_DIR, "logs"), exist_ok=True)
@@ -8894,6 +8895,11 @@ def stop_transcription():
                 if transcription_state["status"] == "stopping":
                     transcription_state["status"] = "stopped"
                     transcription_state["message"] = "Transcription stopped"
+                    # Drop any file-playback markers so a stale duration bar
+                    # can't reappear on the next (possibly mic) session.
+                    transcription_state["is_file_playback"] = False
+                    transcription_state["playback_source"] = None
+                    transcription_state["playback_duration"] = None
 
         # Run cleanup in background thread
         import threading
@@ -8974,6 +8980,9 @@ def force_reset_transcription():
         transcription_state["status"] = "stopped"
         transcription_state["message"] = "Transcription forcefully reset"
         transcription_state["loaded_model"] = ""
+        transcription_state["is_file_playback"] = False
+        transcription_state["playback_source"] = None
+        transcription_state["playback_duration"] = None
         transcription_state["live_text"] = ""
         transcription_state["live_start"] = 0
         transcription_state["live_end"] = 0
@@ -14126,6 +14135,26 @@ def thread1_function(ts, cq, cfq, cal_state, cal_data, cal_step1, asq):
                             # Start the ffmpeg capture (it will populate the data_queue)
                             source.start()
                             print(f"[OK] Audio initialized successfully with device: {device}")
+                            # File-playback mode (a "Test Audio File"): expose the
+                            # source + its total length so the UI can show a
+                            # duration trackbar. Playback is ffmpeg -re (real time),
+                            # so session elapsed ~= playback position. A mic clears
+                            # these so a prior file's bar can't linger.
+                            if os.path.isfile(device):
+                                _dur = _audio_file.wav_duration_seconds(device)
+                                if _dur is None:
+                                    try:
+                                        import librosa
+                                        _dur = float(librosa.get_duration(path=device))
+                                    except Exception:
+                                        _dur = None
+                                transcription_state["is_file_playback"] = True
+                                transcription_state["playback_source"] = os.path.basename(device)
+                                transcription_state["playback_duration"] = _dur
+                            else:
+                                transcription_state["is_file_playback"] = False
+                                transcription_state["playback_source"] = None
+                                transcription_state["playback_duration"] = None
                             break  # Success! Exit the loop
                         except Exception as e:
                             print(f"[WARN] Audio device '{device}' failed: {e}")

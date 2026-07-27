@@ -925,6 +925,19 @@
                         </div>
                     </div>
 
+                    <!-- File-playback duration trackbar (shown only while a
+                         "Test Audio File" is the source; read-only progress, not
+                         a scrubber — the live pipeline can't be seeked). -->
+                    <div id="playback_trackbar" style="display: none; background: var(--bg-elevated); padding: 12px 16px; border-radius: var(--radius-sm); border: 1px solid var(--border); margin-bottom: 12px;">
+                        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; gap: 8px;">
+                            <span style="font-size: 0.85em; color: var(--text-secondary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">🎵 <span id="playback_source">file</span></span>
+                            <span style="font-size: 0.8em; color: var(--text-muted); font-variant-numeric: tabular-nums; white-space: nowrap;"><span id="playback_elapsed">0:00</span> / <span id="playback_total">--:--</span></span>
+                        </div>
+                        <div style="height: 8px; background: var(--overlay-active); border-radius: 999px; overflow: hidden;">
+                            <div id="playback_fill" style="height: 100%; width: 0%; background: var(--accent); border-radius: 999px; transition: width 0.25s linear;"></div>
+                        </div>
+                    </div>
+
                     <!-- Oscilloscope-style Timeline -->
                     <div style="background: var(--bg-elevated); padding: 16px; border-radius: var(--radius-sm); border: 1px solid var(--border);">
                         <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px;">
@@ -1497,6 +1510,15 @@
                     } else {
                         transcriptionStartTime = null;
                     }
+
+                    // File-playback trackbar metadata (the bar itself is drawn by
+                    // updateRunningTimer from the interpolated elapsed time).
+                    playbackIsFile = (state.status === 'running') && !!state.is_file_playback;
+                    playbackDuration = (state.playback_duration != null) ? Number(state.playback_duration) : null;
+                    if (playbackIsFile) {
+                        document.getElementById('playback_source').textContent = state.playback_source || 'audio file';
+                    }
+                    if (!playbackIsFile) renderPlaybackBar(null);
 
                     // Handle different status states
                     if (state.status === 'running') {
@@ -2094,12 +2116,45 @@
         function updateRunningTimer() {
             const el = document.getElementById('running_timer');
             if (!el) return;
-            if (!transcriptionStartTime) { el.textContent = '--:--'; return; }
-            let s = Math.max(0, Math.floor(Date.now() / 1000 - transcriptionStartTime));
+            if (!transcriptionStartTime) { el.textContent = '--:--'; renderPlaybackBar(null); return; }
+            const elapsed = Math.max(0, Math.floor(Date.now() / 1000 - transcriptionStartTime));
+            let s = elapsed;
             const h = Math.floor(s / 3600); s %= 3600;
             const m = Math.floor(s / 60); const sec = s % 60;
             const pad = (n) => String(n).padStart(2, '0');
             el.textContent = h > 0 ? `${h}:${pad(m)}:${pad(sec)}` : `${pad(m)}:${pad(sec)}`;
+            // Playback elapsed ~= wall-clock elapsed (ffmpeg -re plays in real time).
+            renderPlaybackBar(elapsed);
+        }
+
+        // File-playback trackbar. Metadata (source name, total duration, whether
+        // this session is a file) is set from the status poll in updateStatus();
+        // the elapsed position is interpolated here every second for smoothness.
+        let playbackIsFile = false;
+        let playbackDuration = null;   // seconds, or null when unknown length
+        function fmtClock(total) {
+            if (total == null || !isFinite(total) || total < 0) return '--:--';
+            let s = Math.floor(total);
+            const h = Math.floor(s / 3600); s %= 3600;
+            const m = Math.floor(s / 60); const sec = s % 60;
+            const pad = (n) => String(n).padStart(2, '0');
+            return h > 0 ? `${h}:${pad(m)}:${pad(sec)}` : `${pad(m)}:${pad(sec)}`;
+        }
+        function renderPlaybackBar(elapsed) {
+            const box = document.getElementById('playback_trackbar');
+            if (!box) return;
+            if (!playbackIsFile || elapsed == null) { box.style.display = 'none'; return; }
+            box.style.display = '';
+            const shown = playbackDuration != null ? Math.min(elapsed, playbackDuration) : elapsed;
+            document.getElementById('playback_elapsed').textContent = fmtClock(shown);
+            document.getElementById('playback_total').textContent = fmtClock(playbackDuration);
+            const fill = document.getElementById('playback_fill');
+            if (playbackDuration != null && playbackDuration > 0) {
+                fill.style.width = Math.max(0, Math.min(1, elapsed / playbackDuration)) * 100 + '%';
+            } else {
+                // Unknown length: no meaningful percentage — show elapsed only.
+                fill.style.width = '0%';
+            }
         }
 
         // Unsaved changes detection
