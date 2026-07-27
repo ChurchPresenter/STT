@@ -383,7 +383,7 @@
     "html_enabled": true,
     "_html_enabled_comment": "Generate HTML transcript files for translations",
     "translation_method": "nllb",
-    "_translation_method_comment": "Translation engine to use (currently 'nllb').",
+    "_translation_method_comment": "Translation engine: 'nllb' (Facebook NLLB-200) or 'madlad' (Google MADLAD-400). Set translation_model to a matching model id.",
     "generation_params": {
       "num_beams": 2,
       "_num_beams_comment": "Beam search width. Higher = better quality but slower; 1 = greedy (fastest). 2 balances quality against latency for real-time captioning.",

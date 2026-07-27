@@ -685,7 +685,28 @@ from stt.nllb_catalog import (  # noqa: F401
     TRANSLATION_LANGUAGES,
     get_nllb_model_description,
     get_default_nllb_models,
+    build_madlad_input,
+    is_madlad_model,
+    get_default_madlad_models,
 )
+
+# Default MADLAD-400 model when the translation engine is set to "madlad".
+MADLAD_DEFAULT_MODEL = "google/madlad400-3b-mt"
+
+
+def _resolve_live_translation_model_id(lt_cfg):
+    """Effective live-translation model id for the configured engine.
+
+    translate_text() branches on the LOADED model, so the engine ("nllb"/
+    "madlad") and the model id must agree. If the engine is 'madlad' but the
+    configured model isn't a MADLAD model (e.g. a stale NLLB id), fall back to
+    the MADLAD default so 'madlad' doesn't silently run NLLB weights.
+    """
+    method = (lt_cfg or {}).get("translation_method", "nllb")
+    model_id = (lt_cfg or {}).get("translation_model")
+    if method == "madlad" and not is_madlad_model(model_id or ""):
+        return MADLAD_DEFAULT_MODEL
+    return model_id
 
 
 def _maybe_half_translation_model(model, device, use_fp16):
@@ -839,15 +860,17 @@ def translate_text(text, source_lang, target_lang, model, tokenizer, return_conf
             return {"text": text, "confidence": None, "alternatives": []}
         return text
 
-    # Convert ISO codes to NLLB codes
-    src_nllb = NLLB_LANG_CODES.get(source_lang, "eng_Latn")
-    tgt_nllb = NLLB_LANG_CODES.get(target_lang, "eng_Latn")
-
-    # Set source language
-    tokenizer.src_lang = src_nllb
-
-    # Tokenize input
-    inputs = tokenizer(text, return_tensors="pt", padding=True, truncation=True, max_length=1024)
+    # MADLAD encodes the target as a "<2xx>" prefix on the input (no source
+    # language, no forced_bos); NLLB sets tokenizer.src_lang + a forced target
+    # token. Everything after tokenization is shared.
+    _is_madlad = is_madlad_model(_live_translation_model_id or "")
+    if _is_madlad:
+        inputs = tokenizer(build_madlad_input(text, target_lang),
+                           return_tensors="pt", padding=True, truncation=True, max_length=1024)
+    else:
+        # Convert ISO codes to NLLB codes and set the source language
+        tokenizer.src_lang = NLLB_LANG_CODES.get(source_lang, "eng_Latn")
+        inputs = tokenizer(text, return_tensors="pt", padding=True, truncation=True, max_length=1024)
 
     # Move inputs to same device as model (CUDA, MPS, or CPU)
     _device = next(model.parameters()).device
@@ -861,18 +884,20 @@ def translate_text(text, source_lang, target_lang, model, tokenizer, return_conf
     no_repeat_ngram_size = gp.get("no_repeat_ngram_size", 0)
     repetition_penalty = gp.get("repetition_penalty", 1.0)
 
-    # Build generate kwargs — validate target token is known
-    forced_bos_id = tokenizer.convert_tokens_to_ids(tgt_nllb)
-    if forced_bos_id == tokenizer.unk_token_id:
-        print(f"[LIVE-TRANSLATION WARNING] Unknown target language token: {tgt_nllb} for lang={target_lang}, falling back to eng_Latn")
-        forced_bos_id = tokenizer.convert_tokens_to_ids("eng_Latn")
     generate_kwargs = {
-        "forced_bos_token_id": forced_bos_id,
         "max_length": 1024,
         "num_beams": num_beams,
         "length_penalty": length_penalty,
         "early_stopping": True,
     }
+    if not _is_madlad:
+        # NLLB forces the target-language BOS token — validate it is known.
+        tgt_nllb = NLLB_LANG_CODES.get(target_lang, "eng_Latn")
+        forced_bos_id = tokenizer.convert_tokens_to_ids(tgt_nllb)
+        if forced_bos_id == tokenizer.unk_token_id:
+            print(f"[LIVE-TRANSLATION WARNING] Unknown target language token: {tgt_nllb} for lang={target_lang}, falling back to eng_Latn")
+            forced_bos_id = tokenizer.convert_tokens_to_ids("eng_Latn")
+        generate_kwargs["forced_bos_token_id"] = forced_bos_id
 
     # Only add these if non-default to avoid warnings
     if no_repeat_ngram_size > 0:
@@ -1132,15 +1157,19 @@ def _warmup_translation_model(model, tokenizer, device):
             return
         num_beams = int((config.get("live_translation", {}).get("generation_params", {}) or {}).get("num_beams", 2))
         t0 = time.perf_counter()
-        tokenizer.src_lang = "eng_Latn"
-        inputs = tokenizer("Hello.", return_tensors="pt")
+        # Mirror the real path per engine so the same generate kernels compile.
+        _is_madlad = is_madlad_model(_live_translation_model_id or "")
+        if _is_madlad:
+            inputs = tokenizer(build_madlad_input("Hello.", "es"), return_tensors="pt")
+            _warm_kwargs = {}
+        else:
+            tokenizer.src_lang = "eng_Latn"
+            inputs = tokenizer("Hello.", return_tensors="pt")
+            _warm_kwargs = {"forced_bos_token_id": tokenizer.convert_tokens_to_ids("spa_Latn")}
         _dev = next(model.parameters()).device
         if _dev.type != "cpu":
             inputs = {k: v.to(_dev) for k, v in inputs.items()}
-        # Mirror the real path (forced_bos + configured beam width) so the same
-        # kernels get compiled; tiny max_length keeps it fast.
-        bos = tokenizer.convert_tokens_to_ids("spa_Latn")
-        model.generate(**inputs, forced_bos_token_id=bos, max_length=8, num_beams=num_beams)
+        model.generate(**inputs, max_length=8, num_beams=num_beams, **_warm_kwargs)
         print(f"[LIVE-TRANSLATION] Warmup ({device}) took {(time.perf_counter() - t0) * 1000:.0f}ms")
     except Exception as e:
         print(f"[LIVE-TRANSLATION] Warmup failed (non-fatal): {e}")
@@ -5547,8 +5576,9 @@ def save_translation_settings():
     new_remote_model = (config.get("live_translation", {}).get("remote", {}) or {}).get("model", "")
     _b_model = new_remote_model or new_model
     if (old_use_fp16 != new_use_fp16 or old_use_gpu != new_use_gpu
-            or old_model != new_model or old_remote_model != new_remote_model):
-        _propagate_model_settings_to_remote(new_use_fp16, _b_model, new_use_gpu)
+            or old_model != new_model or old_remote_model != new_remote_model
+            or method_changed):
+        _propagate_model_settings_to_remote(new_use_fp16, _b_model, new_use_gpu, new_method)
 
     return jsonify({
         "success": True,
@@ -5556,10 +5586,13 @@ def save_translation_settings():
     })
 
 
-def _propagate_model_settings_to_remote(use_fp16, translation_model, use_gpu):
+def _propagate_model_settings_to_remote(use_fp16, translation_model, use_gpu, translation_method=None):
     """Push model-load settings to a paired remote translation server so it
     reloads with them. Best-effort, off the request thread — never blocks or
-    breaks the local save. No-op when offload isn't enabled/configured."""
+    breaks the local save. No-op when offload isn't enabled/configured.
+
+    translation_method ('nllb'/'madlad') is included so B loads the SAME engine
+    A uses — otherwise A on MADLAD would offload to an NLLB B."""
     remote_cfg = config.get("live_translation", {}).get("remote", {})
     if not (remote_cfg.get("enabled") and remote_cfg.get("endpoint")):
         return
@@ -5569,9 +5602,12 @@ def _propagate_model_settings_to_remote(use_fp16, translation_model, use_gpu):
             ep = _get_remote_endpoint_safe()
             if not ep:
                 return
+            _payload = {"use_fp16": bool(use_fp16), "translation_model": translation_model, "use_gpu": bool(use_gpu)}
+            if translation_method:
+                _payload["translation_method"] = translation_method
             _get_remote_http_session().post(
                 ep.rstrip("/") + "/api/translate/model-settings",
-                json={"use_fp16": bool(use_fp16), "translation_model": translation_model, "use_gpu": bool(use_gpu)},
+                json=_payload,
                 timeout=5,
             )
         except Exception as e:
@@ -6139,7 +6175,7 @@ def _downloaded_nllb_models():
         if os.path.isdir(MODELS_DIR):
             for item in sorted(os.listdir(MODELS_DIR)):
                 path = os.path.join(MODELS_DIR, item)
-                if not (item.startswith("facebook--nllb-") and os.path.isdir(path)):
+                if not ((item.startswith("facebook--nllb-") or item.startswith("google--madlad400-")) and os.path.isdir(path)):
                     continue
                 if not dir_has_weights(path):
                     continue
@@ -6174,6 +6210,11 @@ def translate_remote_model_settings():
         if val != lt.get("translation_model", ""):
             lt["translation_model"] = val
             changed.append("translation_model")
+    if data.get("translation_method"):
+        val = str(data["translation_method"])
+        if val != lt.get("translation_method", "nllb"):
+            lt["translation_method"] = val
+            changed.append("translation_method")
     if "use_gpu" in data:
         val = bool(data["use_gpu"])
         if val != lt.get("use_gpu", True):
@@ -6191,7 +6232,7 @@ def translate_remote_model_settings():
         def _reload():
             unload_live_translation_model()
             use_gpu = config.get("live_translation", {}).get("use_gpu", True)
-            model_id = config.get("live_translation", {}).get("translation_model")
+            model_id = _resolve_live_translation_model_id(config.get("live_translation", {}))
             get_live_translation_model(use_gpu, model_id)
         threading.Thread(target=_reload, daemon=True).start()
     return jsonify({"success": True, "changed": changed})
@@ -11454,10 +11495,10 @@ def nllb_status():
     try:
         models_dir = MODELS_DIR
 
-        # Check ALL NLLB model directories, not just 600M
+        # Check ALL translation model directories (NLLB + MADLAD), not just 600M
         if os.path.exists(models_dir):
             for item in os.listdir(models_dir):
-                if item.startswith("facebook--nllb-") and os.path.isdir(os.path.join(models_dir, item)):
+                if (item.startswith("facebook--nllb-") or item.startswith("google--madlad400-")) and os.path.isdir(os.path.join(models_dir, item)):
                     nllb_path = os.path.join(models_dir, item)
                     has_model = False
                     total_size = 0
@@ -11625,6 +11666,19 @@ def list_nllb_models():
     return jsonify({"success": True, "models": models})
 
 
+@app.route("/api/models/madlad-list", methods=["GET"])
+def list_madlad_models():
+    """List available MADLAD-400 translation models (static catalog + downloaded
+    flags). MADLAD has only a couple of relevant sizes, so no live HF search."""
+    if not check_ip_whitelist():
+        return jsonify({"success": False, "error": "Access Denied"}), 403
+
+    models = get_default_madlad_models()
+    models_dir = MODELS_DIR
+    for model in models:
+        dir_name = model["model_id"].replace("/", "--")
+        model["downloaded"] = dir_has_weights(os.path.join(models_dir, dir_name))
+    return jsonify({"success": True, "models": models})
 
 
 # ============== Silero VAD Status ==============
@@ -13053,7 +13107,7 @@ def translate_live_text(text, source_lang, target_lang, return_extras=False, num
 
     try:
         trans_use_gpu = config.get("live_translation", {}).get("use_gpu", True)
-        trans_model_id = config.get("live_translation", {}).get("translation_model")
+        trans_model_id = _resolve_live_translation_model_id(config.get("live_translation", {}))
         model, tokenizer = get_live_translation_model(trans_use_gpu, model_id=trans_model_id)
         if model is None:
             if return_extras:

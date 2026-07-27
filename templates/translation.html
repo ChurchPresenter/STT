@@ -247,10 +247,11 @@
                     <label for="translation_method">Translation Method</label>
                     <select id="translation_method" data-a-controlled onchange="onTranslationMethodChange()">
                         <option value="nllb">NLLB Model (any language)</option>
+                        <option value="madlad">MADLAD-400 (Google, any language)</option>
                         <option value="whisper_translate">Whisper Translate (English only)</option>
                         <option value="whisper_forced_lang">Whisper Forced Language (Experimental)</option>
                     </select>
-                    <small id="translation_method_hint" style="color: var(--text-secondary); font-size: 0.75em;">NLLB uses a separate model. Whisper methods reuse the transcription model (no extra VRAM).</small>
+                    <small id="translation_method_hint" style="color: var(--text-secondary); font-size: 0.75em;">NLLB and MADLAD use a separate model (MADLAD-400 is larger, broader coverage). Whisper methods reuse the transcription model (no extra VRAM).</small>
                 </div>
 
                 <div id="whisper_translate_warning" style="display:none; background: var(--warning-bg); border: 1px solid var(--warning); border-radius: var(--radius-sm); padding: 8px 12px; margin-bottom: 10px;">
@@ -603,9 +604,15 @@
             panel.addEventListener('change', markDirty);
         });
 
-        async function loadNLLBModels() {
+        async function loadNLLBModels(method, selectModelId) {
+            // Populate the translation-model dropdown for the active engine,
+            // re-selecting selectModelId if it's present in the new list.
+            method = method || document.getElementById('translation_method').value;
+            const isMadlad = method === 'madlad';
+            const endpoint = isMadlad ? '/api/models/madlad-list' : '/api/models/nllb-list';
+            const label = isMadlad ? 'MADLAD' : 'NLLB';
             try {
-                const response = await fetch('/api/models/nllb-list');
+                const response = await fetch(endpoint);
                 const data = await response.json();
 
                 const modelSelect = document.getElementById('translation_model');
@@ -619,10 +626,10 @@
                     if (downloadedModels.length === 0) {
                         const option = document.createElement('option');
                         option.value = '';
-                        option.textContent = 'No NLLB models downloaded';
+                        option.textContent = 'No ' + label + ' models downloaded';
                         option.disabled = true;
                         modelSelect.appendChild(option);
-                        modelHint.textContent = 'Download NLLB models from the Model Manager page';
+                        modelHint.textContent = 'Download ' + label + ' models from the Model Manager page';
                         modelHint.style.color = 'var(--danger)';
                     } else {
                         downloadedModels.forEach(model => {
@@ -631,21 +638,27 @@
                             option.textContent = model.name || model.model_id;
                             modelSelect.appendChild(option);
                         });
-                        modelHint.textContent = 'Select from downloaded NLLB models';
+                        modelHint.textContent = 'Select from downloaded ' + label + ' models';
                         modelHint.style.color = 'var(--text-muted)';
+                        // Re-select the saved model if it's in this engine's list.
+                        if (selectModelId && modelSelect.querySelector('option[value="' + CSS.escape(selectModelId) + '"]')) {
+                            modelSelect.value = selectModelId;
+                        }
                     }
                 } else {
                     // Fallback if API fails
                     const option = document.createElement('option');
-                    option.value = 'facebook/nllb-200-distilled-600M';
-                    option.textContent = 'NLLB-200 Distilled 600M';
+                    option.value = isMadlad ? 'google/madlad400-3b-mt' : 'facebook/nllb-200-distilled-600M';
+                    option.textContent = isMadlad ? 'MADLAD-400 3B' : 'NLLB-200 Distilled 600M';
                     modelSelect.appendChild(option);
                 }
             } catch (error) {
-                console.error('Error loading NLLB models:', error);
+                console.error('Error loading ' + label + ' models:', error);
                 // Fallback
                 const modelSelect = document.getElementById('translation_model');
-                modelSelect.innerHTML = '<option value="facebook/nllb-200-distilled-600M">NLLB-200 Distilled 600M</option>';
+                modelSelect.innerHTML = isMadlad
+                    ? '<option value="google/madlad400-3b-mt">MADLAD-400 3B</option>'
+                    : '<option value="facebook/nllb-200-distilled-600M">NLLB-200 Distilled 600M</option>';
             }
         }
 
@@ -722,16 +735,12 @@
                     loadRemoteModels();
                     toggleRemoteFields();
 
-                    // Set translation model (wait for dropdown to be populated)
-                    const modelValue = currentSettings.translation_model || 'facebook/nllb-200-distilled-600M';
-                    const modelSelect = document.getElementById('translation_model');
-                    if (modelSelect.querySelector(`option[value="${modelValue}"]`)) {
-                        modelSelect.value = modelValue;
-                    }
-
-                    // Translation method
+                    // Translation method first, then load THAT engine's model list
+                    // and re-select the saved model within it.
                     const translationMethod = currentSettings.translation_method || 'nllb';
                     document.getElementById('translation_method').value = translationMethod;
+                    const modelValue = currentSettings.translation_model || 'facebook/nllb-200-distilled-600M';
+                    await loadNLLBModels(translationMethod, modelValue);
                     onTranslationMethodChange();
 
                     // Translation quality settings
@@ -1119,11 +1128,14 @@
             const nllbRemoteSection = document.getElementById('nllb_remote_section');
             const nllbSettingsGroup = document.getElementById('nllb_settings_group');
 
-            if (method === 'nllb') {
+            if (method === 'nllb' || method === 'madlad') {
                 nllbRemoteSection.style.display = '';
                 nllbSettingsGroup.style.display = '';
                 whisperTransWarn.style.display = 'none';
                 whisperForcedWarn.style.display = 'none';
+                // Repopulate the model dropdown for the selected engine, keeping
+                // the current selection if it exists in the new engine's list.
+                loadNLLBModels(method, document.getElementById('translation_model').value);
             } else {
                 nllbRemoteSection.style.display = 'none';
                 nllbSettingsGroup.style.display = 'none';

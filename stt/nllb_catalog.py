@@ -171,3 +171,69 @@ def get_default_nllb_models() -> List[Dict[str, Any]]:
             "description": "Full 3.3B - Best quality, requires significant VRAM."
         }
     ]
+
+
+# --- MADLAD-400 (Google) -----------------------------------------------------
+# MADLAD is a T5 MT model selected with a "<2xx>" target-language prefix on the
+# input text (no source language, no forced_bos_token). Codes are short and
+# mostly identical to our UI short codes; Hebrew uses Google's "iw" convention.
+# "auto"/unknown fall back to English. This map also serves as the supported-
+# target set for validation when the MADLAD engine is active.
+MADLAD_LANG_CODES: Dict[str, str] = {
+    "auto": "en",
+    "en": "en", "es": "es", "fr": "fr", "de": "de", "it": "it", "pt": "pt",
+    "nl": "nl", "pl": "pl", "ru": "ru", "ja": "ja", "ko": "ko", "zh": "zh",
+    "ar": "ar", "hi": "hi", "tr": "tr", "vi": "vi", "th": "th", "uk": "uk",
+    "cs": "cs", "sv": "sv", "da": "da", "fi": "fi", "no": "no", "el": "el",
+    "he": "iw",  # MADLAD/mC4 uses "iw" for Hebrew
+    "hu": "hu", "id": "id", "ms": "ms", "ro": "ro", "sk": "sk", "bg": "bg",
+    "hr": "hr", "sr": "sr", "sl": "sl", "et": "et", "lv": "lv", "lt": "lt",
+    "fa": "fa", "bn": "bn", "ta": "ta", "te": "te", "mr": "mr", "gu": "gu",
+    "kn": "kn", "ml": "ml", "pa": "pa", "ur": "ur",
+}
+
+
+def madlad_target_code(target_lang: str) -> str:
+    """UI short code -> MADLAD language code (fallback English)."""
+    return MADLAD_LANG_CODES.get(target_lang, "en")
+
+
+def build_madlad_input(text: str, target_lang: str) -> str:
+    """MADLAD input is the text prefixed with a '<2xx>' target tag."""
+    return f"<2{madlad_target_code(target_lang)}> {text}"
+
+
+def is_madlad_model(model_id: str) -> bool:
+    """Whether a model id refers to a MADLAD-400 model (vs NLLB)."""
+    return "madlad" in (model_id or "").lower()
+
+
+def supported_target(lang: str, method: str) -> bool:
+    """Whether a UI target-language short code is valid for the active engine."""
+    table = MADLAD_LANG_CODES if method == "madlad" else NLLB_LANG_CODES
+    return lang in table
+
+
+def get_default_madlad_models() -> List[Dict[str, Any]]:
+    """Known MADLAD-400 models, used when the HuggingFace API is unreachable.
+    Same shape as get_default_nllb_models()."""
+    return [
+        {
+            "model_id": "google/madlad400-3b-mt",
+            "name": "madlad400-3b-mt",
+            "size": "~12 GB",
+            "size_order": 1,
+            "downloads": 0,
+            "likes": 0,
+            "description": "MADLAD-400 3B - 400+ languages, high quality. ~12 GB (use fp16 on GPU)."
+        },
+        {
+            "model_id": "google/madlad400-7b-mt",
+            "name": "madlad400-7b-mt",
+            "size": "~27 GB",
+            "size_order": 2,
+            "downloads": 0,
+            "likes": 0,
+            "description": "MADLAD-400 7B - Best quality, requires significant VRAM."
+        }
+    ]
