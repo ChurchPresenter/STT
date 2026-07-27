@@ -3279,6 +3279,7 @@ socketio = SocketIO(app, async_mode="threading", static_url_path="/static", stat
 from stt import request_log as _request_log  # noqa: E402
 from stt import metrics as _metrics  # noqa: E402
 from stt import audio_file as _audio_file  # noqa: E402
+from stt.hypothesis_buffer import LocalAgreementBuffer  # noqa: E402
 
 try:
     os.makedirs(os.path.join(APP_DIR, "logs"), exist_ok=True)
@@ -14094,6 +14095,12 @@ def thread1_function(ts, cq, cfq, cal_state, cal_data, cal_step1, asq):
                     pending_remainder_since = None  # When the current fragment was first buffered
                     pending_remainder_meta = None   # (start_time, end_time, confidence) of fragment
 
+                    # LocalAgreement stabilizer for the live in-progress line: only
+                    # reveals a word once two consecutive hypotheses agree, so the
+                    # displayed caption stops rewriting itself (jitter). Display-only;
+                    # reset whenever the underlying segment finalizes.
+                    _hyp_buffer = LocalAgreementBuffer()
+
                     # Partial-snapshot recording: persist throttled is_final=0 rows of the
                     # live in-progress text so offline replay can reproduce the timing a
                     # live consumer experienced (final rows alone can't).
@@ -15372,6 +15379,9 @@ def thread1_function(ts, cq, cfq, cal_state, cal_data, cal_step1, asq):
 
                                     # Handle completed segments (save to DB)
                                     if result['completed_segments']:
+                                        # A segment boundary finalized -> the live hypothesis
+                                        # restarts on a fresh incomplete segment.
+                                        _hyp_buffer.reset()
                                         confidence_threshold = process_config.get("corrections", {}).get("confidence_threshold", 0.7)
                                         # Collect the batch of completed segments into one text so
                                         # sentences spanning Whisper's segment boundaries stay intact
@@ -15885,13 +15895,23 @@ def thread1_function(ts, cq, cfq, cal_state, cal_data, cal_step1, asq):
                                             "live_start": 0,
                                             "live_end": 0,
                                         })
+                                        # Phrase finalized -> the live hypothesis restarts.
+                                        _hyp_buffer.reset()
                                         # Reset phrase_time so next silence doesn't immediately re-trigger
                                         phrase_time = None
 
                                     # Update live preview with current incomplete text only
                                     # (finalized segments are already shown separately from the database)
                                     # Prepend any held fragment so it stays visible until its sentence completes
-                                    current_text = result.get('current_text', '')
+                                    _raw_current = result.get('current_text', '')
+                                    # LocalAgreement: reveal only the stabilized prefix of the current
+                                    # segment so the live line stops rewriting itself. Held-back tail
+                                    # words appear when the phrase finalizes (via the DB path). The word
+                                    # confidences are truncated to match the shown prefix.
+                                    _stabilize = process_config.get("audio", {}).get("stabilize_live_text", True)
+                                    _stable_current = _hyp_buffer.stabilize(_raw_current) if _stabilize else _raw_current
+                                    _stable_word_count = len(_stable_current.split())
+                                    current_text = _stable_current
                                     if pending_remainder:
                                         current_text = (pending_remainder + " " + current_text).strip()
                                     if current_text:
@@ -15903,7 +15923,10 @@ def thread1_function(ts, cq, cfq, cal_state, cal_data, cal_step1, asq):
                                             "live_end": live_transcriber.timestamp_offset + chunk_duration,
                                         }
                                         if hasattr(live_transcriber, '_last_seg_confidence'):
-                                            _live_update["live_word_confidences"] = live_transcriber._last_seg_confidence.get('words', [])
+                                            _conf_words = live_transcriber._last_seg_confidence.get('words', [])
+                                            # Keep confidences aligned to the (possibly truncated) shown words
+                                            _live_update["live_word_confidences"] = (
+                                                _conf_words[:_stable_word_count] if _stabilize else _conf_words)
                                         transcription_state.update(_live_update)
 
                                         # Throttled partial snapshot (is_final=0): the row's own

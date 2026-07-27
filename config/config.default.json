@@ -100,6 +100,8 @@
       "max_age_seconds": 10,
       "_max_age_seconds_comment": "Safety valve: flush a held fragment older than this many seconds"
     },
+    "stabilize_live_text": true,
+    "_stabilize_live_text_comment": "LocalAgreement: reveal a live in-progress word only once two consecutive hypotheses agree, so the live caption stops rewriting itself (jitter). Adds a small, self-correcting lag on the newest word(s). false = show the raw hypothesis each pass (old behavior).",
     "context_prompt": {
       "enabled": true,
       "_enabled_comment": "Feed the tail of the finalized transcript to Whisper as initial_prompt so each capture knows what came before (better continuity and punctuation)",
