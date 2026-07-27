@@ -8352,6 +8352,51 @@ def convert_download():
     )
 
 
+@app.route("/api/file-manager/preview-db", methods=["GET"])
+def preview_db():
+    """Preview a session .db by returning its transcript rows. Opens read-only so
+    an actively-recording session DB is never locked or mutated; capped for
+    payload/render cost."""
+    if not check_ip_whitelist():
+        return jsonify({"success": False, "error": "Access denied"}), 403
+
+    path = request.args.get("path")
+    if not path:
+        return jsonify({"success": False, "error": "Path is required"}), 400
+
+    abs_path = safe_managed_path(path)  # commonpath + realpath confinement
+    if abs_path is None:
+        return jsonify({"success": False, "error": "Access denied"}), 403
+    if not os.path.isfile(abs_path):
+        return jsonify({"success": False, "error": "File not found"}), 404
+
+    LIMIT_ROWS = 2000
+    _where = ("WHERE timestamp != '' AND TRIM(text) != '' "
+              "AND COALESCE(is_final, 1) = 1 AND COALESCE(denied, 0) = 0")
+    try:
+        with sqlite3.connect(f"file:{abs_path}?mode=ro", uri=True) as conn:
+            cur = conn.cursor()
+            total = cur.execute(f"SELECT COUNT(*) FROM transcriptions {_where}").fetchone()[0]
+            cur.execute(
+                "SELECT id, timestamp, text, translated_text, translation_language, speech_type "
+                f"FROM transcriptions {_where} ORDER BY id ASC LIMIT ?", (LIMIT_ROWS,))
+            rows = [
+                {"id": r[0], "timestamp": r[1], "text": r[2],
+                 "translated_text": r[3], "translation_language": r[4], "speech_type": r[5]}
+                for r in cur.fetchall()
+            ]
+    except sqlite3.Error:
+        # No transcriptions table / not a session DB / unreadable.
+        return jsonify({"success": False, "error": "Not a transcription database"}), 400
+
+    return jsonify({
+        "success": True,
+        "rows": rows,
+        "total": total,
+        "truncated": total > len(rows),
+    })
+
+
 # File Mover Endpoints
 @app.route("/api/file-mover/status", methods=["GET"])
 def get_file_mover_status():

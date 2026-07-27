@@ -1339,14 +1339,41 @@
             }
             // Database files
             else if (ext === 'db' || ext === 'sqlite' || ext === 'sqlite3') {
-                previewContent.innerHTML = `
-                    <div class="empty-state">
-                        <div style="font-size: 3em; margin-bottom: 20px;">🗄️</div>
-                        <h3>Database File</h3>
-                        <p>Database files cannot be previewed directly.</p>
-                        <p>Use the download button to save the file.</p>
-                    </div>
-                `;
+                // Session .db → render its transcript rows as a table.
+                try {
+                    const response = await fetch(`/api/file-manager/preview-db?path=${encodedPath}`);
+                    const data = await response.json();
+                    if (!data.success) {
+                        previewContent.innerHTML = `
+                            <div class="empty-state">
+                                <div style="font-size: 3em; margin-bottom: 20px;">🗄️</div>
+                                <h3>Database File</h3>
+                                <p>${escapeHtml(data.error || 'This database cannot be previewed.')}</p>
+                                <p>Use the download button to save the file.</p>
+                            </div>`;
+                    } else if (!data.rows.length) {
+                        previewContent.innerHTML = `<div class="empty-state"><p>No transcript rows in this session.</p></div>`;
+                    } else {
+                        const hasTrans = data.rows.some(r => r.translated_text);
+                        const head = `<tr>
+                            <th style="text-align:left;padding:6px 10px;position:sticky;top:0;background:var(--bg-base);border-bottom:1px solid var(--border);white-space:nowrap;">Time</th>
+                            <th style="text-align:left;padding:6px 10px;position:sticky;top:0;background:var(--bg-base);border-bottom:1px solid var(--border);">Text</th>
+                            ${hasTrans ? `<th style="text-align:left;padding:6px 10px;position:sticky;top:0;background:var(--bg-base);border-bottom:1px solid var(--border);">Translation</th>` : ''}
+                        </tr>`;
+                        const body = data.rows.map(r => `<tr>
+                            <td style="padding:5px 10px;color:var(--text-secondary);white-space:nowrap;vertical-align:top;border-bottom:1px solid var(--border);font-variant-numeric:tabular-nums;">${escapeHtml(r.timestamp || '')}</td>
+                            <td style="padding:5px 10px;vertical-align:top;border-bottom:1px solid var(--border);">${escapeHtml(r.text || '')}</td>
+                            ${hasTrans ? `<td style="padding:5px 10px;vertical-align:top;color:var(--text-secondary);border-bottom:1px solid var(--border);">${escapeHtml(r.translated_text || '')}</td>` : ''}
+                        </tr>`).join('');
+                        const note = data.truncated
+                            ? `<div style="margin-bottom:8px;color:var(--warning);font-size:0.85em;">Showing first ${data.rows.length} of ${data.total} rows — download the file for the full transcript.</div>`
+                            : `<div style="margin-bottom:8px;color:var(--text-secondary);font-size:0.85em;">${data.total} rows</div>`;
+                        previewContent.innerHTML = note +
+                            `<table style="width:100%;border-collapse:collapse;font-size:0.9em;">${head}${body}</table>`;
+                    }
+                } catch (error) {
+                    previewContent.innerHTML = `<div class="empty-state"><p>Failed to load database preview: ${escapeHtml(error.message)}</p></div>`;
+                }
             }
             // MPEG-TS recordings (the audio-capture backup) — browsers can't play
             // them, so explain what they are and offer an MP3 conversion.
