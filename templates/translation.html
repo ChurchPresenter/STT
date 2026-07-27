@@ -1194,18 +1194,24 @@
                 }
                 const model = (d.translation_model || '').split('/').pop() || '(unknown)';
                 const engine = d.translation_method === 'madlad' ? 'MADLAD' : (d.translation_method === 'nllb' ? 'NLLB' : (d.translation_method || ''));
+                // Precision/backend (the "8/16" question): prefer what B actually
+                // loaded (is_ctranslate2 / model_dtype), fall back to its config intent.
+                const usingCt2 = d.is_ctranslate2 === true || (d.is_ctranslate2 == null && d.use_ctranslate2 === true);
                 let backend;
-                if (d.is_ctranslate2) {
-                    backend = 'CTranslate2 ' + (d.ct2_compute_type && d.ct2_compute_type !== 'auto' ? d.ct2_compute_type : 'int8');
-                } else if (d.model_dtype) {
-                    backend = d.model_dtype;   // e.g. float16 / float32
+                if (usingCt2) {
+                    const ct = (d.ct2_compute_type && d.ct2_compute_type !== 'auto') ? d.ct2_compute_type : 'int8';
+                    backend = 'CTranslate2 (' + ct + ')';
                 } else {
-                    backend = d.use_ctranslate2 ? 'CTranslate2' : (d.use_fp16 ? 'fp16' : 'fp32');
+                    let dt = d.model_dtype;                 // e.g. float16 / float32
+                    if (dt === 'float16') dt = 'fp16'; else if (dt === 'float32') dt = 'fp32';
+                    backend = dt || (d.use_fp16 ? 'fp16' : 'fp32');
                 }
                 const device = d.model_device ? String(d.model_device).toUpperCase() : '—';
                 const loaded = d.model_loaded ? '' : ' (not loaded yet)';
-                el.innerHTML = '🖥️ Machine B will run: <strong>' + escapeHtml(model) + '</strong> · ' +
-                    escapeHtml(engine) + ' · ' + escapeHtml(backend) + ' · ' + escapeHtml(device) + escapeHtml(loaded);
+                el.innerHTML = '🖥️ Machine B will run: <strong>' + escapeHtml(model) + '</strong>' +
+                    '<br>Engine: ' + escapeHtml(engine) +
+                    ' · Precision/backend: <strong>' + escapeHtml(backend) + '</strong>' +
+                    ' · Device: ' + escapeHtml(device) + escapeHtml(loaded);
             } catch (e) {
                 el.innerHTML = '⚠️ Machine B unreachable — ' + escapeHtml(e.message || String(e));
             }
