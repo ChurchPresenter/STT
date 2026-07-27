@@ -342,11 +342,13 @@ def convert_db_to_html(db_path: Optional[str], highlight_config_path: Optional[s
             # Older .db files predate the 'marked' column and COALESCE can't
             # save a missing column, so probe the schema first.
             cursor.execute("PRAGMA table_info(transcriptions)")
-            has_marked = any(row[1] == "marked" for row in cursor.fetchall())
-            marked_col = "COALESCE(marked, 0)" if has_marked else "0"
+            _cols = {row[1] for row in cursor.fetchall()}
+            marked_col = "COALESCE(marked, 0)" if "marked" in _cols else "0"
+            # translated_text was added by a later migration; older DBs lack it.
+            trans_col = "translated_text" if "translated_text" in _cols else "NULL"
             cursor.execute(
                 f"""
-                SELECT timestamp, text, {marked_col} FROM transcriptions
+                SELECT timestamp, text, {trans_col}, {marked_col} FROM transcriptions
                 WHERE timestamp IS NOT NULL AND timestamp != ''
                 AND text IS NOT NULL AND TRIM(text) != '' AND TRIM(text) != ' '
                 AND COALESCE(denied, 0) = 0
@@ -363,8 +365,9 @@ def convert_db_to_html(db_path: Optional[str], highlight_config_path: Optional[s
         # Parse timestamps and build segments
         segments_html = []
         first_time = None
+        has_any_translation = False
 
-        for i, (timestamp_str, text, row_marked) in enumerate(entries):
+        for i, (timestamp_str, text, translated_text, row_marked) in enumerate(entries):
             try:
                 # Parse ISO timestamp
                 ts_normalized = timestamp_str.replace("T", " ").strip()
@@ -386,8 +389,14 @@ def convert_db_to_html(db_path: Optional[str], highlight_config_path: Optional[s
 
                 seg_cls = "segment marked" if row_marked else "segment"
                 mark_badge = '<span class="mark-badge" title="Marked during session">&#9873;</span>' if row_marked else ""
+                # Translation line (source-language highlighting doesn't apply, so
+                # just escape). Omitted for rows that were never translated.
+                translation_html = ""
+                if translated_text and translated_text.strip():
+                    has_any_translation = True
+                    translation_html = f'<div class="translation">{html.escape(translated_text.strip())}</div>'
                 segments_html.append(
-                    f'<div class="{seg_cls}"><span class="timestamp" data-clock="{clock_time}" data-elapsed="{elapsed_time}">[{clock_time}]</span><span class="text">{highlighted_text}</span>{mark_badge}</div>'
+                    f'<div class="{seg_cls}"><span class="timestamp" data-clock="{clock_time}" data-elapsed="{elapsed_time}">[{clock_time}]</span><span class="text">{highlighted_text}</span>{mark_badge}{translation_html}</div>'
                 )
             except Exception as e:
                 print(f"[HTML] Error parsing entry {i}: {e}")
@@ -399,6 +408,15 @@ def convert_db_to_html(db_path: Optional[str], highlight_config_path: Optional[s
 
         # Get the date for the title
         title_date = first_time.strftime("%Y-%m-%d %H:%M") if first_time else "Unknown"
+
+        # Only offer the Translation toggle when the session actually has
+        # translations (data-driven, not the current server config). Checked by
+        # default so the file opens showing both source + translation.
+        translation_checkbox = (
+            '<label><input type="checkbox" id="showTranslation" checked> Translation</label>'
+            if has_any_translation
+            else ""
+        )
 
         # Build the HTML document
         html_content = f"""<!DOCTYPE html>
@@ -621,6 +639,17 @@ def convert_db_to_html(db_path: Optional[str], highlight_config_path: Optional[s
         body.no-highlighting span[style*="color:"] {{
             color: inherit !important;
         }}
+        /* Translation line under each segment */
+        .translation {{
+            color: #8ab4c4;
+            font-style: italic;
+            margin-top: 4px;
+            padding-left: 1.2em;
+            border-left: 2px solid #3a3a3a;
+        }}
+        body.hide-translation .translation {{
+            display: none;
+        }}
         /* Print styles */
         @media print {{
             .no-print {{
@@ -652,6 +681,10 @@ def convert_db_to_html(db_path: Optional[str], highlight_config_path: Optional[s
             .timestamp {{
                 color: #333 !important;
             }}
+            .translation {{
+                color: #333 !important;
+                border-left-color: #999 !important;
+            }}
         }}
     </style>
 </head>
@@ -665,6 +698,7 @@ def convert_db_to_html(db_path: Optional[str], highlight_config_path: Optional[s
                 <label><input type="checkbox" id="showRows" checked> Row Separators</label>
                 <label><input type="checkbox" id="printerMode"> Printer Mode</label>
                 <label><input type="checkbox" id="showHighlighting" checked> Highlighting</label>
+                {translation_checkbox}
                 <div class="font-controls">
                     <button class="secondary" onclick="changeFontSize(-1)">A-</button>
                     <span id="fontSizeDisplay">100%</span>
@@ -709,6 +743,10 @@ def convert_db_to_html(db_path: Optional[str], highlight_config_path: Optional[s
         }});
         document.getElementById('showHighlighting').addEventListener('change', function() {{
             document.body.classList.toggle('no-highlighting', !this.checked);
+        }});
+        // Optional chaining: the checkbox is only present when the session had translations.
+        document.getElementById('showTranslation')?.addEventListener('change', function() {{
+            document.body.classList.toggle('hide-translation', !this.checked);
         }});
 
         // Font size controls

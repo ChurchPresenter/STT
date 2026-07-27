@@ -241,3 +241,53 @@ class TestConvertDbToHtml:
         convert_db_to_html(session_db, highlight_config_path=str(cfg_path))
         content = (tmp_path / "Transcriptions.html").read_text()
         assert '<span style="color: #ff0000;">First</span>' in content
+
+    def test_translation_toggle_and_text_when_present(self, session_db, tmp_path):
+        convert_db_to_html(session_db)
+        content = (tmp_path / "Transcriptions.html").read_text()
+        # Toggle checkbox + CSS + listener are emitted
+        assert 'id="showTranslation"' in content
+        assert "body.hide-translation .translation" in content
+        assert "getElementById('showTranslation')" in content
+        # Translations rendered in .translation nodes
+        assert '<div class="translation">Primera frase.</div>' in content
+        assert '<div class="translation">Última frase.</div>' in content
+        # An included row without a translation emits no translation node
+        assert "Same-second row." in content
+        assert content.count('class="translation"') == 3  # only the 3 translated rows
+
+    def test_translation_html_escaped(self, tmp_path):
+        db_path = str(tmp_path / "esc.db")
+        with sqlite3.connect(db_path) as conn:
+            conn.execute("CREATE TABLE transcriptions (id INTEGER PRIMARY KEY, timestamp TEXT, text TEXT, translated_text TEXT, denied INTEGER, is_final INTEGER)")
+            conn.execute(
+                "INSERT INTO transcriptions (timestamp, text, translated_text, denied, is_final) VALUES (?,?,?,0,1)",
+                ("2026-07-23 10:00:00", "hi", "<b>hola</b>"),
+            )
+        convert_db_to_html(db_path)
+        content = (tmp_path / "esc.html").read_text()
+        assert "&lt;b&gt;hola&lt;/b&gt;" in content
+        assert "<b>hola</b>" not in content
+
+    def test_no_translation_toggle_when_session_untranslated(self, tmp_path):
+        db_path = str(tmp_path / "plain.db")
+        with sqlite3.connect(db_path) as conn:
+            conn.execute("CREATE TABLE transcriptions (id INTEGER PRIMARY KEY, timestamp TEXT, text TEXT, translated_text TEXT, denied INTEGER, is_final INTEGER)")
+            conn.execute("INSERT INTO transcriptions (timestamp, text, denied, is_final) VALUES ('2026-07-23 10:00:00', 'just source', 0, 1)")
+        convert_db_to_html(db_path)
+        content = (tmp_path / "plain.html").read_text()
+        assert "just source" in content
+        assert 'id="showTranslation"' not in content
+        assert 'class="translation"' not in content
+
+    def test_old_schema_without_translated_text_column(self, tmp_path):
+        db_path = str(tmp_path / "legacy.db")
+        with sqlite3.connect(db_path) as conn:
+            conn.execute("CREATE TABLE transcriptions (id INTEGER PRIMARY KEY, timestamp TEXT, text TEXT, denied INTEGER, is_final INTEGER)")
+            conn.execute("INSERT INTO transcriptions (timestamp, text) VALUES ('2026-07-23 10:00:00', 'legacy row')")
+        html_path = convert_db_to_html(db_path)
+        assert html_path is not None
+        content = (tmp_path / "legacy.html").read_text()
+        assert "legacy row" in content
+        assert 'id="showTranslation"' not in content
+        assert 'class="translation"' not in content
