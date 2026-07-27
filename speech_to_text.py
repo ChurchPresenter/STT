@@ -689,6 +689,16 @@ from stt.nllb_catalog import (  # noqa: F401
     is_madlad_model,
     get_default_madlad_models,
 )
+from stt.ct2_translate import (  # noqa: F401
+    resolve_compute_type as _ct2_resolve_compute_type,
+    ct2_model_dir as _ct2_model_dir,
+    nllb_ct2_target_prefix as _ct2_nllb_target_prefix,
+    strip_target_prefix as _ct2_strip_target_prefix,
+    nllb_source_tokens as _ct2_nllb_source_tokens,
+    madlad_source_tokens as _ct2_madlad_source_tokens,
+    decode_ct2_tokens as _ct2_decode_tokens,
+    score_to_confidence as _ct2_score_to_confidence,
+)
 
 # Default MADLAD-400 model when the translation engine is set to "madlad".
 MADLAD_DEFAULT_MODEL = "google/madlad400-3b-mt"
@@ -722,18 +732,48 @@ def _maybe_half_translation_model(model, device, use_fp16):
         return model, False
 
 
-def load_translation_model(use_gpu=True, model_id=None, use_fp16=False):
+def _load_ct2_translator(hf_model_path, model_id, use_gpu, ct2_compute_type):
+    """Load (converting once, cached) a CTranslate2 Translator for the model at
+    hf_model_path. CT2 has no Metal backend, so Apple Silicon runs CPU int8 —
+    which is the whole point (MADLAD-3B in ~3 GB). Sets _live_translation_device.
+    Raises if the HF model isn't downloaded locally (conversion needs the weights)."""
+    global _live_translation_device
+    import ctranslate2
+    device = "cuda" if (use_gpu and torch.cuda.is_available()) else "cpu"
+    compute_type = _ct2_resolve_compute_type(ct2_compute_type or "auto", device)
+    if not os.path.isdir(hf_model_path):
+        raise RuntimeError(
+            f"CTranslate2 backend needs '{model_id}' downloaded locally first "
+            "(Model Manager). Cannot convert a hub-only model.")
+    ct2_dir = _ct2_model_dir(hf_model_path, compute_type)
+    if not os.path.isdir(ct2_dir):
+        # One-time conversion from the official HF weights (transiently needs
+        # ~model-size RAM). Cached beside the HF model, keyed by compute type.
+        print(f"[CT2] Converting {model_id} -> {ct2_dir} ({compute_type})... one-time", flush=True)
+        from ctranslate2.converters import TransformersConverter
+        TransformersConverter(hf_model_path).convert(ct2_dir, quantization=compute_type, force=False)
+    translator = ctranslate2.Translator(ct2_dir, device=device, compute_type=compute_type)
+    _live_translation_device = device
+    print(f"[CT2] Translator loaded ({device}, {compute_type})")
+    return translator
+
+
+def load_translation_model(use_gpu=True, model_id=None, use_fp16=False, use_ct2=False, ct2_compute_type="auto"):
     """
-    Load NLLB-200 translation model
+    Load a translation model (NLLB-200 or MADLAD-400).
 
     Args:
         use_gpu: Whether to use GPU acceleration
         model_id: HuggingFace model ID (e.g., "facebook/nllb-200-distilled-600M")
                   If None, defaults to facebook/nllb-200-distilled-600M
         use_fp16: Load in half precision on GPU (MPS/CUDA only; ignored on CPU)
+        use_ct2: Use the CTranslate2 int8 backend (returns a Translator instead
+                 of a transformers model; converts once from local HF weights)
+        ct2_compute_type: CT2 quantization ("auto" -> int8 on CPU, int8_float16 on CUDA)
 
     Returns:
-        Tuple of (model, tokenizer)
+        Tuple of (model, tokenizer) — model is a transformers model or, with
+        use_ct2, a ctranslate2.Translator.
     """
     _lazy_import_ml_libraries()
     from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
@@ -754,6 +794,13 @@ def load_translation_model(use_gpu=True, model_id=None, use_fp16=False):
         print(f"[INFO] Loading translation model from HuggingFace: {model_path}")
 
     tokenizer = AutoTokenizer.from_pretrained(model_path)
+
+    global _live_translation_is_ct2
+    if use_ct2:
+        translator = _load_ct2_translator(model_path, model_id, use_gpu, ct2_compute_type)
+        _live_translation_is_ct2 = True
+        return translator, tokenizer
+    _live_translation_is_ct2 = False
 
     bin_path = os.path.join(model_path, "pytorch_model.bin") if os.path.isdir(model_path) else None
     if bin_path and os.path.exists(bin_path) and not os.path.exists(os.path.join(model_path, "model.safetensors")):
@@ -838,6 +885,70 @@ def _apply_glossary(text, source_lang, target_lang):
         return text
 
 
+def _translate_text_ct2(text, source_lang, target_lang, translator, tokenizer,
+                        return_confidence=False, num_alternatives=0, generation_params=None):
+    """Translate one string via the CTranslate2 int8 backend.
+
+    CT2 works on token strings: encode with the HF tokenizer, translate_batch,
+    decode. NLLB forces the target via target_prefix (stripped on decode);
+    MADLAD carries it as a "<2xx>" prefix in the source text. Mirrors the
+    transformers path's return shape (text, or dict with confidence/alternatives).
+    """
+    _is_madlad = is_madlad_model(_live_translation_model_id or "")
+    gp = generation_params or {}
+    num_beams = max(1, int(gp.get("num_beams", 2)))
+    no_repeat = int(gp.get("no_repeat_ngram_size", 0))
+    rep_pen = float(gp.get("repetition_penalty", 1.0))
+
+    want_extras = return_confidence or num_alternatives > 0
+    num_hyp = min(num_alternatives + 1, 5) if num_alternatives > 0 else 1
+    beam_size = max(num_beams, num_hyp)
+
+    tgt_code = None
+    if _is_madlad:
+        source = _ct2_madlad_source_tokens(tokenizer, text, target_lang)
+        target_prefix = None
+    else:
+        src_code = NLLB_LANG_CODES.get(source_lang, "eng_Latn")
+        tgt_code = NLLB_LANG_CODES.get(target_lang, "eng_Latn")
+        source = _ct2_nllb_source_tokens(tokenizer, text, src_code)
+        target_prefix = _ct2_nllb_target_prefix(tgt_code)
+
+    _kwargs = {"beam_size": beam_size, "num_hypotheses": num_hyp,
+               "return_scores": want_extras, "max_decoding_length": 1024}
+    if target_prefix is not None:
+        _kwargs["target_prefix"] = target_prefix
+    if no_repeat > 0:
+        _kwargs["no_repeat_ngram_size"] = no_repeat
+    if rep_pen != 1.0:
+        _kwargs["repetition_penalty"] = rep_pen
+
+    _tr_t0 = time.perf_counter()
+    results = translator.translate_batch([source], **_kwargs)
+    try:
+        _record_local_translate_ms((time.perf_counter() - _tr_t0) * 1000.0)
+    except Exception:
+        pass
+
+    res = results[0]
+    hyps = res.hypotheses
+    scores = getattr(res, "scores", None) or []
+
+    def _decode(tok_list):
+        toks = _ct2_strip_target_prefix(tok_list, tgt_code) if tgt_code else tok_list
+        return _ct2_decode_tokens(tokenizer, toks)
+
+    if not hyps:
+        return {"text": text, "confidence": None, "alternatives": []} if want_extras else text
+
+    best = _apply_glossary(_decode(hyps[0]), source_lang, target_lang)
+    if not want_extras:
+        return best
+    confidence = _ct2_score_to_confidence(scores[0]) if scores else None
+    alternatives = [_apply_glossary(_decode(h), source_lang, target_lang) for h in hyps[1:]]
+    return {"text": best, "confidence": confidence, "alternatives": alternatives}
+
+
 def translate_text(text, source_lang, target_lang, model, tokenizer, return_confidence=False, num_alternatives=0, generation_params=None):
     """
     Translate text using NLLB-200
@@ -859,6 +970,12 @@ def translate_text(text, source_lang, target_lang, model, tokenizer, return_conf
         if return_confidence or num_alternatives > 0:
             return {"text": text, "confidence": None, "alternatives": []}
         return text
+
+    # CTranslate2 backend uses a different (token-string) API — route to it and
+    # leave the transformers path below untouched.
+    if _live_translation_is_ct2:
+        return _translate_text_ct2(text, source_lang, target_lang, model, tokenizer,
+                                   return_confidence, num_alternatives, generation_params)
 
     # MADLAD encodes the target as a "<2xx>" prefix on the input (no source
     # language, no forced_bos); NLLB sets tokenizer.src_lang + a forced target
@@ -1093,6 +1210,7 @@ _live_translation_model_loaded = False
 _live_translation_model_loading = False  # Track when model is being loaded
 _live_translation_model_id = None  # Track which model is loaded to detect config changes
 _live_translation_device = None  # 'cuda' | 'mps' | 'cpu' once loaded — exposed in /api/translation/status
+_live_translation_is_ct2 = False  # True when the loaded model is a CTranslate2 Translator
 _live_translation_target_lang = None
 # Set True by load/preload, False by unload. A queued unload re-checks this under
 # the lock and aborts if a preload re-requested the model in the meantime, so a
@@ -1151,9 +1269,15 @@ def _warmup_translation_model(model, tokenizer, device):
     pre-compile) and when disabled via config. Never raises — a warmup failure
     must not block model availability."""
     try:
-        if device == "cpu":
-            return
         if not config.get("live_translation", {}).get("warmup", True):
+            return
+        # CTranslate2 Translator has no .generate — warm it via its own path.
+        if _live_translation_is_ct2:
+            t0 = time.perf_counter()
+            _translate_text_ct2("Hello.", "en", "es", model, tokenizer)
+            print(f"[LIVE-TRANSLATION] Warmup (ct2/{device}) took {(time.perf_counter() - t0) * 1000:.0f}ms")
+            return
+        if device == "cpu":
             return
         num_beams = int((config.get("live_translation", {}).get("generation_params", {}) or {}).get("num_beams", 2))
         t0 = time.perf_counter()
@@ -1189,9 +1313,16 @@ def get_live_translation_model(use_gpu=True, model_id=None):
 
         _live_translation_model_wanted = True
 
-        # If model_id changed, unload the stale model so it reloads with the correct one
-        if _live_translation_model is not None and model_id and _live_translation_model_id and model_id != _live_translation_model_id:
-            print(f"[LIVE-TRANSLATION] Model changed: {_live_translation_model_id} -> {model_id}, reloading...")
+        _lt_cfg = config.get("live_translation", {})
+        _want_ct2 = bool(_lt_cfg.get("use_ctranslate2", False))
+
+        # If model_id OR the inference backend changed, unload so it reloads correctly.
+        if _live_translation_model is not None and (
+                (model_id and _live_translation_model_id and model_id != _live_translation_model_id)
+                or (_want_ct2 != _live_translation_is_ct2)):
+            _why = "backend" if _want_ct2 != _live_translation_is_ct2 else "model"
+            print(f"[LIVE-TRANSLATION] {_why} changed ({_live_translation_model_id}, ct2={_live_translation_is_ct2}) -> "
+                  f"({model_id}, ct2={_want_ct2}), reloading...")
             import gc
             del _live_translation_model
             del _live_translation_tokenizer
@@ -1206,11 +1337,13 @@ def get_live_translation_model(use_gpu=True, model_id=None):
         if _live_translation_model is None:
             _live_translation_model_loading = True
             try:
-                print(f"[LIVE-TRANSLATION] Loading live translation model: {model_id or 'default'}...")
+                print(f"[LIVE-TRANSLATION] Loading live translation model: {model_id or 'default'} (ct2={_want_ct2})...")
                 _live_translation_model, _live_translation_tokenizer = load_translation_model(
                     use_gpu=use_gpu,
                     model_id=model_id,
-                    use_fp16=config.get("live_translation", {}).get("use_fp16", False),
+                    use_fp16=_lt_cfg.get("use_fp16", False),
+                    use_ct2=_want_ct2,
+                    ct2_compute_type=_lt_cfg.get("ct2_compute_type", "auto"),
                 )
                 _live_translation_model_loaded = True
                 _live_translation_model_id = model_id
@@ -5452,6 +5585,7 @@ def save_translation_settings():
     old_use_gpu = config.get("live_translation", {}).get("use_gpu", True)
     old_method = config.get("live_translation", {}).get("translation_method", "nllb")
     old_use_fp16 = config.get("live_translation", {}).get("use_fp16", False)
+    old_use_ct2 = config.get("live_translation", {}).get("use_ctranslate2", False)
     old_remote_model = (config.get("live_translation", {}).get("remote", {}) or {}).get("model", "")
 
     # Update settings. NOTE: target_language is deliberately NOT merged here — it
@@ -5466,6 +5600,12 @@ def save_translation_settings():
     # fp16 is applied at model load, so a change requires a reload (handled below).
     if "use_fp16" in data:
         config["live_translation"]["use_fp16"] = bool(data["use_fp16"])
+
+    # CTranslate2 backend + quantization are applied at model load (reload below).
+    if "use_ctranslate2" in data:
+        config["live_translation"]["use_ctranslate2"] = bool(data["use_ctranslate2"])
+    if "ct2_compute_type" in data:
+        config["live_translation"]["ct2_compute_type"] = str(data["ct2_compute_type"])
 
     # Clamp to match the UI slider (1-5); larger windows approach NLLB's 1024-token truncation
     if "context_window" in data:
@@ -5517,9 +5657,11 @@ def save_translation_settings():
     new_use_gpu = config["live_translation"].get("use_gpu", True)
     new_method = config["live_translation"].get("translation_method", "nllb")
     new_use_fp16 = config["live_translation"].get("use_fp16", False)
+    new_use_ct2 = config["live_translation"].get("use_ctranslate2", False)
 
-    # fp16 change needs a reload too — it's applied when the model loads.
-    model_changed = old_model != new_model or old_use_gpu != new_use_gpu or old_use_fp16 != new_use_fp16
+    # fp16 and the CT2 backend are applied at model load, so a change needs a reload.
+    model_changed = (old_model != new_model or old_use_gpu != new_use_gpu
+                     or old_use_fp16 != new_use_fp16 or old_use_ct2 != new_use_ct2)
     method_changed = old_method != new_method
     using_whisper = new_method in ("whisper_translate", "whisper_forced_lang")
 
@@ -5576,10 +5718,12 @@ def save_translation_settings():
     # own model.
     new_remote_model = (config.get("live_translation", {}).get("remote", {}) or {}).get("model", "")
     _b_model = new_remote_model or new_model
+    new_ct2_compute = config.get("live_translation", {}).get("ct2_compute_type", "auto")
     if (old_use_fp16 != new_use_fp16 or old_use_gpu != new_use_gpu
             or old_model != new_model or old_remote_model != new_remote_model
-            or method_changed):
-        _propagate_model_settings_to_remote(new_use_fp16, _b_model, new_use_gpu, new_method)
+            or method_changed or old_use_ct2 != new_use_ct2):
+        _propagate_model_settings_to_remote(new_use_fp16, _b_model, new_use_gpu, new_method,
+                                            new_use_ct2, new_ct2_compute)
 
     return jsonify({
         "success": True,
@@ -5587,13 +5731,15 @@ def save_translation_settings():
     })
 
 
-def _propagate_model_settings_to_remote(use_fp16, translation_model, use_gpu, translation_method=None):
+def _propagate_model_settings_to_remote(use_fp16, translation_model, use_gpu, translation_method=None,
+                                        use_ctranslate2=None, ct2_compute_type=None):
     """Push model-load settings to a paired remote translation server so it
     reloads with them. Best-effort, off the request thread — never blocks or
     breaks the local save. No-op when offload isn't enabled/configured.
 
-    translation_method ('nllb'/'madlad') is included so B loads the SAME engine
-    A uses — otherwise A on MADLAD would offload to an NLLB B."""
+    translation_method ('nllb'/'madlad') and use_ctranslate2 are included so B
+    loads the SAME engine/backend A uses — e.g. the low-RAM Mac offload box also
+    switches to the CTranslate2 int8 backend."""
     remote_cfg = config.get("live_translation", {}).get("remote", {})
     if not (remote_cfg.get("enabled") and remote_cfg.get("endpoint")):
         return
@@ -5606,6 +5752,10 @@ def _propagate_model_settings_to_remote(use_fp16, translation_model, use_gpu, tr
             _payload = {"use_fp16": bool(use_fp16), "translation_model": translation_model, "use_gpu": bool(use_gpu)}
             if translation_method:
                 _payload["translation_method"] = translation_method
+            if use_ctranslate2 is not None:
+                _payload["use_ctranslate2"] = bool(use_ctranslate2)
+            if ct2_compute_type:
+                _payload["ct2_compute_type"] = ct2_compute_type
             _get_remote_http_session().post(
                 ep.rstrip("/") + "/api/translate/model-settings",
                 json=_payload,
@@ -6216,6 +6366,16 @@ def translate_remote_model_settings():
         if val != lt.get("translation_method", "nllb"):
             lt["translation_method"] = val
             changed.append("translation_method")
+    if "use_ctranslate2" in data:
+        val = bool(data["use_ctranslate2"])
+        if val != lt.get("use_ctranslate2", False):
+            lt["use_ctranslate2"] = val
+            changed.append("use_ctranslate2")
+    if data.get("ct2_compute_type"):
+        val = str(data["ct2_compute_type"])
+        if val != lt.get("ct2_compute_type", "auto"):
+            lt["ct2_compute_type"] = val
+            changed.append("ct2_compute_type")
     if "use_gpu" in data:
         val = bool(data["use_gpu"])
         if val != lt.get("use_gpu", True):

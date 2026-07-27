@@ -462,6 +462,13 @@
                             </select>
                             <small>Select from downloaded NLLB models</small>
                         </div>
+                        <div class="form-group">
+                            <label style="display: flex; align-items: center; gap: 8px; cursor: pointer;">
+                                <input type="checkbox" id="config_use_ctranslate2" style="width:auto;">
+                                Use CTranslate2 (int8)
+                            </label>
+                            <small>int8 CPU backend for NLLB &amp; MADLAD — much smaller/faster (e.g. MADLAD-3B in ~3&nbsp;GB), recommended for low-RAM machines like a 16&nbsp;GB Mac. Converts to int8 once on first use (briefly needs ~model-size RAM). No Apple Metal (CPU int8 there). Reloads the model.</small>
+                        </div>
                     </div>
 
                     <!-- Save and Reload Buttons (moved here) -->
@@ -1675,6 +1682,7 @@
                 if (settings.success) {
                     const model = settings.settings.translation_model || 'facebook/nllb-200-distilled-600M';
                     await populateTranslationModelDropdown(model);
+                    document.getElementById('config_use_ctranslate2').checked = settings.settings.use_ctranslate2 === true;
 
                     // Update summary
                     const modelName = model.split('/').pop() || model;
@@ -1696,7 +1704,10 @@
                 const response = await fetch('/api/translation/settings', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ translation_model: model })
+                    body: JSON.stringify({
+                        translation_model: model,
+                        use_ctranslate2: document.getElementById('config_use_ctranslate2').checked
+                    })
                 });
                 const data = await response.json();
                 if (data.success) {

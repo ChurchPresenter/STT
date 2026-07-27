@@ -183,6 +183,13 @@
                 <small style="color: var(--text-secondary); font-size: 0.75em; margin-left: 22px; display: block; margin-top: -5px; margin-bottom: 10px;">
                     Faster and uses ~half the VRAM (GPU only). MPS fp16 can occasionally garble output — turn off if translations look wrong. Reloads the model.
                 </small>
+                <div class="checkbox-group">
+                    <input type="checkbox" id="translation_use_ctranslate2" data-a-controlled>
+                    <label for="translation_use_ctranslate2">Use CTranslate2 (int8)</label>
+                </div>
+                <small style="color: var(--text-secondary); font-size: 0.75em; margin-left: 22px; display: block; margin-top: -5px; margin-bottom: 10px;">
+                    int8 CPU inference for NLLB &amp; MADLAD — much smaller/faster (e.g. MADLAD-3B in ~3&nbsp;GB), recommended for low-RAM machines like a 16&nbsp;GB Mac. Converts the model to int8 once on first use (a one-time step that briefly needs ~model-size RAM). No Apple Metal — runs CPU int8 there. Reloads the model.
+                </small>
                 </div>
 
                 <hr class="divider">
@@ -723,6 +730,7 @@
                     document.getElementById('translate_in_progress').checked = currentSettings.translate_in_progress || false;
                     document.getElementById('translation_use_gpu').checked = currentSettings.use_gpu !== false;
                     document.getElementById('translation_use_fp16').checked = currentSettings.use_fp16 === true;
+                    document.getElementById('translation_use_ctranslate2').checked = currentSettings.use_ctranslate2 === true;
 
                     // Remote translation settings
                     const remoteCfg = currentSettings.remote || {};
@@ -867,6 +875,7 @@
                 translation_model: document.getElementById('translation_model').value,
                 use_gpu: document.getElementById('translation_use_gpu').checked,
                 use_fp16: document.getElementById('translation_use_fp16').checked,
+                use_ctranslate2: document.getElementById('translation_use_ctranslate2').checked,
                 generation_params: {
                     num_beams: parseInt(document.getElementById('num_beams').value),
                     length_penalty: parseFloat(document.getElementById('length_penalty').value),
