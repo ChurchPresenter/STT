@@ -631,7 +631,6 @@
         window.addEventListener('DOMContentLoaded', () => {
             loadFiles();
             loadDiskSpace();
-            loadHiddenItems();
             // Refresh disk space every 10 seconds
             setInterval(loadDiskSpace, 10000);
         });
@@ -1164,20 +1163,6 @@
         }
 
         // Hidden items management
-        async function loadHiddenItems() {
-            try {
-                const response = await fetch('/api/file-manager/hidden-items');
-                const data = await response.json();
-
-                if (data.success) {
-                    const hiddenItems = data.hidden_items || [];
-                    updateHiddenItemsList(hiddenItems);
-                }
-            } catch (error) {
-                console.error('Failed to load hidden items:', error);
-            }
-        }
-
         async function hideItem(path) {
             try {
                 const response = await fetch('/api/file-manager/hide', {
