@@ -334,6 +334,13 @@
             display: block;
             margin: 0 auto;
         }
+        /* Audio has no intrinsic width, so the auto-sized modal collapses around
+           the small player. Give it a target width (clamped to the viewport) so
+           the preview is comfortably wide. */
+        .preview-content audio {
+            width: 100%;
+            min-width: min(700px, 85vw);
+        }
 
         .preview-content pre {
             background: var(--bg-card);
