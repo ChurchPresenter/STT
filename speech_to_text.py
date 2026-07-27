@@ -4251,7 +4251,6 @@ def update_config():
         # generic /api/config editor (not the Translations tab) still propagates
         # to a paired offload server. Scalars are captured by value here.
         _lt_prev = config.get("live_translation", {})
-        _prev_lt_model = _lt_prev.get("translation_model")
         _prev_lt_target = _lt_prev.get("target_language")
         _prev_lt_remote_model = (_lt_prev.get("remote", {}) or {}).get("model", "")
 
@@ -4312,12 +4311,12 @@ def update_config():
         try:
             _lt_now = config.get("live_translation", {})
             _now_remote_model = (_lt_now.get("remote", {}) or {}).get("model", "")
-            # Only the model/engine B runs is propagated; B owns its own
+            # Push only an EXPLICIT Machine B model; a blank picker means
+            # "(use Machine B's own model)" so A dictates nothing. B owns its own
             # precision/backend (fp16, CTranslate2, GPU).
-            if (_prev_lt_model != _lt_now.get("translation_model")
-                    or _prev_lt_remote_model != _now_remote_model):
+            if _now_remote_model and _prev_lt_remote_model != _now_remote_model:
                 _propagate_model_settings_to_remote(
-                    _now_remote_model or _lt_now.get("translation_model", ""),
+                    _now_remote_model,
                     _lt_now.get("translation_method", "nllb"),
                 )
             _new_target = _lt_now.get("target_language")
@@ -5710,16 +5709,14 @@ def save_translation_settings():
     # Propagate model-load settings (precision / model / GPU) to a paired remote
     # translation server. These can't ride on the per-request payload (which only
     # carries text/langs/generation_params), so without this the offload box keeps
-    # its old model + precision even after you change them here. B runs the
-    # explicitly-chosen remote.model when set, else falls back to this machine's
-    # own model.
-    # Only WHICH model + engine B runs is A's decision; precision/backend (fp16,
-    # CTranslate2, GPU) are B's own hardware-local settings and are NOT pushed —
-    # A (CUDA) and B (e.g. a 16 GB Mac) want different ones.
+    # its old model even after you change it here. Only push when an EXPLICIT
+    # Machine B model is chosen — a blank picker means "(use Machine B's own
+    # model)", so A dictates nothing and B keeps whatever it's configured with.
+    # Precision/backend (fp16, CTranslate2, GPU) are always B's own and are never
+    # pushed — A (CUDA) and B (e.g. a 16 GB Mac) want different ones.
     new_remote_model = (config.get("live_translation", {}).get("remote", {}) or {}).get("model", "")
-    _b_model = new_remote_model or new_model
-    if old_model != new_model or old_remote_model != new_remote_model or method_changed:
-        _propagate_model_settings_to_remote(_b_model, new_method)
+    if new_remote_model and (old_remote_model != new_remote_model or method_changed):
+        _propagate_model_settings_to_remote(new_remote_model, new_method)
 
     return jsonify({
         "success": True,

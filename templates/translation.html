@@ -1218,7 +1218,12 @@
                 }
                 const device = d.model_device ? String(d.model_device).toUpperCase() : '—';
                 const state = isLoaded ? '' : ' (configured — not loaded yet)';
-                el.innerHTML = '🖥️ Machine B will run: <strong>' + escapeHtml(model) + '</strong>' +
+                // Blank picker = "(use Machine B's own model)" — A isn't dictating,
+                // so this is B's own choice, shown for reference only.
+                const picker = document.getElementById('remote_model');
+                const ownModel = picker && !picker.value
+                    ? '<div style="margin-bottom:2px;">ℹ️ A is not selecting B’s model — B uses its own (below):</div>' : '';
+                el.innerHTML = ownModel + '🖥️ Machine B ' + (isLoaded ? 'is running' : 'will run') + ': <strong>' + escapeHtml(model) + '</strong>' +
                     '<br>Engine: ' + escapeHtml(engine) +
                     ' · Precision/backend: <strong>' + escapeHtml(backend) + '</strong>' +
                     ' · Device: ' + escapeHtml(device) + escapeHtml(state);
