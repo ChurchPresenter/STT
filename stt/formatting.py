@@ -409,10 +409,12 @@ def convert_db_to_html(db_path: Optional[str], highlight_config_path: Optional[s
         # Get the date for the title
         title_date = first_time.strftime("%Y-%m-%d %H:%M") if first_time else "Unknown"
 
-        # Only offer the Translation toggle when the session actually has
-        # translations (data-driven, not the current server config). Checked by
-        # default so the file opens showing both source + translation.
-        translation_checkbox = (
+        # Only offer the toggles when the session actually has translations
+        # (data-driven, not the current server config). Transcription and
+        # translation toggle independently; both checked by default so the file
+        # opens showing both.
+        translation_toggles = (
+            '<label><input type="checkbox" id="showTranscription" checked> Transcription</label>'
             '<label><input type="checkbox" id="showTranslation" checked> Translation</label>'
             if has_any_translation
             else ""
@@ -639,15 +641,15 @@ def convert_db_to_html(db_path: Optional[str], highlight_config_path: Optional[s
         body.no-highlighting span[style*="color:"] {{
             color: inherit !important;
         }}
-        /* Translation line under each segment */
+        /* Translation on its own line, same font/size/color as the source. */
         .translation {{
-            color: #8ab4c4;
-            font-style: italic;
-            margin-top: 4px;
-            padding-left: 1.2em;
-            border-left: 2px solid #3a3a3a;
+            display: block;
+            margin-top: 2px;
         }}
         body.hide-translation .translation {{
+            display: none;
+        }}
+        body.hide-transcription .text {{
             display: none;
         }}
         /* Print styles */
@@ -681,10 +683,6 @@ def convert_db_to_html(db_path: Optional[str], highlight_config_path: Optional[s
             .timestamp {{
                 color: #333 !important;
             }}
-            .translation {{
-                color: #333 !important;
-                border-left-color: #999 !important;
-            }}
         }}
     </style>
 </head>
@@ -698,7 +696,7 @@ def convert_db_to_html(db_path: Optional[str], highlight_config_path: Optional[s
                 <label><input type="checkbox" id="showRows" checked> Row Separators</label>
                 <label><input type="checkbox" id="printerMode"> Printer Mode</label>
                 <label><input type="checkbox" id="showHighlighting" checked> Highlighting</label>
-                {translation_checkbox}
+                {translation_toggles}
                 <div class="font-controls">
                     <button class="secondary" onclick="changeFontSize(-1)">A-</button>
                     <span id="fontSizeDisplay">100%</span>
@@ -744,7 +742,10 @@ def convert_db_to_html(db_path: Optional[str], highlight_config_path: Optional[s
         document.getElementById('showHighlighting').addEventListener('change', function() {{
             document.body.classList.toggle('no-highlighting', !this.checked);
         }});
-        // Optional chaining: the checkbox is only present when the session had translations.
+        // Optional chaining: these checkboxes are only present when the session had translations.
+        document.getElementById('showTranscription')?.addEventListener('change', function() {{
+            document.body.classList.toggle('hide-transcription', !this.checked);
+        }});
         document.getElementById('showTranslation')?.addEventListener('change', function() {{
             document.body.classList.toggle('hide-translation', !this.checked);
         }});

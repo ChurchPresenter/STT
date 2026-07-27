@@ -245,9 +245,12 @@ class TestConvertDbToHtml:
     def test_translation_toggle_and_text_when_present(self, session_db, tmp_path):
         convert_db_to_html(session_db)
         content = (tmp_path / "Transcriptions.html").read_text()
-        # Toggle checkbox + CSS + listener are emitted
+        # Independent transcription + translation toggles (checkbox + CSS + listener)
+        assert 'id="showTranscription"' in content
         assert 'id="showTranslation"' in content
+        assert "body.hide-transcription .text" in content
         assert "body.hide-translation .translation" in content
+        assert "getElementById('showTranscription')" in content
         assert "getElementById('showTranslation')" in content
         # Translations rendered in .translation nodes
         assert '<div class="translation">Primera frase.</div>' in content
@@ -277,6 +280,7 @@ class TestConvertDbToHtml:
         convert_db_to_html(db_path)
         content = (tmp_path / "plain.html").read_text()
         assert "just source" in content
+        assert 'id="showTranscription"' not in content
         assert 'id="showTranslation"' not in content
         assert 'class="translation"' not in content
 
