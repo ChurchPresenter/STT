@@ -464,6 +464,13 @@
                         </div>
                         <div class="form-group">
                             <label style="display: flex; align-items: center; gap: 8px; cursor: pointer;">
+                                <input type="checkbox" id="config_use_fp16" style="width:auto;">
+                                Half precision (fp16) on GPU
+                            </label>
+                            <small>Faster and ~half the VRAM (GPU only). MPS fp16 can occasionally garble output — turn off if translations look wrong. Ignored when CTranslate2 is on. Reloads the model.</small>
+                        </div>
+                        <div class="form-group">
+                            <label style="display: flex; align-items: center; gap: 8px; cursor: pointer;">
                                 <input type="checkbox" id="config_use_ctranslate2" style="width:auto;">
                                 Use CTranslate2 (int8)
                             </label>
@@ -1687,6 +1694,7 @@
                 if (settings.success) {
                     const model = settings.settings.translation_model || 'facebook/nllb-200-distilled-600M';
                     await populateTranslationModelDropdown(model);
+                    document.getElementById('config_use_fp16').checked = settings.settings.use_fp16 === true;
                     document.getElementById('config_use_ctranslate2').checked = settings.settings.use_ctranslate2 === true;
 
                     // Update summary
@@ -1711,6 +1719,7 @@
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
                         translation_model: model,
+                        use_fp16: document.getElementById('config_use_fp16').checked,
                         use_ctranslate2: document.getElementById('config_use_ctranslate2').checked
                     })
                 });
