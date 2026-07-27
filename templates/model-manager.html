@@ -574,7 +574,7 @@
                         <!-- Translation Models Section -->
                         <div style="margin-bottom: 15px;">
                             <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px;">
-                                <h5 style="margin: 0; color: var(--text-primary);">🌐 Translation Models (NLLB)</h5>
+                                <h5 style="margin: 0; color: var(--text-primary);">🌐 Translation Models (NLLB &amp; MADLAD)</h5>
                                 <button class="model-btn" onclick="refreshNLLBModels()" style="background: var(--success); padding: 5px 10px; font-size: 0.8em;">🔄 Check for Updates</button>
                             </div>
                             <div id="nllb_models_list" aria-live="polite" aria-label="Translation model list">
@@ -1792,8 +1792,14 @@
 
             try {
                 const url = refresh ? '/api/models/nllb-list?refresh=true' : '/api/models/nllb-list';
-                const response = await fetch(url);
-                const data = await response.json();
+                // NLLB (live HF list) + MADLAD (static catalog) share this list and
+                // the model-agnostic download/remove buttons.
+                const [nllbData, madladData] = await Promise.all([
+                    fetch(url).then(r => r.json()).catch(() => ({})),
+                    fetch('/api/models/madlad-list').then(r => r.json()).catch(() => ({})),
+                ]);
+                const models = [...(nllbData.models || []), ...(madladData.models || [])];
+                const data = { success: (nllbData.success || madladData.success), models };
 
                 if (data.success && data.models && data.models.length > 0) {
                     let html = '';
