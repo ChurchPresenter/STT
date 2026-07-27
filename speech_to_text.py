@@ -226,7 +226,7 @@ def get_file_mover_runtime():
 
 import functools
 
-from flask import Flask, render_template, jsonify, request, redirect, send_from_directory, make_response, g
+from flask import Flask, render_template, jsonify, request, redirect, send_from_directory, make_response, g, Response, stream_with_context
 from flask_socketio import SocketIO, emit
 import speech_recognition as sr
 import numpy as np
@@ -8288,6 +8288,54 @@ def download_file():
 
     except Exception as e:
         return jsonify({"success": False, "error": str(e)}), 500
+
+
+@app.route("/api/file-manager/convert-download", methods=["GET"])
+def convert_download():
+    """Transcode a media file (e.g. the MPEG-TS capture backup, which browsers
+    can't play) to MP3 and stream it as a download. ffmpeg runs on the confined
+    input; output format is fixed, so there's no shell injection or traversal."""
+    if not check_ip_whitelist():
+        return jsonify({"success": False, "error": "Access denied"}), 403
+
+    path = request.args.get("path")
+    if not path:
+        return jsonify({"success": False, "error": "Path is required"}), 400
+
+    abs_path = safe_managed_path(path)  # commonpath + realpath confinement
+    if abs_path is None:
+        return jsonify({"success": False, "error": "Access denied"}), 403
+    if not os.path.isfile(abs_path):
+        return jsonify({"success": False, "error": "File not found"}), 404
+
+    import shutil as _shutil
+    import subprocess
+    ffmpeg = _shutil.which("ffmpeg") or "ffmpeg"
+    proc = subprocess.Popen(
+        [ffmpeg, "-hide_banner", "-loglevel", "error", "-i", abs_path, "-vn", "-f", "mp3", "pipe:1"],
+        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+    )
+
+    def _gen():
+        try:
+            while True:
+                chunk = proc.stdout.read(64 * 1024)
+                if not chunk:
+                    break
+                yield chunk
+        finally:
+            # Stop ffmpeg on client disconnect / completion so it never lingers.
+            try:
+                proc.kill()
+            except Exception:
+                pass
+
+    stem = os.path.splitext(os.path.basename(abs_path))[0]
+    return Response(
+        stream_with_context(_gen()),
+        mimetype="audio/mpeg",
+        headers={"Content-Disposition": f'attachment; filename="{stem}.mp3"'},
+    )
 
 
 # File Mover Endpoints

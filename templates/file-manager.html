@@ -1340,6 +1340,23 @@
                     </div>
                 `;
             }
+            // MPEG-TS recordings (the audio-capture backup) — browsers can't play
+            // them, so explain what they are and offer an MP3 conversion.
+            else if (['ts', 'm2ts', 'mts'].includes(ext)) {
+                previewContent.innerHTML = `
+                    <div class="empty-state">
+                        <div style="font-size: 3em; margin-bottom: 16px;">🎙️</div>
+                        <h3>MPEG-TS recording</h3>
+                        <p>This is the raw audio-capture backup (MPEG transport stream), which browsers can't play directly.</p>
+                        <p style="margin-top: 14px;">
+                            <a class="btn btn-primary" href="/api/file-manager/convert-download?path=${encodedPath}">Download as MP3</a>
+                        </p>
+                        <p style="margin-top: 10px; color: var(--text-secondary); font-size: 0.85em;">
+                            Or download the original and play it in VLC / ffmpeg.
+                        </p>
+                    </div>
+                `;
+            }
             // Unsupported file types
             else {
                 previewContent.innerHTML = `
