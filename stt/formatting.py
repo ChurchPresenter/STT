@@ -417,22 +417,34 @@ def convert_db_to_html(db_path: Optional[str], highlight_config_path: Optional[s
         # (data-driven, not the current server config). Transcription and
         # translation toggle independently; both checked by default so the file
         # opens showing both.
+        # Transcription/translation show-hide checkboxes only make sense when a
+        # translation line exists.
         translation_toggles = (
             '<label><input type="checkbox" id="showTranscription" checked> Transcription</label>'
             '<label><input type="checkbox" id="showTranslation" checked> Translation</label>'
-            '<label>Time: <select id="tsMode">'
-            '<option value="both" selected>Both</option>'
-            '<option value="transcription">Transcription</option>'
-            '<option value="translation">Translation</option>'
-            '<option value="above">Above</option>'
-            '</select></label>'
             if has_any_translation
             else ""
         )
-        # Default the timestamp-placement mode to "both" when translations exist
-        # (so time shows on both lines out of the box); otherwise leave the body
-        # unclassed and the source timestamp always visible.
-        body_class = "tsmode-both" if has_any_translation else "tsmode-transcription"
+        # Single control for all timestamp behavior (placement + off). "None"
+        # hides every timestamp. With translations, default to "both"; source-only
+        # sessions get the relevant subset and default to transcription.
+        if has_any_translation:
+            _ts_options = (
+                '<option value="both" selected>Both</option>'
+                '<option value="transcription">Transcription</option>'
+                '<option value="translation">Translation</option>'
+                '<option value="above">Above</option>'
+                '<option value="none">None</option>'
+            )
+            body_class = "tsmode-both"
+        else:
+            _ts_options = (
+                '<option value="transcription" selected>Transcription</option>'
+                '<option value="above">Above</option>'
+                '<option value="none">None</option>'
+            )
+            body_class = "tsmode-transcription"
+        time_dropdown = f'<label>Time: <select id="tsMode">{_ts_options}</select></label>'
 
         # Build the HTML document
         html_content = f"""<!DOCTYPE html>
@@ -655,9 +667,6 @@ def convert_db_to_html(db_path: Optional[str], highlight_config_path: Optional[s
         body.tsmode-above .ts-src {{
             display: block;
         }}
-        body.hide-timestamps .timestamp {{
-            display: none !important;
-        }}
         /* No rows - continuous text */
         body.no-rows .segment {{
             display: inline;
@@ -724,7 +733,7 @@ def convert_db_to_html(db_path: Optional[str], highlight_config_path: Optional[s
         <h1>Transcription</h1>
         <div class="controls no-print">
             <div class="controls-row">
-                <label><input type="checkbox" id="showTimestamps" checked> Timestamps</label>
+                {time_dropdown}
                 <label><input type="checkbox" id="useElapsed"> Elapsed Time</label>
                 <label><input type="checkbox" id="showRows" checked> Row Separators</label>
                 <label><input type="checkbox" id="printerMode"> Printer Mode</label>
@@ -756,9 +765,6 @@ def convert_db_to_html(db_path: Optional[str], highlight_config_path: Optional[s
     </div>
     <script>
         // Toggle controls
-        document.getElementById('showTimestamps').addEventListener('change', function() {{
-            document.body.classList.toggle('hide-timestamps', !this.checked);
-        }});
         document.getElementById('useElapsed').addEventListener('change', function() {{
             const useElapsed = this.checked;
             document.querySelectorAll('.timestamp').forEach(ts => {{
@@ -799,17 +805,17 @@ def convert_db_to_html(db_path: Optional[str], highlight_config_path: Optional[s
         // Copy to clipboard
         function copyToClipboard() {{
             const segments = document.querySelectorAll('.segment');
-            const showTimestamps = document.getElementById('showTimestamps').checked;
+            // Timestamps are on unless the Time dropdown is set to "none".
+            const showTimestamps = (document.getElementById('tsMode')?.value || 'transcription') !== 'none';
             let text = '';
             segments.forEach(seg => {{
                 if (showTimestamps) {{
                     const ts = seg.querySelector('.timestamp');
                     if (ts) text += ts.textContent + ' ';
                 }}
-                // Get text content without HTML tags
+                // Get text content without HTML tags; drop all timestamp copies.
                 const clone = seg.cloneNode(true);
-                const tsClone = clone.querySelector('.timestamp');
-                if (tsClone) tsClone.remove();
+                clone.querySelectorAll('.timestamp').forEach(t => t.remove());
                 text += clone.textContent.trim() + '\\n';
             }});
             navigator.clipboard.writeText(text.trim()).then(() => {{

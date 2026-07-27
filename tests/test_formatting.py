@@ -252,8 +252,10 @@ class TestConvertDbToHtml:
         assert "body.hide-translation .translation" in content
         assert "getElementById('showTranscription')" in content
         assert "getElementById('showTranslation')" in content
-        # Timestamp-placement dropdown, default mode, both copies + mode CSS
+        # Timestamp-placement dropdown (incl. a None = off option), default
+        # mode, both copies + mode CSS
         assert 'id="tsMode"' in content
+        assert '<option value="none">None</option>' in content
         assert '<body class="tsmode-both">' in content
         assert 'class="timestamp ts-src"' in content
         assert 'class="timestamp ts-trans"' in content
@@ -287,12 +289,15 @@ class TestConvertDbToHtml:
         convert_db_to_html(db_path)
         content = (tmp_path / "plain.html").read_text()
         assert "just source" in content
+        # No transcription/translation show-hide checkboxes without a translation
         assert 'id="showTranscription"' not in content
         assert 'id="showTranslation"' not in content
         assert 'class="translation"' not in content
-        # No Time dropdown; body defaults to transcription-only so the source
-        # timestamp still shows (unchanged behavior).
-        assert 'id="tsMode"' not in content
+        # Time dropdown is still present (subset: no Both/Translation), defaulting
+        # to transcription so the source timestamp shows; None can turn it off.
+        assert 'id="tsMode"' in content
+        assert '<option value="none">None</option>' in content
+        assert '<option value="translation">' not in content
         assert '<body class="tsmode-transcription">' in content
 
     def test_old_schema_without_translated_text_column(self, tmp_path):
