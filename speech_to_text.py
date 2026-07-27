@@ -6019,6 +6019,11 @@ def get_translation_status():
         # Precision: intended (config flag) vs actually loaded (probed above).
         "use_fp16": bool(trans_config.get("use_fp16", False)),
         "model_dtype": _model_dtype,
+        # Inference backend: intended (config) vs actually loaded. A paired
+        # Machine A reads these to show what this offload box will run with.
+        "use_ctranslate2": bool(trans_config.get("use_ctranslate2", False)),
+        "ct2_compute_type": trans_config.get("ct2_compute_type", "auto"),
+        "is_ctranslate2": bool(_live_translation_is_ct2) if not (remote_active or _using_whisper) else None,
     }
 
     # Only expose sensitive info (clients, pairs) to local/whitelisted or paired callers
