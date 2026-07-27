@@ -5582,7 +5582,6 @@ def save_translation_settings():
     old_method = config.get("live_translation", {}).get("translation_method", "nllb")
     old_use_fp16 = config.get("live_translation", {}).get("use_fp16", False)
     old_use_ct2 = config.get("live_translation", {}).get("use_ctranslate2", False)
-    old_remote_model = (config.get("live_translation", {}).get("remote", {}) or {}).get("model", "")
 
     # Update settings. NOTE: target_language is deliberately NOT merged here — it
     # is applied below via _apply_translation_language_switch, which needs config
@@ -5714,8 +5713,12 @@ def save_translation_settings():
     # model)", so A dictates nothing and B keeps whatever it's configured with.
     # Precision/backend (fp16, CTranslate2, GPU) are always B's own and are never
     # pushed — A (CUDA) and B (e.g. a 16 GB Mac) want different ones.
+    # Re-assert an EXPLICIT Machine B model on every save (not only when it
+    # changed here) so it reconciles a B that drifted to a different model on its
+    # own — otherwise A's picker and B could stay out of sync forever. Idempotent:
+    # B only reloads if the pushed model actually differs from what it's running.
     new_remote_model = (config.get("live_translation", {}).get("remote", {}) or {}).get("model", "")
-    if new_remote_model and (old_remote_model != new_remote_model or method_changed):
+    if new_remote_model:
         _propagate_model_settings_to_remote(new_remote_model, new_method)
 
     return jsonify({
