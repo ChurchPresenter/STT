@@ -694,6 +694,16 @@ def convert_db_to_html(db_path: Optional[str], highlight_config_path: Optional[s
         body.hide-transcription .text {{
             display: none;
         }}
+        /* Continuous mode (Row Separators off): the translation flows inline with
+           a leading space too, so it doesn't break per sentence when the
+           transcription doesn't. */
+        body.no-rows .translation {{
+            display: inline;
+            margin-top: 0;
+        }}
+        body.no-rows .translation::before {{
+            content: ' ';
+        }}
         /* Print styles */
         @media print {{
             .no-print {{

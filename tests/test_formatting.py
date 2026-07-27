@@ -261,6 +261,9 @@ class TestConvertDbToHtml:
         assert 'class="timestamp ts-trans"' in content
         assert "body.tsmode-translation .ts-trans" in content
         assert "body.tsmode-above .ts-src" in content
+        # Continuous (Row Separators off) mode makes the translation flow inline
+        # too, so it breaks per sentence only when the transcription does.
+        assert "body.no-rows .translation" in content
         # Translation line carries its own timestamp with the same clock value
         assert '<span class="timestamp ts-trans" data-clock="10:00:00" data-elapsed="00:00:00">[10:00:00]</span>Primera frase.' in content
         assert "Última frase." in content
