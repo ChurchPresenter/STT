@@ -1,5 +1,7 @@
 # STT - Speech-To-Text
 
+**Website:** [stt.churchpresenter.org](https://stt.churchpresenter.org)
+
 Real-time speech transcription platform with a modern web interface, powered by [Faster-Whisper](https://github.com/SYSTRAN/faster-whisper). Designed for continuous transcription scenarios like church services, lectures, and meetings.
 
 ## Features
