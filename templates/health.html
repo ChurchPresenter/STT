@@ -133,7 +133,7 @@
         <div class="stat-sub" id="m-model-sub"></div>
     </div>
     <div class="stat-card" id="c-trans">
-        <div class="stat-label"><span class="dot"></span>Translation (NLLB)</div>
+        <div class="stat-label"><span class="dot"></span>Translation<span id="trans-engine"></span></div>
         <div class="stat-value" style="font-size:1.05em" id="m-trans">—</div>
         <div class="stat-sub" id="m-trans-sub"></div>
     </div>
@@ -255,7 +255,7 @@
         <div class="stat-sub" id="mb-disk-sub"></div>
     </div>
     <div class="stat-card" id="mb-c-trans">
-        <div class="stat-label"><span class="dot"></span>Translation (NLLB)</div>
+        <div class="stat-label"><span class="dot"></span>Translation<span id="mb-trans-engine"></span></div>
         <div class="stat-value" style="font-size:1.05em" id="mb-trans">—</div>
         <div class="stat-sub" id="mb-trans-sub"></div>
     </div>
@@ -431,6 +431,8 @@
             setStatus("c-trans", tr.model_loaded ? "healthy" : "unknown");
         }
         $("m-trans-sub").textContent = trSub.join(" · ");
+        // Reflect the actual engine (NLLB vs MADLAD) in the card title.
+        $("trans-engine").textContent = (function(m){ m=(""+(m||"")).toLowerCase(); return m.includes("madlad")?" (MADLAD)":(m.includes("nllb")?" (NLLB)":""); })(tr.translation_model);
 
         const tts = h.tts || {};
         $("m-tts").textContent = !tts.enabled ? "disabled"
@@ -581,6 +583,7 @@
         if (tr.server_cache && (tr.server_cache.hits + tr.server_cache.misses) > 0)
             tb.push("cache " + Math.round(tr.server_cache.hit_rate * 100) + "% (" + tr.server_cache.size + ")");
         $("mb-trans-sub").textContent = tb.join(" · ");
+        $("mb-trans-engine").textContent = (function(m){ m=(""+(m||"")).toLowerCase(); return m.includes("madlad")?" (MADLAD)":(m.includes("nllb")?" (NLLB)":""); })(tr.translation_model);
         setStatus("mb-c-trans", tr.model_loaded ? "healthy" : "unknown");
 
         // Disk (mirrors Machine A)
