@@ -8354,9 +8354,11 @@ def convert_download():
 
 @app.route("/api/file-manager/preview-db", methods=["GET"])
 def preview_db():
-    """Preview a session .db by returning its transcript rows. Opens read-only so
-    an actively-recording session DB is never locked or mutated; capped for
-    payload/render cost."""
+    """Preview a SQLite .db as a generic, schema-agnostic table dump: every
+    column, every row (capped). Opens read-only so an actively-recording session
+    DB is never locked or mutated. Deliberately unfiltered — denied/partial rows
+    show too — and columns come from the live schema, so new migrations appear
+    here with no code change."""
     if not check_ip_whitelist():
         return jsonify({"success": False, "error": "Access denied"}), 403
 
@@ -8371,26 +8373,42 @@ def preview_db():
         return jsonify({"success": False, "error": "File not found"}), 404
 
     LIMIT_ROWS = 2000
-    _where = ("WHERE timestamp != '' AND TRIM(text) != '' "
-              "AND COALESCE(is_final, 1) = 1 AND COALESCE(denied, 0) = 0")
+    CELL_MAX = 300  # elide huge blobs (e.g. words_json) so the payload/table stay sane
+
+    def _cell(v):
+        if v is None:
+            return ""
+        s = v if isinstance(v, str) else str(v)
+        return (s[:CELL_MAX] + "…") if len(s) > CELL_MAX else s
+
     try:
         with sqlite3.connect(f"file:{abs_path}?mode=ro", uri=True) as conn:
             cur = conn.cursor()
-            total = cur.execute(f"SELECT COUNT(*) FROM transcriptions {_where}").fetchone()[0]
-            cur.execute(
-                "SELECT id, timestamp, text, translated_text, translation_language, speech_type "
-                f"FROM transcriptions {_where} ORDER BY id ASC LIMIT ?", (LIMIT_ROWS,))
-            rows = [
-                {"id": r[0], "timestamp": r[1], "text": r[2],
-                 "translated_text": r[3], "translation_language": r[4], "speech_type": r[5]}
-                for r in cur.fetchall()
-            ]
+            # Pick the table generically: prefer the session table, else the first
+            # user table — so this also handles renames / non-transcription DBs.
+            names = [r[0] for r in cur.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' "
+                "AND name NOT LIKE 'sqlite_%' ORDER BY name").fetchall()]
+            if not names:
+                return jsonify({"success": False, "error": "No tables in this database"}), 400
+            table = "transcriptions" if "transcriptions" in names else names[0]
+            quoted = '"' + table.replace('"', '""') + '"'
+
+            total = cur.execute(f"SELECT COUNT(*) FROM {quoted}").fetchone()[0]
+            # Order by id when the table has one; otherwise leave natural order.
+            has_id = any(c[1] == "id" for c in cur.execute(f"PRAGMA table_info({quoted})").fetchall())
+            order = " ORDER BY id ASC" if has_id else ""
+            cur.execute(f"SELECT * FROM {quoted}{order} LIMIT ?", (LIMIT_ROWS,))
+            columns = [d[0] for d in cur.description]
+            rows = [[_cell(v) for v in r] for r in cur.fetchall()]
     except sqlite3.Error:
-        # No transcriptions table / not a session DB / unreadable.
-        return jsonify({"success": False, "error": "Not a transcription database"}), 400
+        # Not a SQLite DB / unreadable / encrypted.
+        return jsonify({"success": False, "error": "Could not read database"}), 400
 
     return jsonify({
         "success": True,
+        "table": table,
+        "columns": columns,
         "rows": rows,
         "total": total,
         "truncated": total > len(rows),
