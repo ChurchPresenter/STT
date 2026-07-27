@@ -1307,8 +1307,20 @@
             else if (ext === 'pdf') {
                 previewContent.innerHTML = `<iframe src="/api/file-manager/download?path=${encodedPath}" title="PDF Preview" style="width: 100%; height: 70vh; border-radius: var(--radius-sm); border: 0;"></iframe>`;
             }
+            // HTML files — render the page (not the source). Loaded via srcdoc into
+            // a sandboxed iframe so any embedded scripts can't run / touch the app.
+            else if (['html', 'htm'].includes(ext)) {
+                try {
+                    const response = await fetch(`/api/file-manager/download?path=${encodedPath}`);
+                    const html = await response.text();
+                    previewContent.innerHTML = `<iframe title="HTML Preview" sandbox style="width: 100%; height: 70vh; border-radius: var(--radius-sm); border: 0; background: #fff;"></iframe>`;
+                    previewContent.querySelector('iframe').srcdoc = html;
+                } catch (error) {
+                    previewContent.innerHTML = `<div class="empty-state"><p>Failed to load HTML preview: ${error.message}</p></div>`;
+                }
+            }
             // Text files and code (including subtitle files)
-            else if (['txt', 'log', 'json', 'xml', 'html', 'css', 'js', 'py', 'java', 'c', 'cpp', 'h', 'cs', 'php', 'rb', 'go', 'rs', 'swift', 'kt', 'md', 'yaml', 'yml', 'ini', 'cfg', 'conf', 'sh', 'bash', 'sql', 'csv', 'srt', 'vtt'].includes(ext)) {
+            else if (['txt', 'log', 'json', 'xml', 'css', 'js', 'py', 'java', 'c', 'cpp', 'h', 'cs', 'php', 'rb', 'go', 'rs', 'swift', 'kt', 'md', 'yaml', 'yml', 'ini', 'cfg', 'conf', 'sh', 'bash', 'sql', 'csv', 'srt', 'vtt'].includes(ext)) {
                 try {
                     const response = await fetch(`/api/file-manager/download?path=${encodedPath}`);
                     const text = await response.text();
