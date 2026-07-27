@@ -460,7 +460,7 @@
                             <select id="config_translation_model">
                                 <option value="">Loading downloaded models...</option>
                             </select>
-                            <small>Select from downloaded NLLB models</small>
+                            <small>Select from downloaded NLLB &amp; MADLAD models</small>
                         </div>
                         <div class="form-group">
                             <label style="display: flex; align-items: center; gap: 8px; cursor: pointer;">
@@ -1646,15 +1646,20 @@
         // --- Translation Model Configuration ---
         async function populateTranslationModelDropdown(selectedModel) {
             try {
-                const response = await fetch('/api/models/nllb-list');
-                const data = await response.json();
+                // Both engines' downloaded models are selectable here.
+                const [nllbData, madladData] = await Promise.all([
+                    fetch('/api/models/nllb-list').then(r => r.json()).catch(() => ({})),
+                    fetch('/api/models/madlad-list').then(r => r.json()).catch(() => ({})),
+                ]);
+                const data = { success: (nllbData.success || madladData.success),
+                               models: [...(nllbData.models || []), ...(madladData.models || [])] };
                 const select = document.getElementById('config_translation_model');
                 select.innerHTML = '';
 
                 if (data.success && data.models) {
                     const downloaded = data.models.filter(m => m.downloaded);
                     if (downloaded.length === 0) {
-                        select.innerHTML = '<option value="" disabled>No NLLB models downloaded</option>';
+                        select.innerHTML = '<option value="" disabled>No translation models downloaded</option>';
                     } else {
                         downloaded.forEach(model => {
                             const option = document.createElement('option');
