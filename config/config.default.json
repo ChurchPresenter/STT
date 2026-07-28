@@ -390,6 +390,10 @@
     "_use_ctranslate2_comment": "Run the translation model with the CTranslate2 int8 backend (CPU) instead of transformers. Much smaller/faster (e.g. MADLAD-3B in ~3 GB) — recommended for low-RAM machines like a 16 GB Mac. Converts the model to int8 once on first use. Works for NLLB and MADLAD; no Apple Metal (runs CPU int8 there).",
     "ct2_compute_type": "auto",
     "_ct2_compute_type_comment": "CTranslate2 quantization: 'auto' -> int8 on CPU, int8_float16 on CUDA. Or set explicitly (int8, int8_float16, float16, float32).",
+    "ct2_intra_threads": 4,
+    "_ct2_intra_threads_comment": "CTranslate2 CPU compute threads. ~number of physical performance cores (e.g. 4 P-cores on Apple Silicon). 0 = auto-detect. Only affects the CPU/int8 path.",
+    "ct2_inter_threads": 1,
+    "_ct2_inter_threads_comment": "CTranslate2 parallel translation batches. Keep 1 unless parallelizing across independent documents.",
     "generation_params": {
       "num_beams": 2,
       "_num_beams_comment": "Beam search width. Higher = better quality but slower; 1 = greedy (fastest). 2 balances quality against latency for real-time captioning.",

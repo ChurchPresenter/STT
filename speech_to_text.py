@@ -753,9 +753,13 @@ def _load_ct2_translator(hf_model_path, model_id, use_gpu, ct2_compute_type):
         print(f"[CT2] Converting {model_id} -> {ct2_dir} ({compute_type})... one-time", flush=True)
         from ctranslate2.converters import TransformersConverter
         TransformersConverter(hf_model_path).convert(ct2_dir, quantization=compute_type, force=False)
-    translator = ctranslate2.Translator(ct2_dir, device=device, compute_type=compute_type)
+    _lt = config.get("live_translation", {})
+    intra = max(0, int(_lt.get("ct2_intra_threads", 4)))   # CPU compute threads (P-cores)
+    inter = max(1, int(_lt.get("ct2_inter_threads", 1)))   # parallel batches
+    translator = ctranslate2.Translator(ct2_dir, device=device, compute_type=compute_type,
+                                        intra_threads=intra, inter_threads=inter)
     _live_translation_device = device
-    print(f"[CT2] Translator loaded ({device}, {compute_type})")
+    print(f"[CT2] Translator loaded ({device}, {compute_type}, intra={intra} inter={inter})")
     return translator
 
 
