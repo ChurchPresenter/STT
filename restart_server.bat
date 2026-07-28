@@ -5,6 +5,12 @@ REM Called from server settings page via /api/server/restart
 
 cd /d "%~dp0"
 
+REM Show current version (git) — like update_server
+git rev-parse --git-dir >nul 2>&1 && (
+    echo [GIT] Current version:
+    git log --oneline -1
+)
+
 echo [RESTART] Stopping server...
 
 REM ─── Kill python processes running speech_to_text.py ───────────────

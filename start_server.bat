@@ -3,6 +3,12 @@ REM Speech-to-Text Start Script (Windows)
 
 cd /d "%~dp0"
 
+REM Show current version (git) — like update_server
+git rev-parse --git-dir >nul 2>&1 && (
+    echo [GIT] Current version:
+    git log --oneline -1
+)
+
 REM Check if already running
 tasklist /FI "IMAGENAME eq python.exe" /FO CSV 2>nul | findstr /I "speech_to_text" >nul 2>&1
 if %errorlevel% equ 0 (
