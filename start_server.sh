@@ -13,9 +13,20 @@ RED='\033[0;31m'
 YELLOW='\033[1;33m'
 NC='\033[0m'
 
-# Show current version (git) — like update_server.sh
+# Show current version + update status (git) — like update_server.sh. The app
+# applies any pending update itself on startup (server.log); this just surfaces it.
 if command -v git >/dev/null 2>&1 && git -C "$SCRIPT_DIR" rev-parse --git-dir >/dev/null 2>&1; then
     echo -e "${GREEN}[GIT]${NC} $(git -C "$SCRIPT_DIR" rev-parse --abbrev-ref HEAD) @ $(git -C "$SCRIPT_DIR" log --oneline -1)"
+    UPSTREAM=$(git -C "$SCRIPT_DIR" rev-parse --abbrev-ref --symbolic-full-name '@{u}' 2>/dev/null)
+    if [ -n "$UPSTREAM" ]; then
+        git -C "$SCRIPT_DIR" fetch --quiet 2>/dev/null
+        BEHIND=$(git -C "$SCRIPT_DIR" rev-list --count "HEAD..$UPSTREAM" 2>/dev/null || echo 0)
+        if [ "${BEHIND:-0}" -gt 0 ]; then
+            echo -e "${YELLOW}[GIT]${NC} Update available: $BEHIND commit(s) behind $UPSTREAM — applied on startup"
+        else
+            echo -e "${GREEN}[GIT]${NC} Up to date with $UPSTREAM"
+        fi
+    fi
 fi
 
 # Determine Python binary

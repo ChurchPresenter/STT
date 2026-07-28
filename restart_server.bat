@@ -5,10 +5,12 @@ REM Called from server settings page via /api/server/restart
 
 cd /d "%~dp0"
 
-REM Show current version (git) — like update_server
+REM Show current version + update status (git) — like update_server
 git rev-parse --git-dir >nul 2>&1 && (
     echo [GIT] Current version:
     git log --oneline -1
+    git fetch --quiet >nul 2>&1
+    for /f %%b in ('git rev-list --count HEAD..@{u} 2^>nul') do if not "%%b"=="0" echo [GIT] Update available: %%b commit^(s^) behind -- applied on startup
 )
 
 echo [RESTART] Stopping server...
