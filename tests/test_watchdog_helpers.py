@@ -592,3 +592,20 @@ class TestStepDepsGitGuard:
         p = self._provisioner(fake_run)
         p._step_deps()  # git-less installs stay fine without VCS requirements
         assert "pip" in seen["cmd"]
+
+
+class TestUpdateWindowOpen:
+    def test_startup_applies_at_any_hour(self):
+        # A machine that just booted (missed the 1am window) catches up now.
+        for hour in (0, 9, 14, 23, watchdog.UPDATE_HOUR):
+            assert watchdog._update_window_open(True, hour) is True
+
+    def test_non_startup_only_at_update_hour(self):
+        assert watchdog._update_window_open(False, watchdog.UPDATE_HOUR) is True
+        for hour in (0, 2, 9, 14, 23):
+            if hour != watchdog.UPDATE_HOUR:
+                assert watchdog._update_window_open(False, hour) is False
+
+    def test_custom_update_hour(self):
+        assert watchdog._update_window_open(False, 3, update_hour=3) is True
+        assert watchdog._update_window_open(False, 4, update_hour=3) is False

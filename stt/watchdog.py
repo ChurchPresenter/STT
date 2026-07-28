@@ -152,6 +152,7 @@ _LAUNCH_HEAD = None
 BACKOFF = [5, 10, 30, 60]       # seconds between crash restarts; capped at last entry
 STABLE_RUN_THRESHOLD = 30        # seconds of uptime before resetting crash counter
 UPDATE_HOUR = 1                  # hour (24h) at which daily update check fires
+STARTUP_UPDATE_DELAY_S = 120     # grace after boot before a startup catch-up apply
 
 # Files/dirs inside SOURCE never discarded by the zipball-fallback update path.
 # "config" holds gitignored live user settings next to tracked *.default.json
@@ -463,6 +464,13 @@ def _watchdog_control_loop(state, pm, updater):
         except Exception:
             pass
         time.sleep(2)
+
+
+def _update_window_open(startup, hour, update_hour=UPDATE_HOUR):
+    """Whether the scheduler may APPLY a pending update now: once on startup
+    (catch-up for machines that were powered off at update_hour and would
+    otherwise never update), otherwise only at update_hour."""
+    return bool(startup) or hour == update_hour
 
 
 def load_config():
@@ -1878,14 +1886,26 @@ class AutoUpdater:
         t.start()
 
     def _scheduler_loop(self):
+        # Startup catch-up: a machine powered off at UPDATE_HOUR never applies its
+        # pending update; do it once shortly after boot instead (idle-gated, same
+        # as 1am). Grace first so pm.start() (which runs right after run_scheduler)
+        # has launched the server before we might restart it.
+        for _ in range(STARTUP_UPDATE_DELAY_S // 5):
+            if self.state.get("stop_requested"):
+                return
+            time.sleep(5)
+
+        startup = True
         while not self.state.get("stop_requested"):
             self.check_for_update()
-            if datetime.datetime.now().hour == UPDATE_HOUR and self._pending_update:
+            if _update_window_open(startup, datetime.datetime.now().hour) and self._pending_update:
                 if self._transcription_active():
                     logging.info("[AU] Update pending but transcription active — deferring")
                 else:
-                    logging.info("[AU] 1am auto-apply triggered")
+                    logging.info("[AU] %s auto-apply triggered",
+                                 "startup catch-up" if startup else "1am")
                     self.apply_pending_update()
+            startup = False
             # Sleep one hour in 60s increments so stop_requested is checked promptly
             for _ in range(60):
                 if self.state.get("stop_requested"):
