@@ -9,6 +9,7 @@ from stt.nllb_catalog import (
     get_default_nllb_models,
     get_nllb_model_description,
     is_madlad_model,
+    madlad_anti_repetition_defaults,
     madlad_target_code,
     supported_target,
 )
@@ -100,6 +101,18 @@ class TestEngineDetectionAndValidation:
         assert supported_target("es", "madlad") is True
         assert supported_target("zz", "nllb") is False
         assert supported_target("zz", "madlad") is False
+
+
+class TestMadladAntiRepetition:
+    def test_neutral_defaults_are_nudged(self):
+        assert madlad_anti_repetition_defaults(1.0, 0) == (1.1, 4)
+
+    def test_operator_tuned_values_pass_through(self):
+        assert madlad_anti_repetition_defaults(1.3, 3) == (1.3, 3)
+
+    def test_only_the_neutral_one_is_nudged(self):
+        assert madlad_anti_repetition_defaults(1.2, 0) == (1.2, 4)
+        assert madlad_anti_repetition_defaults(1.0, 5) == (1.1, 5)
 
 
 class TestDefaultMadladModels:

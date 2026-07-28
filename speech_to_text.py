@@ -688,6 +688,7 @@ from stt.nllb_catalog import (  # noqa: F401
     build_madlad_input,
     is_madlad_model,
     get_default_madlad_models,
+    madlad_anti_repetition_defaults,
 )
 from stt.ct2_translate import (  # noqa: F401
     resolve_compute_type as _ct2_resolve_compute_type,
@@ -899,6 +900,9 @@ def _translate_text_ct2(text, source_lang, target_lang, translator, tokenizer,
     num_beams = max(1, int(gp.get("num_beams", 2)))
     no_repeat = int(gp.get("no_repeat_ngram_size", 0))
     rep_pen = float(gp.get("repetition_penalty", 1.0))
+    if _is_madlad:
+        # MADLAD can loop; apply safe anti-repetition defaults unless tuned.
+        rep_pen, no_repeat = madlad_anti_repetition_defaults(rep_pen, no_repeat)
 
     want_extras = return_confidence or num_alternatives > 0
     num_hyp = min(num_alternatives + 1, 5) if num_alternatives > 0 else 1
@@ -1000,6 +1004,10 @@ def translate_text(text, source_lang, target_lang, model, tokenizer, return_conf
     length_penalty = gp.get("length_penalty", 1.0)
     no_repeat_ngram_size = gp.get("no_repeat_ngram_size", 0)
     repetition_penalty = gp.get("repetition_penalty", 1.0)
+    if _is_madlad:
+        # MADLAD can loop; apply safe anti-repetition defaults unless tuned.
+        repetition_penalty, no_repeat_ngram_size = madlad_anti_repetition_defaults(
+            repetition_penalty, no_repeat_ngram_size)
 
     generate_kwargs = {
         "max_length": 1024,

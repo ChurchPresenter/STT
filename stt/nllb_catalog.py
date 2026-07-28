@@ -7,7 +7,7 @@ the monolith's import-time side effects. Stdlib-only; no config needed.
 
 from __future__ import annotations
 
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Tuple
 
 # UI short code -> NLLB FLORES-200 code. "auto"/unknown fall back to English.
 NLLB_LANG_CODES: Dict[str, str] = {
@@ -212,6 +212,16 @@ def supported_target(lang: str, method: str) -> bool:
     """Whether a UI target-language short code is valid for the active engine."""
     table = MADLAD_LANG_CODES if method == "madlad" else NLLB_LANG_CODES
     return lang in table
+
+
+def madlad_anti_repetition_defaults(repetition_penalty: float, no_repeat_ngram_size: int) -> Tuple[float, int]:
+    """Anti-repetition generation params for MADLAD, which can fall into
+    repetition loops. Nudges the neutral defaults to safe values but keeps any
+    operator-tuned settings: repetition_penalty 1.0 -> 1.1, no_repeat 0 -> 4.
+    Returns (repetition_penalty, no_repeat_ngram_size)."""
+    rep = repetition_penalty if (repetition_penalty and repetition_penalty != 1.0) else 1.1
+    nr = no_repeat_ngram_size if (no_repeat_ngram_size and no_repeat_ngram_size > 0) else 4
+    return rep, nr
 
 
 def get_default_madlad_models() -> List[Dict[str, Any]]:
