@@ -1155,6 +1155,15 @@
                 // Repopulate the model dropdown for the selected engine, keeping
                 // the current selection if it exists in the new engine's list.
                 loadNLLBModels(method, document.getElementById('translation_model').value);
+                // MADLAD can loop: reflect its anti-repetition defaults in the
+                // sliders when they're left neutral (matches what the backend
+                // applies). Programmatic value set → no spurious "unsaved" flag.
+                if (method === 'madlad') {
+                    const rp = document.getElementById('repetition_penalty');
+                    if (parseFloat(rp.value) === 1.0) { rp.value = 1.1; document.getElementById('repPenaltyValue').textContent = '1.1'; }
+                    const nr = document.getElementById('no_repeat_ngram_size');
+                    if (parseInt(nr.value, 10) === 0) { nr.value = 4; document.getElementById('noRepeatValue').textContent = '4'; }
+                }
             } else {
                 nllbRemoteSection.style.display = 'none';
                 nllbSettingsGroup.style.display = 'none';
