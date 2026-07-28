@@ -339,12 +339,19 @@
                         <!-- Left Column: Configuration Form -->
                         <div class="config-form">
                             <div class="form-group">
-                                <label for="config_context">Configure Model For</label>
-                                <select id="config_context" onchange="updateConfigUI()">
-                                    <option value="live">🎙️ Live Transcription</option>
-                                    <option value="translation">🌐 Translation</option>
-                                    <option value="file">📁 File Transcription</option>
-                                </select>
+                                <label>Configure Model For</label>
+                                <style>
+                                    .ctx-btn-group { display:flex; gap:6px; flex-wrap:wrap; }
+                                    .ctx-btn { flex:1 1 0; min-width:120px; padding:9px 12px; border:1px solid var(--border); background:var(--bg-elevated); color:var(--text-primary); border-radius:var(--radius-sm); cursor:pointer; font-size:0.9em; text-align:center; }
+                                    .ctx-btn:hover { border-color:var(--accent); }
+                                    .ctx-btn.active { background:var(--accent); color:var(--text-primary); border-color:var(--accent); font-weight:600; }
+                                </style>
+                                <div class="ctx-btn-group">
+                                    <button type="button" class="ctx-btn active" data-ctx="live" onclick="setConfigContext('live')">🎙️ Live Transcription</button>
+                                    <button type="button" class="ctx-btn" data-ctx="translation" onclick="setConfigContext('translation')">🌐 Translation</button>
+                                    <button type="button" class="ctx-btn" data-ctx="file" onclick="setConfigContext('file')">📁 File Transcription</button>
+                                </div>
+                                <input type="hidden" id="config_context" value="live">
                                 <small>Choose which context to configure</small>
                             </div>
 
@@ -1370,6 +1377,19 @@
                 modelType = 'whisper';
             }
             document.getElementById('config_model_type').value = modelType;
+        }
+
+        // "Configure Model For" is a 3-button group backed by the hidden
+        // #config_context input, so existing reads of its .value still work.
+        function setConfigContext(val) {
+            const inp = document.getElementById('config_context');
+            if (inp.value === val) return;
+            inp.value = val;
+            document.querySelectorAll('.ctx-btn').forEach(function (b) {
+                b.classList.toggle('active', b.dataset.ctx === val);
+            });
+            updateConfigUI();
+            inp.dispatchEvent(new Event('change'));  // fire listeners (custom-HF sync, etc.)
         }
 
         function updateConfigUI() {
