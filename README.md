@@ -18,9 +18,10 @@ Real-time speech transcription platform with a modern web interface, powered by 
 - **Device auto-recovery** - Re-finds the microphone by card name after reboots or device-index changes
 
 ### Translation & speech
-- **Translation** - Real-time translation to 200+ languages using Facebook NLLB-200
+- **Translation** - Real-time translation to 200+ languages using Facebook NLLB-200 or Google MADLAD-400, selectable per install
+- **CTranslate2 int8 backend** - Optional quantised inference for either translation engine, converted locally on first use (MADLAD-3B in ~3 GB). CUDA and CPU; no Apple Metal, so Apple Silicon runs CPU int8
 - **Remote translation offload** - Pair with another STT machine and offload translation to it, with reachability checks and configurable fallback
-- **Custom dictionary & glossary** - Domain-specific term corrections, forced NLLB translations, synced to the paired remote machine
+- **Custom dictionary & glossary** - Domain-specific term corrections, forced translations, synced to the paired remote machine
 - **Text-to-Speech** - Edge-TTS (cloud) and Piper-TTS (local) with auto voice switching per language and speed control
 
 ### Display & output
@@ -41,7 +42,8 @@ Real-time speech transcription platform with a modern web interface, powered by 
 - **Remote file delivery** - Automatic backup to SMB/NAS shares
 
 ### Operations
-- **Model manager** - Browse, search, and download Whisper, NLLB, VAD, and PANNs models from Hugging Face, or upload local models
+- **Model manager** - Browse, search, and download Whisper, NLLB, MADLAD, VAD, and PANNs models from Hugging Face, or upload local models
+- **Unattended start** - `audio.autostart` begins live transcription at server launch with no UI interaction; combined with the watchdog, transcription resumes by itself after a crash or update
 - **Security** - IP whitelist (CIDR), password authentication, session timeouts
 - **Hardware acceleration** - NVIDIA CUDA and Apple Silicon (MPS) with automatic detection
 - **Crash recovery & auto-update** - Watchdog process manager restarts STT on crashes; idle-gated updates with stable/beta channels
@@ -151,7 +153,7 @@ See [INSTALL.md](INSTALL.md) for detailed installation instructions, system requ
 
 ### Transcription + Translation (minimum)
 - **CPU:** 8 cores | **RAM:** 16 GB | **Storage:** 25 GB
-- The NLLB translation model adds several GB of RAM and disk.
+- The translation model adds several GB of RAM and disk — NLLB-600M is the lightest at ~1.2 GB, MADLAD-3B the heaviest commonly used at ~12 GB. Enabling the CTranslate2 int8 backend cuts the runtime footprint substantially (MADLAD-3B to ~3 GB).
 
 ### Example configurations
 
@@ -165,6 +167,7 @@ Actual requirements depend on which models you configure. A few representative s
 | Accurate, NVIDIA GPU | `large-v3` (faster-whisper) | off / remote | ~4.5 GB VRAM + ~5 GB RAM | 6 GB GPU (RTX 2060 / 3050) |
 | Full stack, NVIDIA GPU | `large-v3` (faster-whisper) | NLLB-1.3B on GPU | ~8 GB VRAM + ~6 GB RAM | 10-12 GB GPU (RTX 3060 12GB+) |
 | Apple Silicon | `small` + NLLB-600M | local, on GPU | ~10 GB unified memory | M1 or later with 16 GB |
+| MADLAD, CTranslate2 int8 | `small` (faster-whisper) | MADLAD-3B int8 | ~3 GB for translation + ~5.5 GB RAM | 16 GB PC or Mac (CPU int8 on Apple Silicon) |
 
 Estimates include a ~4 GB app/OS baseline. The faster-whisper backend (int8) needs roughly half the memory of openai-whisper (fp32); Apple Silicon shares one memory pool between CPU and GPU. The web UI shows a warning banner whenever the machine falls short of what the currently configured models need.
 
@@ -182,21 +185,52 @@ Edit `config/config.json` or use the web interface. Key settings include:
 
 - Model selection (Whisper variant, backend)
 - Audio device selection (FFmpeg-based capture)
+- Unattended transcription start (`audio.autostart`, see below)
 - Voice Activity Detection (Silero VAD) threshold
 - Database paths and naming format
 - Audio backup paths and formats
 - Translation model and glossary
 - Network host, port, and security
 
+### Unattended start (`audio.autostart`)
+
+Two different things are called "auto-start", and they stack:
+
+| | What it does | Where |
+|---|---|---|
+| **Service auto-start** | Launches the STT *app* when the machine boots or the user logs in | systemd / LaunchAgent / Task Scheduler — see [Persistent service](#persistent-service-auto-start-on-boot) |
+| **`audio.autostart`** | Begins live *transcription* as soon as the app starts, without the UI Start button | `config/config.json`, or the toggle on `/server-settings` |
+
+Set both and a booth PC captions from power-on with nobody touching it. `audio.autostart`
+defaults to `false`, and changing it **applies on the next server start** — the key is read
+once at launch, so a config save alone won't arm it.
+
+Because the watchdog re-launches the server on crash and after updates, this also means
+transcription resumes unattended mid-service. Note it starts a **new session** rather than
+resuming the old one: a new database and `session_id`, so the transcript splits at the
+restart point, and crash backoff plus device and model init costs 5–60 seconds.
+
+Two failure modes to know before enabling it on a machine you won't be watching:
+
+- **No retry if the audio device isn't ready.** Autostart fires the moment the server
+  reaches its entry point, and the worker opens the device before loading the model. On a
+  cold boot — especially with a USB interface — the card may not have enumerated yet. If
+  device init fails, the worker parks idle and nothing tries again until the process
+  restarts. The bundled systemd unit orders on `network.target` only, not on sound.
+- **A missing microphone doesn't error, it falls back.** Device resolution tries the saved
+  card name, then the configured device, then `default`, then `plughw:0,0`. If your
+  configured input is absent the run can start on a different input and record a full
+  session from it. Confirm the device by name after any hardware change.
+
 ## Privacy & Telemetry
 
-- **Error reporting (Sentry)** - Crash reports, logs, and performance traces are sent to Sentry to help improve STT. Disable via the toggle on `/server-settings` or set `sentry_enabled: false` in `config/config.json` — crash dumps are then kept locally only.
+- **Error reporting (Sentry)** - Crash reports, logs, and performance traces are sent to Sentry to help improve STT. Reports carry the error and its stack trace, the STT version, and OS/Python/CPU details. They deliberately carry **no** transcription or translation text, no audio, no request bodies, no frame locals, no IP addresses or headers, and no hostname — request data is stripped before send and PII is off by default (`sentry_send_pii_optin`). Disable entirely via the toggle on `/server-settings` or set `sentry_enabled: false` in `config/config.json` (applies on restart) — crash dumps are then kept locally in `logs/crashes/` only.
 
 ## Tech Stack
 
 - **Backend:** Python 3.9+ with Flask and Flask-SocketIO
 - **Speech Recognition:** Faster-Whisper (CTranslate2)
-- **Translation:** Facebook NLLB-200 via Hugging Face Transformers
+- **Translation:** Facebook NLLB-200 or Google MADLAD-400 via Hugging Face Transformers, with an optional CTranslate2 (int8) backend
 - **TTS:** Edge-TTS and Piper-TTS
 - **Audio:** FFmpeg for capture and processing, Silero VAD
 - **ML:** PyTorch with CUDA 12.8 support
