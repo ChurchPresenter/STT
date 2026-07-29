@@ -3123,7 +3123,13 @@ def _init_sentry():
         sentry_sdk.init(
             dsn=dsn,
             release=release,
-            send_default_pii=bool(cr.get("sentry_send_pii", True)),
+            # PII off: no client IP addresses, headers or cookies. Opt-in via a
+            # new key — see the note in speech_to_text.py's _init_sentry.
+            send_default_pii=bool(cr.get("sentry_send_pii_optin", False)),
+            # Frame locals can hold install paths and config values.
+            include_local_variables=False,
+            # Otherwise the SDK sends socket.gethostname().
+            server_name="stt",
             # The watchdog logs via the logging module — these become Sentry Logs
             enable_logs=bool(cr.get("sentry_enable_logs", True)),
         )

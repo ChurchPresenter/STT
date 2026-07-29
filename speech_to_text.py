@@ -546,11 +546,38 @@ config = load_config()
 _SENTRY_DEFAULT_DSN = "https://eff01fdec5e9330b80ffd96093038588@o4511050918723584.ingest.us.sentry.io/4511714251702272"
 
 
+def _sentry_scrub_request(event, hint):
+    """Drop the request body, query string and headers from every outgoing
+    event. Transcript segments, glossary terms, file paths and the ?key=
+    access token all travel in those, and none of them are ours to collect —
+    the UI promises no transcription content is sent, and this is what makes
+    that true. Stack traces, versions and OS context still go through."""
+    request = event.get("request")
+    if request:
+        for key in ("data", "query_string", "cookies", "headers", "env"):
+            request.pop(key, None)
+    # ArgvIntegration attaches the command line, which carries the install path
+    # (frequently including the operator's username).
+    extra = event.get("extra")
+    if extra:
+        extra.pop("sys.argv", None)
+    # Subprocess spans are named after the full command line, which for ffmpeg
+    # carries the input device name and for media jobs the file path.
+    for span in event.get("spans") or ():
+        if span.get("op", "").startswith("subprocess"):
+            span["description"] = (span.get("description", "").split() or ["subprocess"])[0]
+            span.pop("data", None)
+    return event
+
+
 def _init_sentry():
     """Sentry error reporting, logs, tracing, and profiling — on by default,
     disabled via crash_reporting.sentry_enabled = false. Runs in the web
     process and again in the transcription worker (which re-imports this
-    module), so both report. Never blocks boot."""
+    module), so both report. Never blocks boot.
+
+    Deliberately configured to carry no user content: no request bodies, no
+    frame locals, no PII (IP addresses/headers). See _sentry_scrub_request."""
     cr = config.get("crash_reporting", {})
     if not cr.get("sentry_enabled", True):
         return
@@ -567,7 +594,21 @@ def _init_sentry():
             dsn=dsn,
             integrations=[FlaskIntegration()],
             release=release,
-            send_default_pii=bool(cr.get("sentry_send_pii", True)),
+            # PII off: no client IP addresses, headers or cookies. Opt-in via a
+            # new key, so installs carrying the old sentry_send_pii=true default
+            # in their config.json are healed rather than grandfathered.
+            send_default_pii=bool(cr.get("sentry_send_pii_optin", False)),
+            # Request bodies can hold transcript text (/api/translate),
+            # dictionary entries and file paths — never send them.
+            max_request_body_size="never",
+            # Frame locals routinely hold the text being transcribed/translated.
+            include_local_variables=False,
+            # Runs on errors and on sampled transactions alike.
+            before_send=_sentry_scrub_request,
+            before_send_transaction=_sentry_scrub_request,
+            # Left unset the SDK fills this with socket.gethostname(), which on
+            # a church PC is often the building or the operator's name.
+            server_name="stt",
             # Forward logging-module records as Sentry Logs (watchdog uses
             # logging heavily; the server mostly print()s, which is not captured)
             enable_logs=bool(cr.get("sentry_enable_logs", True)),

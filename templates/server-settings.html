@@ -356,7 +356,7 @@
                     <input type="checkbox" id="sentry_enabled" name="crash_reporting.sentry_enabled">
                     <label for="sentry_enabled">Send error reports to the developer (Sentry)</label>
                 </div>
-                <small style="display: block; margin: -6px 0 14px 0; color: var(--text-secondary);">Helps diagnose crashes automatically. No transcription content is sent. Requires server restart.</small>
+                <small style="display: block; margin: -6px 0 14px 0; color: var(--text-secondary);">Helps diagnose crashes automatically. Sends the error and its stack trace, the STT version, and your OS, Python and CPU details. No transcription content, no audio, no request bodies, no IP addresses. Requires server restart.</small>
 
                 <button id="main-save-btn" type="submit" class="btn-save" style="background: var(--accent);">💾 Save Settings</button>
                 <button type="button" onclick="updateServer()" class="btn-save" style="background: var(--accent); margin-top: 10px; width: 100%;">⬇️ Update &amp; Restart</button>
