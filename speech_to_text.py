@@ -689,6 +689,8 @@ from stt.nllb_catalog import (  # noqa: F401
     is_madlad_model,
     get_default_madlad_models,
     madlad_anti_repetition_defaults,
+    supported_target,
+    languages_for_method,
 )
 from stt.ct2_translate import (  # noqa: F401
     resolve_compute_type as _ct2_resolve_compute_type,
@@ -4332,7 +4334,8 @@ def update_config():
                     _lt_now.get("translation_method", "nllb"),
                 )
             _new_target = _lt_now.get("target_language")
-            if _new_target and _new_target != _prev_lt_target and _new_target in NLLB_LANG_CODES:
+            if _new_target and _new_target != _prev_lt_target \
+                    and supported_target(_new_target, _lt_now.get("translation_method", "nllb")):
                 # The helper needs config to hold the OLD language so its old!=new
                 # side-effects fire; deep_merge already wrote the new value.
                 config["live_translation"]["target_language"] = _prev_lt_target
@@ -5564,11 +5567,21 @@ def get_translation_settings():
 
     translation_count = config.get("corrections", {}).get("n_best_alternatives", {}).get("translation_count", 3)
 
+    # Each engine supports a different language set (NLLB ~200, MADLAD ~400), so
+    # expose both maps and let the picker swap to the active method's list.
+    active_method = trans_config.get("translation_method", "nllb")
+    languages_by_method = {
+        "nllb": languages_for_method("nllb"),
+        "madlad": languages_for_method("madlad"),
+    }
+
     return jsonify({
         "success": True,
         "settings": trans_config,
         "translation_count": translation_count,
-        "available_languages": TRANSLATION_LANGUAGES,
+        # Back-compat: the active engine's list (older callers read this directly).
+        "available_languages": languages_by_method.get(active_method, languages_by_method["nllb"]),
+        "available_languages_by_method": languages_by_method,
         "model_loaded": is_live_translation_model_loaded(),
         "cache_size": get_translation_cache().get_size()
     })
@@ -5714,7 +5727,7 @@ def save_translation_settings():
     # config all update — not just the translated text. Config still holds the OLD
     # language here (excluded from the merge loop above), so old!=new fires.
     if "target_language" in data and data["target_language"] != old_target_lang \
-            and data["target_language"] in NLLB_LANG_CODES:
+            and supported_target(data["target_language"], new_method):
         _apply_translation_language_switch(data["target_language"])
 
     # Propagate model-load settings (precision / model / GPU) to a paired remote
@@ -5942,7 +5955,8 @@ def hot_switch_translation_language():
     if not new_language:
         return jsonify({"success": False, "error": "target_language required"}), 400
 
-    if new_language not in NLLB_LANG_CODES:
+    _active_method = config.get("live_translation", {}).get("translation_method", "nllb")
+    if not supported_target(new_language, _active_method):
         return jsonify({"success": False, "error": f"Invalid language: {new_language}"}), 400
 
     old_language, new_tts_voice, backend = _apply_translation_language_switch(new_language)
@@ -6421,7 +6435,8 @@ def translate_remote_language():
     global config
     data = request.get_json() or {}
     new_language = data.get("target_language")
-    if not new_language or new_language not in NLLB_LANG_CODES:
+    _active_method = config.get("live_translation", {}).get("translation_method", "nllb")
+    if not new_language or not supported_target(new_language, _active_method):
         return jsonify({"error": "Invalid language"}), 400
 
     old_language = config.get("live_translation", {}).get("target_language", "en")
@@ -7171,7 +7186,8 @@ def hot_switch_all_languages():
 
     # Validate the translation language before mutating anything, so a bad value
     # can't leave transcription switched but translation rejected.
-    if translation_lang and translation_lang not in NLLB_LANG_CODES:
+    _active_method = config.get("live_translation", {}).get("translation_method", "nllb")
+    if translation_lang and not supported_target(translation_lang, _active_method):
         return jsonify({"success": False, "error": f"Invalid translation language: {translation_lang}"}), 400
 
     results = {}
@@ -7482,7 +7498,8 @@ def process_file_transcription(file_path, output_format, session_id, filename, l
         target_language_name = None
 
         # Handle translation if requested
-        if translate_to and translate_to.strip() and translate_to in NLLB_LANG_CODES:
+        _ft_method = config.get("live_translation", {}).get("translation_method", "nllb")
+        if translate_to and translate_to.strip() and supported_target(translate_to, _ft_method):
             source_lang = ft_language if ft_language != "auto" else "en"
 
             # Check translation method

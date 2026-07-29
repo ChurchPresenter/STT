@@ -9,6 +9,7 @@ from stt.nllb_catalog import (
     get_default_nllb_models,
     get_nllb_model_description,
     is_madlad_model,
+    languages_for_method,
     madlad_anti_repetition_defaults,
     madlad_target_code,
     supported_target,
@@ -25,17 +26,26 @@ class TestLanguageTables:
         assert NLLB_LANG_CODES["ru"] == "rus_Cyrl"
         assert NLLB_LANG_CODES["zh"] == "zho_Hans"
 
-    def test_every_ui_name_has_a_flores_code(self):
-        # Every human-readable language (except 'auto', which is code-only)
-        # must resolve to an NLLB code, or the UI would offer a dead option.
-        for code in TRANSLATION_LANGUAGES:
-            assert code in NLLB_LANG_CODES, code
+    def test_every_nllb_code_has_a_name(self):
+        # TRANSLATION_LANGUAGES is the union of both engines' codes, so every
+        # NLLB code (except 'auto', which the UI adds itself) must have a name,
+        # or the picker would show a code where a language label belongs.
+        for code in NLLB_LANG_CODES:
+            if code != "auto":
+                assert code in TRANSLATION_LANGUAGES, code
 
     def test_flores_codes_are_well_formed(self):
         # NLLB codes are '<lang>_<Script>' (e.g. eng_Latn).
         for code in NLLB_LANG_CODES.values():
             lang, _, script = code.partition("_")
             assert lang and script and script[0].isupper(), code
+
+    def test_full_flores_200_set_is_present(self):
+        # We expose the whole FLORES-200 set (202 languages + 'auto').
+        assert len(NLLB_LANG_CODES) >= 200
+        # A couple of long-tail languages that only exist post-expansion.
+        assert "zho-Hant" in NLLB_LANG_CODES
+        assert NLLB_LANG_CODES["zho-Hant"] == "zho_Hant"
 
 
 class TestModelDescription:
@@ -77,10 +87,18 @@ class TestMadladCodes:
     def test_hebrew_uses_google_iw_convention(self):
         assert madlad_target_code("he") == "iw"
 
-    def test_every_ui_name_has_a_madlad_code(self):
-        # Both engines must cover every UI-offered language.
-        for code in TRANSLATION_LANGUAGES:
-            assert code in MADLAD_LANG_CODES, code
+    def test_every_madlad_code_has_a_name(self):
+        # Every MADLAD code (except 'auto') must have a UI name.
+        for code in MADLAD_LANG_CODES:
+            if code != "auto":
+                assert code in TRANSLATION_LANGUAGES, code
+
+    def test_full_madlad_400_set_is_present(self):
+        # MADLAD-400 advertises 400+ languages; we expose the full set.
+        assert len(MADLAD_LANG_CODES) >= 400
+        # Hawaiian is MADLAD-only (not in FLORES-200).
+        assert "haw" in MADLAD_LANG_CODES
+        assert "haw" not in NLLB_LANG_CODES
 
     def test_build_input_prefixes_target_tag(self):
         assert build_madlad_input("hello", "es") == "<2es> hello"
@@ -101,6 +119,27 @@ class TestEngineDetectionAndValidation:
         assert supported_target("es", "madlad") is True
         assert supported_target("zz", "nllb") is False
         assert supported_target("zz", "madlad") is False
+        # MADLAD-only language is valid for MADLAD, rejected for NLLB.
+        assert supported_target("haw", "madlad") is True
+        assert supported_target("haw", "nllb") is False
+
+
+class TestLanguagesForMethod:
+    def test_returns_named_supported_codes_without_auto(self):
+        for method in ("nllb", "madlad"):
+            langs = languages_for_method(method)
+            assert "auto" not in langs
+            table = MADLAD_LANG_CODES if method == "madlad" else NLLB_LANG_CODES
+            # Exactly the engine's non-auto codes, each with a display name.
+            assert set(langs) == {c for c in table if c != "auto"}
+            for code, name in langs.items():
+                assert name and name == TRANSLATION_LANGUAGES[code]
+
+    def test_madlad_offers_more_than_nllb(self):
+        assert len(languages_for_method("madlad")) > len(languages_for_method("nllb"))
+
+    def test_unknown_method_is_treated_as_nllb(self):
+        assert languages_for_method("anything-else") == languages_for_method("nllb")
 
 
 class TestMadladAntiRepetition:
