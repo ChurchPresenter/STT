@@ -84,6 +84,8 @@ Note: The install.sh script detects your platform and GPU automatically.
 python3 -c "import torch; print(f'CUDA available: {torch.cuda.is_available()}')"
 
 # macOS Apple Silicon
+# Note: MPS is used for translation and the OpenAI Whisper backend. The default
+# faster-whisper backend runs CPU int8 on Apple Silicon regardless of this result.
 python3 -c "import torch; print(f'MPS available: {torch.backends.mps.is_available()}')"
 ```
 
@@ -242,7 +244,7 @@ Actual requirements depend on which models you configure. A few representative s
 | Default install, CPU-only | `small` (openai-whisper) | NLLB-600M local | ~9.5 GB RAM | 12 GB PC |
 | Accurate, NVIDIA GPU | `large-v3` (faster-whisper) | off / remote | ~4.5 GB VRAM + ~5 GB RAM | 6 GB GPU (RTX 2060 / 3050) |
 | Full stack, NVIDIA GPU | `large-v3` (faster-whisper) | NLLB-1.3B on GPU | ~8 GB VRAM + ~6 GB RAM | 10-12 GB GPU (RTX 3060 12GB+) |
-| Apple Silicon | `small` + NLLB-600M | local, on GPU | ~10 GB unified memory | M1 or later with 16 GB |
+| Apple Silicon | `small` (CPU int8) | NLLB-600M on MPS | ~10 GB unified memory | M1 or later with 16 GB |
 
 Estimates include a ~4 GB app/OS baseline. The faster-whisper backend (int8) needs roughly half the memory of openai-whisper (fp32); Apple Silicon shares one memory pool between CPU and GPU. Larger NLLB models raise requirements substantially (3.3B ≈ 15 GB RAM on CPU or 8 GB VRAM on GPU), while offloading translation to a remote machine (Live Translation → Remote) keeps the local footprint at transcription-only. The web UI shows a warning banner whenever the machine falls short of what the currently configured models need.
 
@@ -250,7 +252,7 @@ Estimates include a ~4 GB app/OS baseline. The faster-whisper backend (int8) nee
 - **NVIDIA minimum:** GPU with 4GB+ VRAM (RTX 2060 / RTX 3050) — enough for transcription with small/medium models
 - **NVIDIA recommended:** GPU with 10GB+ VRAM (RTX 3060 12GB, RTX 4070 or better) — large models and transcription + translation on GPU
 - **CUDA:** 12.8 compatible drivers (NVIDIA driver R570+), Python 3.10 - 3.13
-- **Apple Silicon:** M1 or later — MPS acceleration is detected and used automatically
+- **Apple Silicon:** M1 or later. MPS is detected and used automatically for **translation** and for the non-default `whisper` (OpenAI) backend. The default `faster-whisper` backend is CTranslate2, which has no Metal support, so **transcription runs on the CPU** in int8 — fast and memory-efficient, but not GPU-accelerated.
 
 > The minimum tiers run CPU-only, which is significantly slower than GPU — larger models add noticeable transcription latency. Lower-spec hardware may still work depending on configuration (e.g. smaller Whisper models, reduced settings), at the cost of accuracy and/or speed. Offloading translation to a remote machine (Live Translation → Remote) keeps the local requirements at the transcription-only tier.
 
