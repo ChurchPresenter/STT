@@ -45,18 +45,16 @@
       window.onload = function (e) {
         getParams("data-start", "data-speed");
         var title_ref = window.document.getElementsByTagName("title")[0];
-        var title = title_ref.text;
+        // Continuous marquee: rotate the whole "title + separator" as one string
+        // so the gap scrolls along with the text and wraps seamlessly, instead
+        // of the letters jumping past a fixed dash.
+        var full = title_ref.text + "   •   ";
         var i = 0;
 
         setTimeout(function () {
           setInterval(function () {
-            title_ref.text =
-              title.substr(i, title.length) + "  ---  " + title.substr(0, i);
-            i++;
-
-            if (i === title.length) {
-              i = 0;
-            }
+            title_ref.text = full.slice(i) + full.slice(0, i);
+            i = (i + 1) % full.length;
           }, speed);
         }, start);
       };
