@@ -58,6 +58,7 @@ for _mig_name in ("config.json", "custom_dictionary.json", "word_highlighting.js
 from stt import paths as _paths
 from stt.paths import safe_model_path  # noqa: F401
 from stt.coercion import coerce_float, coerce_int
+from stt.http_params import merge_request_params
 from stt.model_disk import dir_has_weights, dir_is_writable, has_weight_file, is_weight_file  # noqa: F401
 
 
@@ -4013,6 +4014,18 @@ def page_not_found(e):
         return redirect("/")
 
 
+def _control_params():
+    """Request parameters for a control-surface endpoint, from wherever they came.
+
+    Thin wrapper over stt.http_params.merge_request_params: a show-control system
+    may send a JSON body, a form body, or a query string, and rejecting two of the
+    three looks to the operator like a button that did nothing. Precedence is
+    JSON > form > query; blank values are treated as "not sent" so a surface that
+    posts every field on every press can't blank a setting.
+    """
+    return merge_request_params(request.get_json(silent=True), request.form, request.args)
+
+
 def check_ip_whitelist():
     """Check if the client IP is in the whitelist or has a valid password session"""
     import ipaddress
@@ -4115,6 +4128,22 @@ def _access_log_start_timer():
         pass
 
 
+def _note_access_detail(detail):
+    """Attach a short summary to this request's access-log row.
+
+    Routes opt in and pass only a curated description of what they did — never the
+    raw parameter map, which can contain ?key=<access_token> picked up from the
+    query string. That is the same reason the hook below drops query strings.
+
+    Exists so a control-surface press is self-explaining afterwards: the row alone
+    shows whether the request arrived, what it asked for, and whether anything
+    actually changed. Best-effort — never breaks a request."""
+    try:
+        g._access_log_detail = str(detail)[:300]
+    except Exception:
+        pass
+
+
 @app.after_request
 def _access_log_record(response):
     """Log the request (tagged web vs api). Skips static assets and socket.io
@@ -4122,7 +4151,8 @@ def _access_log_record(response):
     Best-effort — never breaks a response.
 
     The query string is deliberately dropped: it can carry ?key=<access_token>,
-    which must not be written to the log."""
+    which must not be written to the log. Routes that want context in the row
+    call _note_access_detail() with a curated summary instead."""
     try:
         if request_logger is not None and _access_log_enabled():
             path = request.path or ""
@@ -4138,6 +4168,7 @@ def _access_log_record(response):
                     ip=request.remote_addr,
                     user_agent=request.headers.get("User-Agent"),
                     duration_ms=duration_ms,
+                    detail=getattr(g, "_access_log_detail", None),
                 )
     except Exception:
         pass  # request logging must never break a response
@@ -6127,7 +6158,16 @@ def _apply_transcription_language_switch(new_language):
             pass
     # The switch is recorded in the session's provenance by save_config above,
     # via _sync_session_meta_from_config.
-    print(f"[TRANSCRIPTION] Hot-switched language: {old_language} -> {new_language}")
+    #
+    # Say plainly when nothing changed. A fixed-language button pressed while
+    # already in that language is a legitimate no-op, and logging it as
+    # "Hot-switched language: ru -> ru" reads as a switch that happened — which is
+    # indistinguishable from a press that failed when you're reading the log
+    # afterwards trying to tell those two apart.
+    if old_language == new_language:
+        print(f"[TRANSCRIPTION] Language already {new_language}, no change")
+    else:
+        print(f"[TRANSCRIPTION] Hot-switched language: {old_language} -> {new_language}")
     return old_language
 
 
@@ -6208,7 +6248,13 @@ def _apply_translation_language_switch(new_language):
     # Don't clear cache — old segments keep their cached translations (stale-lang fallback).
     # Only new segments will be translated to the new language.
     language_name = TRANSLATION_LANGUAGES.get(new_language, new_language)
-    print(f"[LIVE-TRANSLATION] Hot-switched language: {old_language} -> {new_language} ({language_name})")
+    # Distinguish a real switch from a no-op, for the same reason as the
+    # transcription helper: otherwise the log can't tell "already there" from
+    # "the press never took effect".
+    if old_language == new_language:
+        print(f"[LIVE-TRANSLATION] Language already {new_language} ({language_name}), no change")
+    else:
+        print(f"[LIVE-TRANSLATION] Hot-switched language: {old_language} -> {new_language} ({language_name})")
 
     # Notify clients so they can cleanly reset their display
     socketio.emit("language_switched", {
@@ -6222,26 +6268,39 @@ def _apply_translation_language_switch(new_language):
 
 @app.route("/api/translation/language", methods=["POST"])
 def hot_switch_translation_language():
-    """Hot-switch target language without restart - clears cache and re-translates"""
+    """Hot-switch target language without restart - clears cache and re-translates.
+
+    Accepts JSON body, form body, or query string (see stt/http_params.py)."""
     if not check_ip_whitelist():
         return jsonify({"success": False, "error": "Access Denied"}), 403
 
-    data = request.get_json(silent=True) or {}
+    data = _control_params()
     new_language = data.get("target_language")
 
     if not new_language:
+        _note_access_detail(
+            f"rejected: no target_language field (json={len(request.get_json(silent=True) or {})} "
+            f"form={len(request.form)} query={len(request.args)})"
+        )
         return jsonify({"success": False, "error": "target_language required"}), 400
 
     _active_method = config.get("live_translation", {}).get("translation_method", "nllb")
     if not supported_target(new_language, _active_method):
+        _note_access_detail(f"rejected: target_language={new_language} unsupported by {_active_method}")
         return jsonify({"success": False, "error": f"Invalid language: {new_language}"}), 400
 
     old_language, new_tts_voice, backend = _apply_translation_language_switch(new_language)
+    _note_access_detail(
+        f"translation {old_language}->{new_language} "
+        f"{'changed' if old_language != new_language else 'unchanged'}")
 
     language_name = TRANSLATION_LANGUAGES.get(new_language, new_language)
     result = {
         "success": True,
-        "message": f"Switched to {language_name}. Translations will update shortly.",
+        "changed": old_language != new_language,
+        "message": (f"Switched to {language_name}. Translations will update shortly."
+                    if old_language != new_language
+                    else f"Already set to {language_name}; nothing changed."),
         "old_language": old_language,
         "new_language": new_language,
         "language_name": language_name,
@@ -7408,22 +7467,35 @@ def get_transcription_language():
 @app.route("/api/transcription/language", methods=["POST"])
 def hot_switch_transcription_language():
     """Hot-switch transcription language without restart
+
+    Accepts the parameter as a JSON body, form-encoded body, or query string, so a
+    control surface that doesn't set Content-Type isn't rejected as though it sent
+    nothing (see stt/http_params.py).
     Example: POST /api/transcription/language {"language": "en"}
-    Example: POST /api/transcription/language {"language": "auto"}"""
+    Example: POST /api/transcription/language?language=auto"""
     if not check_ip_whitelist():
         return jsonify({"success": False, "error": "Access Denied"}), 403
 
-    data = request.get_json(silent=True) or {}
+    data = _control_params()
     new_language = data.get("language")
 
     if not new_language:
+        _note_access_detail(
+            f"rejected: no language field (json={len(request.get_json(silent=True) or {})} "
+            f"form={len(request.form)} query={len(request.args)})"
+        )
         return jsonify({"success": False, "error": "language required"}), 400
 
     old_language = _apply_transcription_language_switch(new_language)
+    changed = old_language != new_language
+    _note_access_detail(
+        f"transcription {old_language}->{new_language} {'changed' if changed else 'unchanged'}")
 
     return jsonify({
         "success": True,
-        "message": f"Transcription language switched to {new_language}. Takes effect on next audio chunk.",
+        "changed": changed,
+        "message": (f"Transcription language switched to {new_language}. Takes effect on next audio chunk."
+                    if changed else f"Transcription language was already {new_language}; nothing changed."),
         "old_language": old_language,
         "new_language": new_language
     })
@@ -7447,24 +7519,39 @@ def get_all_languages():
 
 @app.route("/api/language", methods=["POST"])
 def hot_switch_all_languages():
-    """Hot-switch both transcription and translation languages
+    """Hot-switch both transcription and translation languages.
+
+    Accepts JSON body, form body, or query string (see stt/http_params.py), and
+    reports per-field whether the value actually changed — a surface that sends a
+    fixed language on every press needs to distinguish "already there" from
+    "didn't work".
     Example: POST /api/language {"transcription": "en", "translation": "es"}
-    Example: POST /api/language {"transcription": "auto", "translation": "fr"}"""
+    Example: POST /api/language?transcription=auto&translation=fr"""
     if not check_ip_whitelist():
         return jsonify({"success": False, "error": "Access Denied"}), 403
 
-    data = request.get_json(silent=True) or {}
+    data = _control_params()
 
     transcription_lang = data.get("transcription")
     translation_lang = data.get("translation")
 
     if not transcription_lang and not translation_lang:
+        # Record which sources were present but empty-handed. A surface whose body
+        # didn't arrive as expected looks identical to one that sent nothing at
+        # all; the counts distinguish them. Counts only — the values can include
+        # ?key=<access_token> from the query string.
+        _note_access_detail(
+            "rejected: no language fields "
+            f"(json={len(request.get_json(silent=True) or {})} "
+            f"form={len(request.form)} query={len(request.args)})"
+        )
         return jsonify({"success": False, "error": "At least one of 'transcription' or 'translation' required"}), 400
 
     # Validate the translation language before mutating anything, so a bad value
     # can't leave transcription switched but translation rejected.
     _active_method = config.get("live_translation", {}).get("translation_method", "nllb")
     if translation_lang and not supported_target(translation_lang, _active_method):
+        _note_access_detail(f"rejected: translation={translation_lang} unsupported by {_active_method}")
         return jsonify({"success": False, "error": f"Invalid translation language: {translation_lang}"}), 400
 
     results = {}
@@ -7474,7 +7561,11 @@ def hot_switch_all_languages():
     # propagation, client event) fires identically no matter which route is hit.
     if transcription_lang:
         old_trans = _apply_transcription_language_switch(transcription_lang)
-        results["transcription"] = {"old": old_trans, "new": transcription_lang}
+        results["transcription"] = {
+            "old": old_trans,
+            "new": transcription_lang,
+            "changed": old_trans != transcription_lang,
+        }
 
     if translation_lang:
         old_target, _tts_voice, _backend = _apply_translation_language_switch(translation_lang)
@@ -7482,11 +7573,21 @@ def hot_switch_all_languages():
             "old": old_target,
             "new": translation_lang,
             "language_name": TRANSLATION_LANGUAGES.get(translation_lang, translation_lang),
+            "changed": old_target != translation_lang,
         }
 
+    # Top-level `changed` so a surface can tell "applied" from "already there"
+    # without inspecting each field. Both are successes; only a non-2xx is not.
+    any_changed = any(r.get("changed") for r in results.values())
+    _note_access_detail("; ".join(
+        f"{field} {r['old']}->{r['new']} {'changed' if r.get('changed') else 'unchanged'}"
+        for field, r in results.items()
+    ) or "no fields applied")
     return jsonify({
         "success": True,
-        "message": "Language settings updated. Changes take effect immediately.",
+        "changed": any_changed,
+        "message": ("Language settings updated. Changes take effect immediately."
+                    if any_changed else "Already set to the requested languages; nothing changed."),
         "changes": results
     })
 

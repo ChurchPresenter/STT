@@ -47,6 +47,7 @@ module = [
     "stt.calibration",
     "stt.model_memory",
     "stt.session_meta",
+    "stt.http_params",
 ]
 disallow_untyped_defs = true
 
