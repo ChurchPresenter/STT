@@ -2764,13 +2764,11 @@
                     modelData.live_model = modelConfig;
                     // Update the UI
                     document.getElementById('config_live_whisper_model').value = modelName;
-                    document.getElementById('config_live_whisper_english').checked = modelName === 'tiny';
                 }
                 if (context === 'file' || context === 'both') {
                     modelData.file_transcription_model = modelConfig;
                     // Update the UI
                     document.getElementById('config_file_whisper_model').value = modelName;
-                    document.getElementById('config_file_whisper_english').checked = modelName === 'tiny';
                 }
 
                 saveModelManager();
