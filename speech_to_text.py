@@ -13753,6 +13753,7 @@ _DEFAULT_LLM_SYSTEM_PROMPT = (
 
 
 _local_llm = None
+_local_llm_failed = False   # a load that failed once; do not retry per caption
 _local_llm_lock = threading.Lock()
 
 
@@ -13777,7 +13778,7 @@ def get_local_llm():
     one pip dependency and one model file, which is what makes LLM translation
     workable on a fresh Windows/Linux/macOS install where nothing else is present.
     """
-    global _local_llm
+    global _local_llm, _local_llm_failed
     if _local_llm is not None:
         return _local_llm
     if not local_llm_available():
@@ -13794,15 +13795,27 @@ def get_local_llm():
     if not path or not os.path.isfile(path):
         print(f"[LLM-LOCAL] model file not found ({path or 'unset'}); "
               "download it in the Model Manager")
+        _local_llm_failed = True
+        return None
+
+    if _local_llm_failed:
+        # Remember a failed load. Retrying per caption turned one broken install into a
+        # storm of identical multi-second failures, each delaying the caption that then
+        # fell back anyway. Cleared by unload_local_llm() so a config fix can retry.
         return None
 
     with _local_llm_lock:
         if _local_llm is not None:
             return _local_llm
         try:
-            from llama_cpp import Llama
+            # Touch torch.cuda BEFORE importing llama_cpp. The CUDA build links against
+            # the CUDA runtime, which torch ships in site-packages/nvidia/ and only puts
+            # within reach once its CUDA support initialises. Importing llama_cpp first
+            # fails with "libcudart.so.12: cannot open shared object file" even though
+            # the library is present.
             has_gpu = bool(torch.cuda.is_available()
                            or (hasattr(torch.backends, "mps") and torch.backends.mps.is_available()))
+            from llama_cpp import Llama
             n_gpu_layers = _llm_resolve_gpu_layers(llm_cfg.get("n_gpu_layers", "auto"), has_gpu)
             print(f"[LLM-LOCAL] loading {os.path.basename(path)} "
                   f"(n_gpu_layers={n_gpu_layers})...", flush=True)
@@ -13815,6 +13828,7 @@ def get_local_llm():
             print(f"[LLM-LOCAL] loaded {os.path.basename(path)}")
         except Exception as e:
             print(f"[LLM-LOCAL] load failed: {e}")
+            _local_llm_failed = True
             if "libcudart" in str(e) or "cudart64" in str(e):
                 # The CUDA build of llama-cpp-python links against the CUDA runtime,
                 # which torch already ships in site-packages/nvidia/. Importing torch
@@ -13829,9 +13843,10 @@ def get_local_llm():
 
 
 def unload_local_llm():
-    """Release the in-process model (frees its VRAM/RAM for the NMT fallback)."""
-    global _local_llm
+    """Release the in-process model, and allow a later load to be retried."""
+    global _local_llm, _local_llm_failed
     with _local_llm_lock:
+        _local_llm_failed = False
         if _local_llm is not None:
             _local_llm = None
             import gc
