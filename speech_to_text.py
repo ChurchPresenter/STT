@@ -13815,6 +13815,15 @@ def get_local_llm():
             print(f"[LLM-LOCAL] loaded {os.path.basename(path)}")
         except Exception as e:
             print(f"[LLM-LOCAL] load failed: {e}")
+            if "libcudart" in str(e) or "cudart64" in str(e):
+                # The CUDA build of llama-cpp-python links against the CUDA runtime,
+                # which torch already ships in site-packages/nvidia/. Importing torch
+                # first (as this module does long before any translation) normally
+                # makes it resolvable; seeing this means it did not.
+                print("[LLM-LOCAL] the CUDA runtime was not found. torch bundles it in "
+                      "site-packages/nvidia/cuda_runtime/lib — add that to "
+                      "LD_LIBRARY_PATH, or reinstall llama-cpp-python without CUDA "
+                      "to run on CPU.")
             _local_llm = None
     return _local_llm
 
