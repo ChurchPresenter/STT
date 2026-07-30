@@ -52,3 +52,20 @@ sentry-sdk[flask]>=2.0,<3
 
 # Optional: For better performance
 # ffmpeg-python>=0.2.0  # Requires ffmpeg installed on system
+
+# Optional: LLM translation with live_translation.llm.provider = "local".
+# Runs a GGUF in-process — no separate server, installer or port — and unlike an NMT
+# model it can be told the domain ("render biblical terminology as English Bibles
+# do"), which fixes a class of error no decoding parameter reaches. Left commented out
+# because it is a large build and most installs will not use it; the "endpoint"
+# provider needs nothing extra and talks to any OpenAI-compatible server.
+#
+#   pip install llama-cpp-python
+#
+# The PyPI wheel is CPU-only on every platform, which works and is the safe default
+# (a caption is short — measured p50 19 output tokens). For acceleration:
+#   macOS ARM  — the PyPI wheel already includes Metal
+#   CUDA       — needs a matching prebuilt wheel, the same pattern as torch above:
+#                pip install llama-cpp-python \
+#                  --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/<cuda>
+# llama-cpp-python>=0.3.0

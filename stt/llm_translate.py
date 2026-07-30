@@ -24,6 +24,7 @@ caller performs the HTTP request or the in-process call, and passes the raw stri
 
 from __future__ import annotations
 
+import os
 import re
 from typing import Any, Dict, List, Mapping, Optional
 
@@ -108,6 +109,35 @@ def build_chat_payload(model: str, text: str, system_prompt: str, *,
     if extra:
         payload.update(dict(extra))
     return payload
+
+
+def local_model_path(models_dir: str, gguf_repo: str, gguf_file: str) -> str:
+    """Where a downloaded GGUF lives, mirroring how other models are stored.
+
+    The Model Manager keeps a model under a directory named for its repo with "/"
+    replaced by "--" (google/madlad400-3b-mt -> google--madlad400-3b-mt), so a GGUF
+    follows the same convention and is found by the same browse/delete tooling.
+    """
+    return os.path.join(models_dir, gguf_repo.replace("/", "--"), gguf_file)
+
+
+def resolve_gpu_layers(n_gpu_layers: Any, has_gpu: bool) -> int:
+    """Layers to offload to the GPU: -1 for all, 0 for none.
+
+    "auto" (the default) means all layers when an accelerator is present and none
+    otherwise. CPU-only is the safe fallback rather than an error, because a caption
+    is short — measured p50 19 output tokens — so CPU inference is slow but viable,
+    and refusing to run at all would be worse than running slowly.
+    """
+    if isinstance(n_gpu_layers, int):
+        return n_gpu_layers
+    text = str(n_gpu_layers or "auto").strip().lower()
+    if text in ("auto", ""):
+        return -1 if has_gpu else 0
+    try:
+        return int(text)
+    except ValueError:
+        return -1 if has_gpu else 0
 
 
 def extract_chat_text(response: Optional[Mapping[str, Any]]) -> Optional[str]:

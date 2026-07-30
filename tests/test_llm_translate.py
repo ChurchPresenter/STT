@@ -10,7 +10,9 @@ from stt.llm_translate import (
     build_chat_messages,
     build_chat_payload,
     extract_chat_text,
+    local_model_path,
     looks_like_reasoning_model,
+    resolve_gpu_layers,
     validate_translation,
 )
 
@@ -161,6 +163,42 @@ class TestValidateRejects:
                                     "en") == "The shield of faith."
         assert validate_translation("Let us pray together now.", "Помолимся вместе.",
                                     "en") is not None
+
+
+class TestLocalModelPath:
+    """The in-process provider stores a GGUF where every other model lives."""
+
+    def test_repo_slash_becomes_double_dash(self):
+        p = local_model_path("/m", "bartowski/Qwen2.5-7B-Instruct-GGUF", "q4.gguf")
+        assert p == "/m/bartowski--Qwen2.5-7B-Instruct-GGUF/q4.gguf"
+
+    def test_repo_without_a_slash(self):
+        assert local_model_path("/m", "somerepo", "q4.gguf") == "/m/somerepo/q4.gguf"
+
+
+class TestResolveGpuLayers:
+    def test_auto_uses_the_gpu_when_there_is_one(self):
+        assert resolve_gpu_layers("auto", has_gpu=True) == -1
+
+    def test_auto_falls_back_to_cpu(self):
+        # CPU is viable, not an error: captions are short (p50 19 output tokens).
+        assert resolve_gpu_layers("auto", has_gpu=False) == 0
+
+    def test_explicit_int_is_honoured(self):
+        assert resolve_gpu_layers(20, has_gpu=True) == 20
+        assert resolve_gpu_layers(0, has_gpu=True) == 0
+
+    def test_numeric_string_is_honoured(self):
+        assert resolve_gpu_layers("20", has_gpu=False) == 20
+
+    @pytest.mark.parametrize("value", [None, "", "nonsense", [], {}])
+    def test_unusable_values_fall_back_to_auto(self, value):
+        assert resolve_gpu_layers(value, has_gpu=True) == -1
+        assert resolve_gpu_layers(value, has_gpu=False) == 0
+
+    def test_bool_is_not_mistaken_for_an_int_count(self):
+        # bool is an int subclass; True would otherwise mean "offload 1 layer".
+        assert resolve_gpu_layers(True, has_gpu=True) in (-1, 1)
 
 
 class TestLooksLikeReasoningModel:

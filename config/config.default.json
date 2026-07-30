@@ -453,6 +453,8 @@
       "_speed_comment": "Speech speed multiplier (0.5 = half speed, 2.0 = double speed)"
     },
     "llm": {
+      "provider": "endpoint",
+      "_provider_comment": "'local' runs a GGUF in-process via llama-cpp-python: no server, no extra installer, no port — the option that works on a fresh Windows/Linux/macOS install. 'endpoint' talks to any OpenAI-compatible server you already run (Ollama, LM Studio, llama-server, vLLM, hosted).",
       "endpoint": "",
       "_endpoint_comment": "Full chat URL of an OpenAI-compatible server. Empty = LLM translation off. Works with any of them: Ollama 'http://127.0.0.1:11434/api/chat', llama-server / LM Studio / vLLM / hosted 'https://host/v1/chat/completions'. No Ollama dependency.",
       "model": "",
@@ -468,7 +470,17 @@
       "timeout_ms": 8000,
       "_timeout_ms_comment": "Per-caption timeout. On timeout the caption falls back to the NMT model rather than being dropped.",
       "warmup_timeout_ms": 180000,
-      "_warmup_timeout_ms_comment": "Timeout for the one-off warm-up call that loads and pins the model at start. Much longer than timeout_ms because a cold load of a multi-GB model takes far longer than a caption's budget; if the warm-up times out the NMT fallback loads instead and then occupies the VRAM the LLM needed."
+      "_warmup_timeout_ms_comment": "Timeout for the one-off warm-up call that loads and pins the model at start. Much longer than timeout_ms because a cold load of a multi-GB model takes far longer than a caption's budget; if the warm-up times out the NMT fallback loads instead and then occupies the VRAM the LLM needed.",
+      "gguf_repo": "",
+      "_gguf_repo_comment": "provider=local: HuggingFace repo holding the GGUF, e.g. 'bartowski/Qwen2.5-7B-Instruct-GGUF'. Only the single file named in gguf_file is downloaded — these repos publish a dozen quantisations and fetching them all would pull 40+ GB.",
+      "gguf_file": "",
+      "_gguf_file_comment": "The exact quant filename, e.g. 'Qwen2.5-7B-Instruct-Q4_K_M.gguf'. A 7B at Q4 is ~4.7 GB; a 4B is ~2.5 GB and coexists more comfortably with the Whisper model.",
+      "gguf_path": "",
+      "_gguf_path_comment": "Absolute path to a GGUF you supplied yourself. Overrides gguf_repo/gguf_file.",
+      "n_gpu_layers": "auto",
+      "_n_gpu_layers_comment": "provider=local: layers offloaded to the GPU. 'auto' = all when an accelerator is present, none otherwise; -1 = all; 0 = CPU only. CPU works everywhere and is the safe default — a caption is short (measured p50 19 output tokens), so CPU is slow but viable.",
+      "n_ctx": 2048,
+      "_n_ctx_comment": "provider=local: context window. Captions are short; 2048 is ample and keeps memory down."
     }
   },
   "corrections": {

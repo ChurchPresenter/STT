@@ -757,7 +757,10 @@ from stt.ct2_translate import (  # noqa: F401
 )
 # Session provenance: which models/decode settings produced a given transcript.
 from stt.llm_translate import (
+    build_chat_messages as _llm_chat_messages,
     build_chat_payload as _llm_chat_payload,
+    local_model_path as _llm_local_model_path,
+    resolve_gpu_layers as _llm_resolve_gpu_layers,
     extract_chat_text as _llm_extract_text,
     validate_translation as _llm_validate,
 )
@@ -10475,15 +10478,30 @@ save_download_progress()
 cleanup_stale_downloads()
 
 
-def download_hf_repo_files(repo_id, local_dir, download_key, log=print):
-    """Download every file of a HuggingFace repo with resume + cancellation.
+def download_hf_repo_files(repo_id, local_dir, download_key, log=print, include=None):
+    """Download a HuggingFace repo's files with resume + cancellation.
+
+    ``include`` restricts the download to matching filenames (fnmatch patterns, or
+    exact names). Needed for GGUF repos, which publish a dozen quantisations of the
+    same model in one repo — downloading them all would pull 40+ GB to obtain the one
+    file the user picked.
 
     Returns "ok" or "cancelled"; raises on failure after retries."""
+    import fnmatch
+
     from huggingface_hub import list_repo_files, hf_hub_url
 
     os.makedirs(local_dir, exist_ok=True)
     local_root = os.path.abspath(local_dir)
     files = list_repo_files(repo_id=repo_id)
+    if include:
+        patterns = [include] if isinstance(include, str) else list(include)
+        selected = [f for f in files
+                    if any(f == p or fnmatch.fnmatch(f, p) for p in patterns)]
+        if not selected:
+            raise ValueError(f"No file in {repo_id} matches {patterns}")
+        log(f"[DOWNLOAD] {len(selected)} of {len(files)} files match {patterns}")
+        files = selected
     log(f"[DOWNLOAD] Found {len(files)} files to download for {repo_id}")
 
     for idx, filename in enumerate(files):
@@ -13734,6 +13752,101 @@ _DEFAULT_LLM_SYSTEM_PROMPT = (
 )
 
 
+_local_llm = None
+_local_llm_lock = threading.Lock()
+
+
+def local_llm_available():
+    """Whether the in-process GGUF runtime is installed.
+
+    Probed rather than imported, and absent is not an error — the same treatment
+    panns-inference gets, so an install without the optional dependency degrades to
+    the NMT model instead of failing to start.
+    """
+    try:
+        import importlib.util
+        return importlib.util.find_spec("llama_cpp") is not None
+    except Exception:
+        return False
+
+
+def get_local_llm():
+    """Singleton in-process GGUF model, or None if unavailable.
+
+    This is the provider that needs no server, no second installer and no extra port:
+    one pip dependency and one model file, which is what makes LLM translation
+    workable on a fresh Windows/Linux/macOS install where nothing else is present.
+    """
+    global _local_llm
+    if _local_llm is not None:
+        return _local_llm
+    if not local_llm_available():
+        print("[LLM-LOCAL] llama-cpp-python is not installed; "
+              "install it or set live_translation.llm.provider to 'endpoint'")
+        return None
+
+    llm_cfg = config.get("live_translation", {}).get("llm") or {}
+    gguf_repo = (llm_cfg.get("gguf_repo") or "").strip()
+    gguf_file = (llm_cfg.get("gguf_file") or "").strip()
+    path = (llm_cfg.get("gguf_path") or "").strip()
+    if not path and gguf_repo and gguf_file:
+        path = _llm_local_model_path(MODELS_DIR, gguf_repo, gguf_file)
+    if not path or not os.path.isfile(path):
+        print(f"[LLM-LOCAL] model file not found ({path or 'unset'}); "
+              "download it in the Model Manager")
+        return None
+
+    with _local_llm_lock:
+        if _local_llm is not None:
+            return _local_llm
+        try:
+            from llama_cpp import Llama
+            has_gpu = bool(torch.cuda.is_available()
+                           or (hasattr(torch.backends, "mps") and torch.backends.mps.is_available()))
+            n_gpu_layers = _llm_resolve_gpu_layers(llm_cfg.get("n_gpu_layers", "auto"), has_gpu)
+            print(f"[LLM-LOCAL] loading {os.path.basename(path)} "
+                  f"(n_gpu_layers={n_gpu_layers})...", flush=True)
+            _local_llm = Llama(
+                model_path=path,
+                n_ctx=coerce_int(llm_cfg.get("n_ctx"), 2048, lo=512, hi=32768),
+                n_gpu_layers=n_gpu_layers,
+                verbose=False,
+            )
+            print(f"[LLM-LOCAL] loaded {os.path.basename(path)}")
+        except Exception as e:
+            print(f"[LLM-LOCAL] load failed: {e}")
+            _local_llm = None
+    return _local_llm
+
+
+def unload_local_llm():
+    """Release the in-process model (frees its VRAM/RAM for the NMT fallback)."""
+    global _local_llm
+    with _local_llm_lock:
+        if _local_llm is not None:
+            _local_llm = None
+            import gc
+            gc.collect()
+            print("[LLM-LOCAL] model unloaded")
+
+
+def _translate_via_local_llm(text, system_prompt, max_tokens):
+    """One caption through the in-process GGUF model. Returns raw text or None."""
+    llm = get_local_llm()
+    if llm is None:
+        return None
+    try:
+        out = llm.create_chat_completion(
+            messages=_llm_chat_messages(text, system_prompt),
+            temperature=0.0,
+            max_tokens=max_tokens,
+        )
+        return _llm_extract_text(out)
+    except Exception as e:
+        print(f"[LLM-LOCAL] generation failed ({type(e).__name__}: {e})")
+        return None
+
+
 def _translate_via_llm(text, source_lang, target_lang, timeout_override=None):
     """Translate one caption with an LLM. Returns the caption, or None to fall back.
 
@@ -13748,15 +13861,24 @@ def _translate_via_llm(text, source_lang, target_lang, timeout_override=None):
     (``/v1/chat/completions``). Nothing here is Ollama-specific.
     """
     llm_cfg = config.get("live_translation", {}).get("llm") or {}
+    system_prompt = llm_cfg.get("system_prompt") or _DEFAULT_LLM_SYSTEM_PROMPT
+    max_tokens = coerce_int(llm_cfg.get("max_tokens"), 160, lo=16, hi=1024)
+
+    # provider "local" runs the model in-process from a GGUF: no server, no extra
+    # installer, no port — which is what makes this workable on a fresh install that
+    # has no inference runtime of its own.
+    if (llm_cfg.get("provider") or "endpoint").strip().lower() == "local":
+        return _llm_validate(_translate_via_local_llm(text, system_prompt, max_tokens),
+                             text, target_lang)
+
     endpoint = (llm_cfg.get("endpoint") or "").strip()
     model = (llm_cfg.get("model") or "").strip()
     if not endpoint or not model:
         return None
 
     payload = _llm_chat_payload(
-        model, text,
-        llm_cfg.get("system_prompt") or _DEFAULT_LLM_SYSTEM_PROMPT,
-        max_tokens=coerce_int(llm_cfg.get("max_tokens"), 160, lo=16, hi=1024),
+        model, text, system_prompt,
+        max_tokens=max_tokens,
         # keep_alive pins the model in the runtime. Not a nicety: an unpinned model
         # measured p90 4.89s against p50 0.29s purely from being unloaded between
         # captions. Servers that don't know the field ignore it.
