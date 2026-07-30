@@ -439,6 +439,8 @@
       "_model_comment": "NLLB model the remote (Machine B) should run, chosen from B's already-downloaded models. Empty = B uses its own configured model. Set from the 'Machine B model' dropdown on this machine's Translations page."
     },
     "trusted_clients": [],
+    "_trusted_client_ports_comment": "Web UI port of each paired client, keyed by IP (learned at pairing, refreshed by the heartbeat). Lets this machine link back to the machines it translates for. Managed automatically.",
+    "trusted_client_ports": {},
     "_trusted_clients_comment": "IPs allowed to use this machine for remote translation (managed automatically via pairing)",
     "tts": {
       "enabled": false,

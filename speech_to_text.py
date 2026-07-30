@@ -675,20 +675,53 @@ def _is_trusted_translation_client(ip):
     return ip in _trusted_translation_clients
 
 
-def _add_trusted_client(ip):
+def _add_trusted_client(ip, port=None):
     _trusted_translation_clients.add(ip)
     if "live_translation" not in config:
         config["live_translation"] = {}
     trusted = config["live_translation"].setdefault("trusted_clients", [])
     if ip not in trusted:
         trusted.append(ip)
+    if port:
+        _remember_client_port(ip, port, persist=False)
     save_config(config)
+
+
+def _forget_client_port(ip):
+    """Drop a client's stored UI port when it is unpaired."""
+    _translation_client_ports.pop(ip, None)
+    stored = config.get("live_translation", {}).get("trusted_client_ports")
+    if isinstance(stored, dict) and stored.pop(ip, None) is not None:
+        save_config(config)
+
+
+def _remember_client_port(ip, port, persist=True):
+    """Record where a paired client's own UI lives, so we can link back to it.
+
+    Learned at pairing and refreshed by the heartbeat. Stored in its own config
+    map rather than folded into trusted_clients, which is a plain list of IPs
+    that older configs and _is_trusted_translation_client both rely on.
+    """
+    port = coerce_int(port, 0, lo=1, hi=65535)
+    if not port:
+        return
+    _translation_client_ports[ip] = port
+    stored = config.setdefault("live_translation", {}).setdefault("trusted_client_ports", {})
+    if stored.get(ip) != port:
+        stored[ip] = port
+        if persist:
+            save_config(config)
 
 
 # {ip: port} for paired clients that have told us where their own UI lives. Kept
 # beside _translation_clients rather than in it, because that maps ip -> last-seen
-# timestamp and several readers do arithmetic on the value.
-_translation_client_ports = {}
+# timestamp and several readers do arithmetic on the value. Seeded from config so
+# a paired client can be linked to before it has run a session since our restart.
+_translation_client_ports = {
+    str(ip): int(port)
+    for ip, port in (config.get("live_translation", {}).get("trusted_client_ports", {}) or {}).items()
+    if str(port).isdigit()
+}
 
 
 def _register_translation_client(ip, port=None):
@@ -6886,7 +6919,13 @@ def translation_pair_request():
             del _pending_pair_requests[ip]
         if client_ip not in _pending_pair_requests and len(_pending_pair_requests) >= PAIR_MAX_PENDING:
             return jsonify({"error": "Too many pending pair requests, try again later"}), 429
-        _pending_pair_requests[client_ip] = {"code": code, "expires": now + 300, "attempts": 0}
+        _pending_pair_requests[client_ip] = {
+            "code": code, "expires": now + 300, "attempts": 0,
+            # Where A's own UI lives, so B can link back to it without waiting
+            # for a session (the heartbeat only runs while A transcribes).
+            "port": coerce_int((request.get_json(silent=True) or {}).get("port"), 0,
+                               lo=0, hi=65535) or None,
+        }
     socketio.emit("translation_pair_request", {"ip": client_ip, "code": code})
     return jsonify({"status": "pending", "message": "Check the Translations tab on Machine B for the 6-digit code"})
 
@@ -6910,8 +6949,9 @@ def translation_pair_confirm():
                 del _pending_pair_requests[client_ip]
                 return jsonify({"error": "Too many incorrect codes, pairing cancelled"}), 429
             return jsonify({"error": "Invalid or expired code"}), 400
+        _pair_port = coerce_int(data.get("port"), 0, lo=0, hi=65535) or pending.get("port")
         del _pending_pair_requests[client_ip]
-    _add_trusted_client(client_ip)
+    _add_trusted_client(client_ip, _pair_port)
     socketio.emit("translation_pair_confirmed", {"ip": client_ip})
     return jsonify({"status": "paired"})
 
@@ -6925,7 +6965,8 @@ def translation_pair_respond():
     client_ip = data.get("ip", "")
     allow = bool(data.get("allow", False))
     if allow and client_ip:
-        _add_trusted_client(client_ip)
+        _add_trusted_client(client_ip,
+                            (_pending_pair_requests.get(client_ip) or {}).get("port"))
         _pending_pair_requests.pop(client_ip, None)
         socketio.emit("translation_pair_confirmed", {"ip": client_ip})
     else:
@@ -6954,6 +6995,7 @@ def translation_unpair():
     trusted = config.get("live_translation", {}).get("trusted_clients", [])
     if ip in trusted:
         trusted.remove(ip)
+    _forget_client_port(ip)
     save_config(config)
     if not _trusted_translation_clients:
         global _session_glossary_override
@@ -7049,9 +7091,12 @@ def translate_remote_heartbeat():
     client_ip = request.remote_addr
     if not _is_trusted_translation_client(client_ip):
         return jsonify({"error": "Not paired"}), 403
-    _register_translation_client(
-        client_ip, coerce_int((request.get_json(silent=True) or {}).get("port"), 0,
-                              lo=0, hi=65535) or None)
+    _hb_port = coerce_int((request.get_json(silent=True) or {}).get("port"), 0,
+                          lo=0, hi=65535)
+    _register_translation_client(client_ip, _hb_port or None)
+    if _hb_port:
+        # A moved to a different port, or we learned it for the first time.
+        _remember_client_port(client_ip, _hb_port)
     return jsonify({"success": True})
 
 
@@ -7121,6 +7166,7 @@ def translation_unpair_me():
     trusted = config.get("live_translation", {}).get("trusted_clients", [])
     if client_ip in trusted:
         trusted.remove(client_ip)
+    _forget_client_port(client_ip)
     save_config(config)
     # Unload model if no other clients remain
     if not _trusted_translation_clients:
@@ -7572,7 +7618,9 @@ def proxy_pair_request():
         return jsonify({"success": False, "error": "No remote endpoint configured"}), 400
     import requests as _req
     try:
-        r = _req.post(endpoint + "/api/translate/pair/request", timeout=10)
+        r = _req.post(endpoint + "/api/translate/pair/request",
+                      json={"port": coerce_int(config.get("web_server", {}).get("port"),
+                                               8080, lo=1, hi=65535)}, timeout=10)
         try:
             data = r.json()
         except ValueError:
@@ -7595,8 +7643,13 @@ def proxy_pair_confirm():
         return jsonify({"success": False, "error": "No remote endpoint configured"}), 400
     import requests as _req
     try:
-        r = _req.post(endpoint + "/api/translate/pair/confirm",
-                      json=request.get_json() or {}, timeout=10)
+        # Tell B where this machine's own UI lives while we have its attention:
+        # after this exchange B only ever sees our IP, and a durable port means it
+        # can link back to us without waiting for a session to start.
+        _body = dict(request.get_json() or {})
+        _body.setdefault("port", coerce_int(config.get("web_server", {}).get("port"),
+                                            8080, lo=1, hi=65535))
+        r = _req.post(endpoint + "/api/translate/pair/confirm", json=_body, timeout=10)
         try:
             data = r.json()
         except ValueError:
