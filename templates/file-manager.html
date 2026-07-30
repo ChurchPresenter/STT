@@ -1324,7 +1324,7 @@
                     const shown = base[k] === '' ? '—' : base[k];
                     return `<tr>
                         <td style="padding:3px 12px 3px 0;color:var(--text-secondary);white-space:nowrap;vertical-align:top;">${escapeHtml(k)}</td>
-                        <td style="padding:3px 0;vertical-align:top;">${escapeHtml(shown)}${changes}</td>
+                        <td style="padding:3px 0;vertical-align:top;max-width:420px;overflow-wrap:anywhere;">${escapeHtml(shown)}${changes}</td>
                     </tr>`;
                 }).join('');
                 return `<div style="min-width:280px;flex:1;">
@@ -1464,10 +1464,17 @@
                             : `<div style="margin-bottom:8px;color:var(--text-secondary);font-size:0.85em;"><code>${escapeHtml(data.table)}</code> — ${data.total} rows</div>`;
                         // Wide + scrollable (both axes) inside the modal; the table
                         // scrolls, not the page, so the Close button stays visible.
+                        // width:max-content is what makes the sideways scroll work:
+                        // an auto-width table compresses its columns to whatever the
+                        // wrapper offers (the clipped cells let it squeeze without
+                        // limit), so a 20-column transcript rendered as ellipses with
+                        // nothing to scroll to. Sizing to content lets it overflow,
+                        // which is what overflow:auto then picks up; min-width keeps a
+                        // narrow table filling the wrapper instead of floating in it.
                         previewContent.style.maxHeight = '75vh';
                         previewContent.innerHTML = metaPanel + note +
                             `<div style="width:85vw;max-width:1200px;max-height:68vh;overflow:auto;border:1px solid var(--border);border-radius:var(--radius-sm);">
-                                <table style="border-collapse:collapse;font-size:0.85em;font-family:var(--font-mono,monospace);">${head}${body}</table>
+                                <table style="border-collapse:collapse;font-size:0.85em;font-family:var(--font-mono,monospace);width:max-content;min-width:100%;">${head}${body}</table>
                             </div>`;
                     }
                 } catch (error) {
