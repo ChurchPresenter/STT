@@ -13812,7 +13812,9 @@ def get_local_llm():
             # the CUDA runtime, which torch ships in site-packages/nvidia/ and only puts
             # within reach once its CUDA support initialises. Importing llama_cpp first
             # fails with "libcudart.so.12: cannot open shared object file" even though
-            # the library is present.
+            # the library is present. The module-level `torch` is None until the lazy
+            # importer has run, and nothing else in this process has necessarily run it.
+            _lazy_import_ml_libraries()
             has_gpu = bool(torch.cuda.is_available()
                            or (hasattr(torch.backends, "mps") and torch.backends.mps.is_available()))
             from llama_cpp import Llama
