@@ -9463,6 +9463,28 @@ def start_transcription():
                     print(f"[START] Remote translation preload/sync failed: {e}")
             import threading
             threading.Thread(target=_notify_remote_preload, daemon=True).start()
+        elif trans_cfg.get("enabled") and trans_cfg.get("translation_method", "nllb") == "llm":
+            # Warm the LLM, and deliberately NOT the NMT model behind it.
+            #
+            # Preloading the fallback costs ~3.5 GB of VRAM for a model we hope never to
+            # use, and measured on a 10 GB card that starves the thing we do use: with
+            # Whisper (4202 MiB) and the NMT model (3558 MiB) resident, 1976 MiB was
+            # left, the LLM server could not fit a 5 GB model, and every caption timed
+            # out into the fallback — the LLM never ran at all. The NMT model still
+            # loads lazily the first time the LLM declines, so the fallback survives;
+            # it just stops pre-paying for itself.
+            def _warm_llm():
+                try:
+                    target = trans_cfg.get("target_language", "en")
+                    if _translate_via_llm("Здравствуйте.", "ru", target) is not None:
+                        print("[START] LLM translation warmed and pinned")
+                    else:
+                        print("[START] LLM warm-up returned no usable text; "
+                              "captions will fall back to the NMT model")
+                except Exception as e:
+                    print(f"[START] LLM warm-up failed: {e}")
+            import threading
+            threading.Thread(target=_warm_llm, daemon=True).start()
         elif trans_cfg.get("enabled") and trans_cfg.get("translation_method", "nllb") not in (
             "whisper_translate", "whisper_forced_lang"
         ):
