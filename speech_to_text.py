@@ -879,9 +879,26 @@ def load_translation_model(use_gpu=True, model_id=None, use_fp16=False, use_ct2=
         state_dict = torch.load(bin_path, map_location="cpu", weights_only=False)
         model.load_state_dict(state_dict)
     else:
-        model = AutoModelForSeq2SeqLM.from_pretrained(model_path)
+        # Load straight to fp16 when the model is headed for a GPU and fp16 was
+        # asked for, instead of loading fp32 and halving afterwards. That order
+        # holds both copies at once: MADLAD-3B is ~11.8 GB of fp32 weights, so the
+        # peak is ~17.7 GB — more than a 16 GB unified-memory Mac has, which put
+        # MPS out of reach for that model even though its fp16 weights are ~5.9 GB.
+        # low_cpu_mem_usage streams the checkpoint rather than building a second
+        # full copy in RAM first.
+        _load_dtype = _translation_load_dtype(
+            use_fp16, use_gpu, torch.cuda.is_available(),
+            bool(getattr(torch.backends, "mps", None) and torch.backends.mps.is_available()),
+        )
+        _load_kwargs = {}
+        if _load_dtype:
+            _load_kwargs = {"torch_dtype": getattr(torch, _load_dtype), "low_cpu_mem_usage": True}
+        model = AutoModelForSeq2SeqLM.from_pretrained(model_path, **_load_kwargs)
 
     global _live_translation_device
+    # _maybe_half_translation_model stays as the fallback: it is a no-op when the
+    # weights already loaded as fp16, and still does the conversion for the
+    # state-dict branch above (which cannot take a load dtype).
     if use_gpu and torch.cuda.is_available():
         model = model.to("cuda")
         _live_translation_device = "cuda"
@@ -917,6 +934,7 @@ from stt.translation_utils import (
     apply_glossary as _apply_glossary_dict,
     should_cache_translation as _should_cache_translation,
     should_use_fp16 as _should_use_fp16,
+    translation_load_dtype as _translation_load_dtype,
 )
 
 

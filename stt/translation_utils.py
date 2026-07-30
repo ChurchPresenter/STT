@@ -222,3 +222,36 @@ def should_use_fp16(use_fp16: bool, device: str) -> bool:
     many ops, so it is never applied there regardless of the flag.
     """
     return bool(use_fp16) and device in ("cuda", "mps")
+
+
+def translation_device(use_gpu: bool, has_cuda: bool, has_mps: bool) -> str:
+    """Which device the translation model will load onto: 'cuda', 'mps' or 'cpu'.
+
+    CUDA wins over MPS when both somehow appear, matching the load order in
+    speech_to_text.load_translation_model.
+    """
+    if use_gpu and has_cuda:
+        return "cuda"
+    if use_gpu and has_mps:
+        return "mps"
+    return "cpu"
+
+
+def translation_load_dtype(use_fp16: bool, use_gpu: bool,
+                           has_cuda: bool, has_mps: bool) -> Optional[str]:
+    """The dtype to load the model *at*, or None to let transformers decide.
+
+    Deciding this before the load matters for memory, not just speed. Loading
+    fp32 and calling .half() afterwards holds both copies at once: MADLAD-3B is
+    ~11.8 GB of fp32 weights, so the peak is ~17.7 GB — more than a 16 GB unified
+    memory Mac has, which makes MPS unreachable for that model even though the
+    fp16 weights are only ~5.9 GB. Loading straight to fp16 never materialises the
+    fp32 copy.
+
+    Returns "float16" only when fp16 is wanted *and* the model will land on a GPU
+    accelerator, so this agrees with should_use_fp16 about when half precision is
+    appropriate — the two must not disagree, or a model would be loaded fp16 and
+    then not counted as fp16 (or vice versa).
+    """
+    device = translation_device(use_gpu, has_cuda, has_mps)
+    return "float16" if should_use_fp16(use_fp16, device) else None

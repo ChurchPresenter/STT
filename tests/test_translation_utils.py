@@ -8,6 +8,8 @@ from stt.translation_utils import (
     apply_glossary,
     should_cache_translation,
     should_use_fp16,
+    translation_device,
+    translation_load_dtype,
 )
 
 
@@ -255,3 +257,55 @@ class TestShouldUseFp16:
         assert should_use_fp16(False, "cuda") is False
         assert should_use_fp16(False, "mps") is False
         assert should_use_fp16(False, "cpu") is False
+
+
+class TestTranslationDevice:
+    def test_cuda_preferred_when_both_present(self):
+        assert translation_device(True, has_cuda=True, has_mps=True) == "cuda"
+
+    def test_mps_when_no_cuda(self):
+        assert translation_device(True, has_cuda=False, has_mps=True) == "mps"
+
+    def test_cpu_when_no_accelerator(self):
+        assert translation_device(True, has_cuda=False, has_mps=False) == "cpu"
+
+    def test_cpu_when_gpu_disabled(self):
+        assert translation_device(False, has_cuda=True, has_mps=True) == "cpu"
+
+
+class TestTranslationLoadDtype:
+    """Loading straight to fp16 keeps the fp32 copy from ever existing.
+
+    MADLAD-3B is ~11.8 GB of fp32 weights; load-then-.half() peaks at ~17.7 GB,
+    which does not fit in a 16 GB unified-memory Mac even though the fp16 weights
+    are only ~5.9 GB.
+    """
+
+    def test_fp16_on_mps(self):
+        # The case that makes MADLAD-3B reachable on the Mac at all.
+        assert translation_load_dtype(True, True, has_cuda=False, has_mps=True) == "float16"
+
+    def test_fp16_on_cuda(self):
+        assert translation_load_dtype(True, True, has_cuda=True, has_mps=False) == "float16"
+
+    def test_none_when_fp16_not_requested(self):
+        assert translation_load_dtype(False, True, has_cuda=False, has_mps=True) is None
+        assert translation_load_dtype(False, True, has_cuda=True, has_mps=False) is None
+
+    def test_none_on_cpu_even_when_requested(self):
+        # fp16 on CPU is slow/unsupported for many ops.
+        assert translation_load_dtype(True, True, has_cuda=False, has_mps=False) is None
+
+    def test_none_when_gpu_disabled(self):
+        assert translation_load_dtype(True, False, has_cuda=True, has_mps=True) is None
+
+    def test_agrees_with_should_use_fp16_across_the_matrix(self):
+        """The two must never disagree, or a model loads fp16 but isn't counted as fp16."""
+        for use_fp16 in (True, False):
+            for use_gpu in (True, False):
+                for has_cuda in (True, False):
+                    for has_mps in (True, False):
+                        device = translation_device(use_gpu, has_cuda, has_mps)
+                        dtype = translation_load_dtype(use_fp16, use_gpu, has_cuda, has_mps)
+                        assert (dtype == "float16") is should_use_fp16(use_fp16, device), (
+                            use_fp16, use_gpu, has_cuda, has_mps)
