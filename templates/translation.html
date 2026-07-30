@@ -298,7 +298,7 @@
                         <option value="whisper_translate">Whisper Translate (English only)</option>
                         <option value="whisper_forced_lang">Whisper Forced Language (Experimental)</option>
                     </select>
-                    <small id="translation_method_hint" style="color: var(--text-secondary); font-size: 0.75em;">NLLB and MADLAD use a separate model (MADLAD-400 is larger, broader coverage). Whisper methods reuse the transcription model (no extra VRAM).</small>
+                    <small id="translation_method_hint" style="color: var(--text-secondary); font-size: 0.75em;">NLLB and MADLAD use a separate model (MADLAD-400 is larger, broader coverage). An LLM needs a GGUF or an endpoint, and is the only method that can be told the subject matter. Whisper methods reuse the transcription model (no extra VRAM).</small>
                 </div>
 
                 <div id="whisper_translate_warning" style="display:none; background: var(--warning-bg); border: 1px solid var(--warning); border-radius: var(--radius-sm); padding: 8px 12px; margin-bottom: 10px;">
@@ -418,7 +418,7 @@
                     <select id="translation_model" data-a-controlled>
                         <!-- Populated dynamically from downloaded NLLB models -->
                     </select>
-                    <small id="model_hint">Select from downloaded NLLB models</small>
+                    <small id="model_hint">Select from downloaded translation models</small>
                 </div>
 
                 <hr class="divider">
