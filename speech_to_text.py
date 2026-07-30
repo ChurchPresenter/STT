@@ -980,12 +980,12 @@ def _apply_glossary(text, source_lang, target_lang):
         return text
 
 
-def _session_meta_enabled():
+def _session_meta_enabled(session_config=None):
     """Whether provenance recording is on (config/config.default.json: session_meta)."""
-    return bool(config.get("session_meta", {}).get("enabled", True))
+    return bool((session_config or config).get("session_meta", {}).get("enabled", True))
 
 
-def _current_session_meta():
+def _current_session_meta(session_config=None):
     """Provenance mapping for the running config, or {} when disabled.
 
     The ASR model loads at init step 3 and the database is created at step 4, so
@@ -993,11 +993,20 @@ def _current_session_meta():
     values rather than in the change log. The translation model loads lazily
     (usually after the db exists), so its effective values are appended later by
     _record_session_meta_change().
+
+    ``session_config`` describes a config other than this process's global one.
+    The transcription worker outlives a Start/Stop cycle and is reused, so its
+    module-level `config` dates from when the process spawned — it reloads a
+    fresh copy into process_config at each session start (see thread1_function)
+    and must pass it here. Reading the global instead recorded a session as
+    translating locally with MADLAD while it was in fact offloading every caption
+    to a paired remote, which is precisely the misattribution this table exists
+    to prevent.
     """
-    if not _session_meta_enabled():
+    if not _session_meta_enabled(session_config):
         return {}
     meta = _build_session_meta(
-        config, SERVER_VERSION, SERVER_COMMIT, SERVER_DESCRIBE,
+        session_config or config, SERVER_VERSION, SERVER_COMMIT, SERVER_DESCRIBE,
         socket.gethostname(), MADLAD_DEFAULT_MODEL,
     )
     try:
@@ -3340,16 +3349,25 @@ def finalized_audio_type(process_config, state):
     return classify_audio_type(state.get("audio_db"), cfg)
 
 
-def initialize_database():
-    """Initialize database only when transcription starts (lazy loading)"""
+def initialize_database(session_config=None):
+    """Initialize database only when transcription starts (lazy loading)
+
+    ``session_config`` is the config this session actually runs on. The worker
+    process is reused across Start/Stop cycles and reloads config from disk at
+    each session start, so its module-level `config` is whatever was on disk when
+    the process spawned — every setting read here must come from the session's
+    own config or the database is created (and described) from a stale one.
+    """
     global db_name, db_initialized, live_session_id
 
     if db_initialized:
         return db_name
 
+    cfg = session_config or config
+
     # Get custom database path from config or use default
-    custom_db_path = config.get("database", {}).get("path", "").strip()
-    path_format = config.get("database", {}).get("path_format", "").strip() or "%Y/%m"
+    custom_db_path = cfg.get("database", {}).get("path", "").strip()
+    path_format = cfg.get("database", {}).get("path_format", "").strip() or "%Y/%m"
     now = datetime.now()
     formatted_path = now.strftime(path_format)
 
@@ -3369,7 +3387,7 @@ def initialize_database():
     make_dirs_world_readable(folder_name, custom_db_path or BACKUP_DIR)
 
     # Create database file path with configurable format (using Python strftime format)
-    filename_format = config.get("database", {}).get(
+    filename_format = cfg.get("database", {}).get(
         "filename_format", ""
     ).strip() or "%Y-%m-%d_%H%M%S"
 
@@ -3386,7 +3404,7 @@ def initialize_database():
     formatted_filename = now.strftime(filename_format)
 
     # Get custom filename prefix or use default
-    filename_prefix = config.get("database", {}).get("filename_prefix", "").strip()
+    filename_prefix = cfg.get("database", {}).get("filename_prefix", "").strip()
     if filename_prefix:
         db_name = os.path.join(
             folder_name, f"{formatted_filename}_{filename_prefix}.db"
@@ -3603,14 +3621,14 @@ def initialize_database():
         # is restarted or retuned. Written after the init transaction closes so
         # there is only ever one writer, and non-fatal by contract: a session must
         # start even when provenance can't be recorded.
-        if _session_meta_enabled():
-            _session_provenance = _current_session_meta()
+        if _session_meta_enabled(cfg):
+            _session_provenance = _current_session_meta(cfg)
             if _write_session_meta(db_name, _session_provenance):
                 print(f"[DB] OK: Recorded session provenance ({len(_session_provenance)} settings)")
             # When translation is offloaded, the remote's model is the one that
             # translates — fetch it over the network off-thread so a slow or
             # unreachable remote can't delay the start of transcription.
-            if _translation_is_offloaded(config.get("live_translation", {})):
+            if _translation_is_offloaded(cfg.get("live_translation", {})):
                 _record_remote_provenance_async(db_name)
         # Stable per-session id = the .db filename stem (e.g. 2026-06-22_183007).
         # Stored on every row and emitted top-level on every socket payload so the
@@ -15330,7 +15348,9 @@ def thread1_function(ts, cq, cfq, cal_state, cal_data, cal_step1, asq):
                     print("[INIT] Step 4/5: Initializing database...")
 
                     try:
-                        db_path = initialize_database()
+                        # process_config was just reloaded from disk for this
+                        # session; the worker's module-level config is older.
+                        db_path = initialize_database(process_config)
 
                         # Create persistent database connection for this process
                         # This avoids overhead of opening/closing connection on every transcription
