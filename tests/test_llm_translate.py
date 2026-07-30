@@ -251,10 +251,13 @@ class TestLocalModelPath:
 
     def test_repo_slash_becomes_double_dash(self):
         p = local_model_path("/m", "bartowski/Qwen2.5-7B-Instruct-GGUF", "q4.gguf")
-        assert p == "/m/bartowski--Qwen2.5-7B-Instruct-GGUF/q4.gguf"
+        # os.path.join, so the separator is the platform's own.
+        assert p == os.path.join("/m", "bartowski--Qwen2.5-7B-Instruct-GGUF", "q4.gguf")
+        assert "bartowski--Qwen2.5-7B-Instruct-GGUF" in p, "the repo slash must not survive"
 
     def test_repo_without_a_slash(self):
-        assert local_model_path("/m", "somerepo", "q4.gguf") == "/m/somerepo/q4.gguf"
+        assert local_model_path("/m", "somerepo", "q4.gguf") == os.path.join(
+            "/m", "somerepo", "q4.gguf")
 
 
 class TestScanGgufModels:

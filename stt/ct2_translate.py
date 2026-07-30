@@ -37,7 +37,9 @@ def ct2_model_dir(hf_model_dir: str, compute_type: str) -> str:
     e.g. ".../google--madlad400-3b-mt" -> ".../google--madlad400-3b-mt-ct2-int8".
     Keyed by compute type so int8 and int8_float16 don't collide.
     """
-    return f"{hf_model_dir.rstrip(os.sep)}-ct2-{compute_type}"
+    # Strip either separator: Windows accepts "/" as well as os.sep, so a path
+    # configured as "C:/models/" would otherwise yield "C:/models/-ct2-int8".
+    return f'{hf_model_dir.rstrip("/" + os.sep)}-ct2-{compute_type}'
 
 
 def nllb_ct2_target_prefix(tgt_code: str) -> List[List[str]]:

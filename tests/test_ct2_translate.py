@@ -53,7 +53,12 @@ class TestModelDir:
         assert ct2_model_dir("/m/google--madlad400-3b-mt", "int8_float16").endswith("-ct2-int8_float16")
 
     def test_trailing_sep_stripped(self):
+        # Either separator: Windows accepts "/" as well as os.sep, and a models
+        # directory entered with a trailing slash otherwise produced
+        # "C:/models/-ct2-int8".
         assert ct2_model_dir("/m/x/", "int8") == "/m/x-ct2-int8"
+        assert ct2_model_dir("/m/x" + os.sep, "int8") == "/m/x-ct2-int8"
+        assert ct2_model_dir("/m/x", "int8") == "/m/x-ct2-int8"
 
 
 class TestNllbTokens:

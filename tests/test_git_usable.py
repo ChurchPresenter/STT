@@ -16,6 +16,10 @@ import stt.watchdog as watchdog  # noqa: E402
 def _patch(monkeypatch, *, platform, which, xcode_rc=None):
     monkeypatch.setattr(watchdog.sys, "platform", platform)
     monkeypatch.setattr(watchdog, "_which", lambda name: which)
+    # realpath is the host's, not the simulated platform's: on Windows it turns
+    # "/usr/bin/git" into "C:\\usr\\bin\\git" and the macOS shim check never
+    # fires. The branch under test is the logic, not the host's path rules.
+    monkeypatch.setattr(watchdog.os.path, "realpath", lambda path: path)
     calls = []
 
     def fake_run(cmd, **kwargs):
