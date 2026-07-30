@@ -16,7 +16,15 @@ concurrency:
 
 jobs:
   test:
-    runs-on: ubuntu-22.04
+    # Both platforms the project is developed and deployed on. This is not
+    # belt-and-braces: a WAL-mode sqlite read that raises on macOS silently
+    # succeeds on Linux and writes sidecar files, and the module it lived in was
+    # at 100% coverage. Only running the suite on both surfaces that class.
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, macos-14]
     steps:
       - uses: actions/checkout@v5
       - uses: astral-sh/setup-uv@v8.1.0
@@ -34,6 +42,10 @@ jobs:
         run: uv run mypy
       - name: Test with coverage
         # Ratchet: fail only if stt/ coverage drops below the recorded
-        # watermark (45% local on 2026-07-23, minus slack for platform-specific
-        # lines on the Linux runner). Raise it as coverage grows; never lower it.
-        run: uv run pytest --cov --cov-report=term --cov-fail-under=42
+        # watermark (61% measured 2026-05-21, minus slack for platform-specific
+        # lines that only one runner executes). Raise it as coverage grows;
+        # never lower it. The remaining gap to 100% is audio_capture, watchdog
+        # and file_mover — ffmpeg, process management and SMB — where a unit
+        # test would mostly assert its own mocks; the logic modules are at
+        # 88-100%.
+        run: uv run pytest --cov --cov-report=term --cov-fail-under=57
