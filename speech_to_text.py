@@ -9476,7 +9476,11 @@ def start_transcription():
             def _warm_llm():
                 try:
                     target = trans_cfg.get("target_language", "en")
-                    if _translate_via_llm("Здравствуйте.", "ru", target) is not None:
+                    warm_s = coerce_float(
+                        (trans_cfg.get("llm") or {}).get("warmup_timeout_ms"), 180000,
+                        lo=5000, hi=600000) / 1000.0
+                    if _translate_via_llm("Здравствуйте.", "ru", target,
+                                          timeout_override=warm_s) is not None:
                         print("[START] LLM translation warmed and pinned")
                     else:
                         print("[START] LLM warm-up returned no usable text; "
@@ -13730,7 +13734,7 @@ _DEFAULT_LLM_SYSTEM_PROMPT = (
 )
 
 
-def _translate_via_llm(text, source_lang, target_lang):
+def _translate_via_llm(text, source_lang, target_lang, timeout_override=None):
     """Translate one caption with an LLM. Returns the caption, or None to fall back.
 
     None means "use the NMT model instead". An LLM can return its own reasoning, a
@@ -13761,7 +13765,12 @@ def _translate_via_llm(text, source_lang, target_lang):
     headers = {"Content-Type": "application/json"}
     if (llm_cfg.get("api_key") or "").strip():
         headers["Authorization"] = f"Bearer {llm_cfg['api_key'].strip()}"
-    timeout = coerce_float(llm_cfg.get("timeout_ms"), 8000, lo=500, hi=60000) / 1000.0
+    # A cold model load takes far longer than a caption's budget, so the warm-up call
+    # passes its own timeout. Without that the warm-up times out, the NMT fallback
+    # loads instead, and it then occupies the VRAM the LLM needed — after which the
+    # LLM can never fit, and every caption falls back forever.
+    timeout = (timeout_override if timeout_override is not None
+               else coerce_float(llm_cfg.get("timeout_ms"), 8000, lo=500, hi=60000) / 1000.0)
 
     try:
         import requests as _req

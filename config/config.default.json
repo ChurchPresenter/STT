@@ -466,7 +466,9 @@
       "keep_alive": -1,
       "_keep_alive_comment": "How long the server keeps the model loaded; -1 = forever. Leave at -1: an unpinned model measured p90 4.89s against p50 0.29s purely because it was unloaded between captions. Ignored by servers that don't support it.",
       "timeout_ms": 8000,
-      "_timeout_ms_comment": "Per-caption timeout. On timeout the caption falls back to the NMT model rather than being dropped."
+      "_timeout_ms_comment": "Per-caption timeout. On timeout the caption falls back to the NMT model rather than being dropped.",
+      "warmup_timeout_ms": 180000,
+      "_warmup_timeout_ms_comment": "Timeout for the one-off warm-up call that loads and pins the model at start. Much longer than timeout_ms because a cold load of a multi-GB model takes far longer than a caption's budget; if the warm-up times out the NMT fallback loads instead and then occupies the VRAM the LLM needed."
     }
   },
   "corrections": {
