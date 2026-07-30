@@ -5,7 +5,9 @@ import pytest
 from stt.session_meta import (
     build_session_meta,
     changed_keys,
+    is_offloaded,
     read_history,
+    remote_provenance,
     resolve_asr_implementation,
     resolve_asr_model,
 )
@@ -220,6 +222,103 @@ class TestTranslation:
         assert meta["mt.ct2_compute_type"] == "auto"
         assert meta["mt.use_gpu"] == "true"
         assert meta["mt.use_fp16"] == "false"
+
+
+class TestOffloadedTranslation:
+    """On an offloaded session the remote's model translates, not the local one."""
+
+    def offload(self, remote_model="", **lt):
+        cfg = {"live_translation": {"translation_method": "nllb",
+                                    "translation_model": "facebook/nllb-200-distilled-600M",
+                                    "remote": {"enabled": True,
+                                               "endpoint": "192.168.2.52:8080",
+                                               "model": remote_model}}}
+        cfg["live_translation"].update(lt)
+        return cfg
+
+    def test_offloaded_flag_is_recorded(self):
+        assert build(self.offload())["mt.offloaded"] == "true"
+        assert build({"live_translation": {"enabled": True}})["mt.offloaded"] == "false"
+
+    def test_enabled_without_endpoint_is_not_offloaded(self):
+        cfg = {"live_translation": {"remote": {"enabled": True, "endpoint": ""}}}
+        assert build(cfg)["mt.offloaded"] == "false"
+
+    def test_endpoint_without_enabled_is_not_offloaded(self):
+        cfg = {"live_translation": {"remote": {"enabled": False,
+                                               "endpoint": "192.168.2.52:8080"}}}
+        assert build(cfg)["mt.offloaded"] == "false"
+
+    def test_blank_remote_model_does_not_claim_the_local_model(self):
+        # A blank remote model means "use Machine B's own model" - asserting the
+        # local id here would name a model that never ran.
+        meta = build(self.offload(remote_model=""))
+        assert meta["mt.model"] == ""
+        # ...but the local config value stays visible for reference.
+        assert meta["mt.model_configured"] == "facebook/nllb-200-distilled-600M"
+
+    def test_explicit_remote_model_is_dictated_so_local_id_stands(self):
+        meta = build(self.offload(remote_model="google/madlad400-3b-mt"))
+        assert meta["mt.model"] == "facebook/nllb-200-distilled-600M"
+
+    def test_local_session_still_records_its_model(self):
+        cfg = {"live_translation": {"translation_method": "nllb",
+                                    "translation_model": "facebook/nllb-200-distilled-600M"}}
+        assert build(cfg)["mt.model"] == "facebook/nllb-200-distilled-600M"
+
+    def test_is_offloaded_helper(self):
+        assert is_offloaded({"remote": {"enabled": True, "endpoint": "h:8080"}}) is True
+        assert is_offloaded({"remote": {"enabled": True}}) is False
+        assert is_offloaded({}) is False
+
+
+class TestRemoteProvenance:
+    STATUS = {
+        "success": True,
+        "translation_model": "google/madlad400-3b-mt",
+        "translation_method": "madlad",
+        "model_device": "mps",
+        "model_dtype": "float32",
+        "is_ctranslate2": True,
+        "ct2_compute_type": "auto",
+    }
+
+    def test_maps_the_remote_status_payload(self):
+        meta = remote_provenance(self.STATUS)
+        assert meta["mt.remote.effective.model"] == "google/madlad400-3b-mt"
+        assert meta["mt.remote.effective.method"] == "madlad"
+        assert meta["mt.remote.effective.device"] == "mps"
+        assert meta["mt.remote.effective.dtype"] == "float32"
+        assert meta["mt.remote.effective.ct2"] == "true"
+        assert meta["mt.remote.effective.ct2_compute_type"] == "auto"
+
+    def test_null_fields_are_omitted_not_blanked(self):
+        status = dict(self.STATUS, model_device=None, model_dtype=None)
+        meta = remote_provenance(status)
+        assert "mt.remote.effective.device" not in meta
+        assert "mt.remote.effective.dtype" not in meta
+        assert meta["mt.remote.effective.model"] == "google/madlad400-3b-mt"
+
+    @pytest.mark.parametrize("status", [
+        None,
+        {},
+        {"success": False, "error": "unreachable"},
+        "not a mapping",
+        [1, 2, 3],
+    ])
+    def test_unusable_response_leaves_no_claim(self, status):
+        # An unreachable remote must record nothing rather than something wrong.
+        assert remote_provenance(status) == {}
+
+    def test_success_absent_is_treated_as_success(self):
+        # Older remotes may omit the flag; the payload is still usable.
+        assert remote_provenance({"translation_model": "x"})[
+            "mt.remote.effective.model"] == "x"
+
+    def test_only_known_fields_are_lifted(self):
+        meta = remote_provenance(dict(self.STATUS, cache_size=99, remote_clients=["a"]))
+        assert all(k.startswith("mt.remote.effective.") for k in meta)
+        assert len(meta) == 6
 
 
 class TestFilters:

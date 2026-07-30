@@ -750,7 +750,10 @@ from stt.session_meta import (
     append_changes as _session_meta_append,
     build_session_meta as _build_session_meta,
     changed_keys as _session_meta_changed_keys,
+    is_offloaded as _translation_is_offloaded,
     read_session_meta as _read_session_meta,
+    remote_provenance as _remote_provenance,
+    write_missing as _session_meta_write_missing,
     write_session_meta as _write_session_meta,
 )
 
@@ -970,6 +973,68 @@ def _current_session_meta():
     except Exception:
         pass  # provenance is best-effort; a missing state proxy is not an error
     return meta
+
+
+def _fetch_remote_provenance():
+    """Ask the paired remote what it is translating with. {} if unreachable.
+
+    On an offloaded session the remote's model does the work, so without this the
+    database records nothing about what actually translated — and with a blank
+    remote model ("use Machine B's own model") this box can't infer it either.
+    """
+    endpoint = _get_remote_endpoint_safe()
+    if not endpoint:
+        return {}
+    try:
+        import requests as _req
+        r = _req.get(endpoint + "/api/translation/status", timeout=5)
+        return _remote_provenance(r.json())
+    except Exception as e:
+        print(f"[SESSION-META] Could not read remote translation provenance: {e}")
+        return {}
+
+
+def _record_remote_provenance_async(db_path):
+    """Probe the paired remote off-thread and record it as a session-start fact.
+
+    Off-thread because a 5s network timeout must not delay the start of
+    transcription; recorded with write_missing so it lands as a base key rather
+    than a timestamped change — nothing changed, we only just found out.
+    """
+    if not (db_path and _session_meta_enabled()):
+        return
+
+    def _probe():
+        remote = _fetch_remote_provenance()
+        if remote and _session_meta_write_missing(db_path, remote):
+            print(f"[DB] OK: Recorded remote translation provenance ({remote.get('mt.remote.effective.model', '?')})")
+
+    threading.Thread(target=_probe, daemon=True).start()
+
+
+def _reprobe_remote_provenance_async():
+    """Re-probe the remote after an offload change and append what differs.
+
+    A change here means a different box (or a different model on the same box) is
+    now translating, so this genuinely is a mid-session change and belongs in the
+    timeline rather than as a base key.
+    """
+    if not _session_meta_enabled():
+        return
+    active_db = transcription_state.get("db_name") if transcription_state else None
+    if not active_db:
+        return
+
+    def _probe():
+        remote = _fetch_remote_provenance()
+        if not remote:
+            return
+        current = _read_session_meta(active_db)
+        changes = _session_meta_changed_keys(current, remote)
+        if changes:
+            _session_meta_append(active_db, changes)
+
+    threading.Thread(target=_probe, daemon=True).start()
 
 
 def _record_session_meta_change(**values):
@@ -3426,6 +3491,11 @@ def initialize_database():
             _session_provenance = _current_session_meta()
             if _write_session_meta(db_name, _session_provenance):
                 print(f"[DB] OK: Recorded session provenance ({len(_session_provenance)} settings)")
+            # When translation is offloaded, the remote's model is the one that
+            # translates — fetch it over the network off-thread so a slow or
+            # unreachable remote can't delay the start of transcription.
+            if _translation_is_offloaded(config.get("live_translation", {})):
+                _record_remote_provenance_async(db_name)
         # Stable per-session id = the .db filename stem (e.g. 2026-06-22_183007).
         # Stored on every row and emitted top-level on every socket payload so the
         # consumer can anchor socket<->db by exact match; re-derived each session.
@@ -5885,6 +5955,10 @@ def save_translation_settings():
     _meta_changes.pop("mt.target_language", None)
     if _meta_changes:
         _record_session_meta_change(**_meta_changes)
+    # Offload settings that changed mean a different box (or a different model on
+    # the same box) now translates, so re-probe what the remote is running.
+    if any(k.startswith(("mt.offloaded", "mt.remote.")) for k in _meta_changes):
+        _reprobe_remote_provenance_async()
 
     return jsonify({
         "success": True,

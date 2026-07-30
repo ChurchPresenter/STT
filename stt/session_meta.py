@@ -191,12 +191,58 @@ def _add_file_transcription(meta: Dict[str, str], config: Mapping[str, Any],
             _put(meta, f"asr.file.decode.{key}", decode[key])
 
 
+def is_offloaded(lt_cfg: Mapping[str, Any]) -> bool:
+    """Whether translation is handed to a paired remote rather than run locally."""
+    remote = _section(lt_cfg, "remote")
+    return bool(remote.get("enabled") and remote.get("endpoint"))
+
+
+def _effective_local_model(lt: Mapping[str, Any], madlad_default: str) -> str:
+    """The model that will actually translate, as far as this box can know.
+
+    When offloading with a blank remote model ("use Machine B's own model"), the
+    local model id is not what translates — recording it as mt.model would assert
+    the wrong model, which is the exact failure this table exists to prevent. It
+    stays empty until the remote is probed (see remote_provenance); the local
+    config value remains available as mt.model_configured.
+    """
+    if is_offloaded(lt) and not _section(lt, "remote").get("model"):
+        return ""
+    return resolve_translation_model_id(lt, madlad_default)
+
+
+def remote_provenance(status: Optional[Mapping[str, Any]]) -> Dict[str, str]:
+    """mt.remote.effective.* from a paired remote's /api/translation/status.
+
+    On an offloaded session the remote's model is the one doing the work, so
+    without this the database records nothing about what actually translated.
+    Returns {} for a missing, failed, or unrecognisable response — an unreachable
+    remote must leave no claim behind rather than a misleading one.
+    """
+    if not isinstance(status, Mapping) or not status.get("success", True):
+        return {}
+    fields = (
+        ("model", "translation_model"),
+        ("method", "translation_method"),
+        ("device", "model_device"),
+        ("dtype", "model_dtype"),
+        ("ct2", "is_ctranslate2"),
+        ("ct2_compute_type", "ct2_compute_type"),
+    )
+    meta: Dict[str, str] = {}
+    for suffix, source in fields:
+        if status.get(source) is not None:
+            _put(meta, f"mt.remote.effective.{suffix}", status[source])
+    return meta
+
+
 def _add_translation(meta: Dict[str, str], config: Mapping[str, Any],
                      madlad_default: str) -> None:
     lt = _section(config, "live_translation")
     _put(meta, "mt.enabled", lt.get("enabled"))
     _put(meta, "mt.method", lt.get("translation_method"))
-    _put(meta, "mt.model", resolve_translation_model_id(lt, madlad_default))
+    _put(meta, "mt.offloaded", is_offloaded(lt))
+    _put(meta, "mt.model", _effective_local_model(lt, madlad_default))
     _put(meta, "mt.model_configured", lt.get("translation_model"))
     _put(meta, "mt.source_language", lt.get("source_language"))
     _put(meta, "mt.target_language", lt.get("target_language"))
@@ -306,6 +352,33 @@ def write_session_meta(db_path: str, meta: Mapping[str, str]) -> bool:
         return True
     except Exception as e:
         print(f"[SESSION-META] WARNING: could not record session provenance: {e}")
+        return False
+
+
+def write_missing(db_path: str, meta: Mapping[str, str]) -> bool:
+    """Store only keys not already present. Returns True if anything was added.
+
+    For session-start facts that can only be learned late — the paired remote's
+    model has to be fetched over the network, so it can't be part of the initial
+    write. Establishing them as base keys (rather than appending a timestamped
+    row) keeps the timeline honest: nothing changed, we just found out. A later
+    genuine change still goes through append_changes.
+    """
+    if not meta:
+        return False
+    try:
+        with _connect(db_path) as conn:
+            cursor = conn.cursor()
+            ensure_table(cursor)
+            cursor.executemany(
+                "INSERT OR IGNORE INTO session_meta (key, value) VALUES (?, ?)",
+                sorted(meta.items()),
+            )
+            added = cursor.rowcount > 0
+            conn.commit()
+        return added
+    except Exception as e:
+        print(f"[SESSION-META] WARNING: could not record late provenance: {e}")
         return False
 
 

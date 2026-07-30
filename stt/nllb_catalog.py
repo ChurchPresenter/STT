@@ -7,7 +7,7 @@ the monolith's import-time side effects. Stdlib-only; no config needed.
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 # UI short code -> NLLB FLORES-200 code, for the full 202-language FLORES set.
 # "auto"/unknown fall back to English. Codes with multiple scripts are keyed
@@ -1204,7 +1204,7 @@ def is_madlad_model(model_id: str) -> bool:
     return "madlad" in (model_id or "").lower()
 
 
-def resolve_translation_model_id(lt_cfg: Optional[dict], madlad_default: str) -> str:
+def resolve_translation_model_id(lt_cfg: Optional[Mapping[str, Any]], madlad_default: str) -> str:
     """Effective live-translation model id for the configured engine.
 
     translate_text() branches on the LOADED model, so the engine ("nllb"/
