@@ -1335,7 +1335,18 @@
                     const remoteRow = document.getElementById('remote_clients_row');
                     if (remoteClients.length > 0) {
                         remoteRow.style.display = '';
-                        document.getElementById('remote_clients_list').textContent = remoteClients.join(', ');
+                        // Machine B links back to the machines it translates for.
+                        // Their port arrives on the heartbeat; before the first one
+                        // lands we fall back to 80, which is the default the
+                        // installers use.
+                        const detail = data.remote_clients_detail || [];
+                        const portFor = ip => (detail.find(d => d.ip === ip) || {}).port;
+                        document.getElementById('remote_clients_list').innerHTML =
+                            remoteClients.map(ip => {
+                                const p = portFor(ip);
+                                const url = 'http://' + ip + (p && p !== 80 ? ':' + p : '') + '/translation';
+                                return `${escapeHtml(ip)} <button type="button" onclick="window.open('${escapeHtml(url)}', '_blank', 'noopener')" title="Open ${escapeHtml(url)}" style="margin-left:6px; padding:1px 8px; font-size:0.75em; background:var(--bg-tertiary); border:1px solid var(--border); border-radius:3px; color:var(--text-primary); cursor:pointer;">Open</button>`;
+                            }).join(' ');
                     } else {
                         remoteRow.style.display = 'none';
                     }

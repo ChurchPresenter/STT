@@ -685,9 +685,17 @@ def _add_trusted_client(ip):
     save_config(config)
 
 
-def _register_translation_client(ip):
+# {ip: port} for paired clients that have told us where their own UI lives. Kept
+# beside _translation_clients rather than in it, because that maps ip -> last-seen
+# timestamp and several readers do arithmetic on the value.
+_translation_client_ports = {}
+
+
+def _register_translation_client(ip, port=None):
     with _translation_clients_lock:
         _translation_clients[ip] = time.time()
+        if port:
+            _translation_client_ports[ip] = port
 
 # Generate random password if not configured
 password_auth_config = config.get("web_server", {}).get("password_auth", {})
@@ -6279,7 +6287,14 @@ def _remote_heartbeat_loop():
             ep = _get_remote_endpoint_safe()
             if not ep:
                 continue
-            _get_remote_http_session().post(ep.rstrip("/") + "/api/translate/heartbeat", timeout=5)
+            # Tell B which port this machine's own UI is on. B sees only our IP
+            # (request.remote_addr), so without this it cannot offer a link back
+            # to us and would have to guess port 80.
+            _get_remote_http_session().post(
+                ep.rstrip("/") + "/api/translate/heartbeat",
+                json={"port": coerce_int(config.get("web_server", {}).get("port"), 8080,
+                                         lo=1, hi=65535)},
+                timeout=5)
         except Exception:
             pass  # best-effort; never let the heartbeat crash
 
@@ -6559,7 +6574,11 @@ def get_translation_status():
         result["remote_clients"] = list(active.keys())
         # Same clients with last-seen age (seconds) — a paired A that heartbeats
         # while transcribing keeps a small age here even during silence.
-        result["remote_clients_detail"] = [{"ip": ip, "age_s": round(now - ts)} for ip, ts in active.items()]
+        result["remote_clients_detail"] = [
+            {"ip": ip, "age_s": round(now - ts),
+             # None until the client has heartbeated; the UI falls back to 80.
+             "port": _translation_client_ports.get(ip)}
+            for ip, ts in active.items()]
         result["trusted_clients"] = list(_trusted_translation_clients)
         result["pending_pairs"] = pending
     else:
@@ -7030,7 +7049,9 @@ def translate_remote_heartbeat():
     client_ip = request.remote_addr
     if not _is_trusted_translation_client(client_ip):
         return jsonify({"error": "Not paired"}), 403
-    _register_translation_client(client_ip)
+    _register_translation_client(
+        client_ip, coerce_int((request.get_json(silent=True) or {}).get("port"), 0,
+                              lo=0, hi=65535) or None)
     return jsonify({"success": True})
 
 
