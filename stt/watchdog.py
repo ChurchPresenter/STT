@@ -380,7 +380,7 @@ def _quit_watchdog(pm=None):
     except Exception as e:
         logging.warning(f"[WATCHDOG] Error stopping STT during quit: {e}")
     if IS_MACOS:
-        uid = str(os.getuid())
+        uid = str(os.getuid())  # type: ignore[attr-defined]  # guarded by IS_MACOS
         agents = os.path.join(os.path.expanduser("~"), "Library", "LaunchAgents")
         for label in ("com.stt.gui", "com.stt.watchdog"):
             plist = os.path.join(agents, f"{label}.plist")
@@ -1421,7 +1421,7 @@ class ProcessManager:
         pgid = None
         if not IS_WINDOWS:
             try:
-                pgid = os.getpgid(proc.pid)
+                pgid = os.getpgid(proc.pid)  # type: ignore[attr-defined]  # guarded by IS_WINDOWS
             except (ProcessLookupError, OSError):
                 pgid = None
         # Graceful first: ask over the stdin channel (the only cross-process
@@ -1473,8 +1473,10 @@ class ProcessManager:
         # group (would only happen if start_new_session didn't take effect).
         if pgid is not None:
             try:
-                if pgid != os.getpgid(0):
-                    os.killpg(pgid, signal.SIGKILL)
+                if pgid != os.getpgid(0):  # type: ignore[attr-defined]
+                    # POSIX-only process-group kill; pgid is None on Windows,
+                    # so this block never runs there.
+                    os.killpg(pgid, signal.SIGKILL)  # type: ignore[attr-defined]
             except (ProcessLookupError, OSError):
                 pass
 

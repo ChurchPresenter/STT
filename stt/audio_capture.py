@@ -348,7 +348,9 @@ class FFmpegAudioCapture:
                 reader_thread.start()
             else:
                 # Unix: use select() + non-blocking I/O for efficient pipe reading
-                os.set_blocking(self.process.stdout.fileno(), False)
+                # Unix-only; the Windows branch above uses a reader thread. mypy on
+                # a Windows runner cannot narrow on the _IS_WINDOWS constant.
+                os.set_blocking(self.process.stdout.fileno(), False)  # type: ignore[attr-defined]
 
             def _restart_ffmpeg():
                 """Kill and restart ffmpeg, returns new buffer (empty bytes)"""
@@ -383,7 +385,7 @@ class FFmpegAudioCapture:
                     )
                     reader_thread.start()
                 else:
-                    os.set_blocking(self.process.stdout.fileno(), False)
+                    os.set_blocking(self.process.stdout.fileno(), False)  # type: ignore[attr-defined]
                 return b''
 
             while self.running:
@@ -697,7 +699,7 @@ class FFmpegAudioCapture:
                 cmd = ['ffmpeg', '-list_devices', 'true', '-f', 'dshow', '-i', 'dummy']
                 result = subprocess.run(cmd, capture_output=True, text=True, timeout=5, check=False,
                                 creationflags=_CREATE_NO_WINDOW)
-                devices = []
+                devices: list = []
                 for line in result.stderr.split('\n'):
                     if '"' in line and 'audio' in line.lower():
                         # Extract device name from quotes
