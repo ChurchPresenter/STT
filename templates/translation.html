@@ -393,6 +393,20 @@
                             for the built-in prompt. The configured target language is always appended,
                             so a prompt written for one language still follows a later switch.
                         </small>
+                        <div style="display: flex; gap: 8px; margin-top: 6px; flex-wrap: wrap;">
+                            <button type="button" onclick="resetLlmPrompt()" class="btn-save" style="width: auto; margin: 0; padding: 3px 12px; font-size: 0.8em;">Reset to Default</button>
+                            <button type="button" onclick="clearLlmPrompt()" class="btn-save btn-warning" style="width: auto; margin: 0; padding: 3px 12px; font-size: 0.8em;">Clear</button>
+                            <button type="button" onclick="toggleEffectivePrompt()" class="btn-save" style="width: auto; margin: 0; padding: 3px 12px; font-size: 0.8em; background: var(--bg-tertiary); color: var(--text-primary); border: 1px solid var(--border);"><span id="llm_effective_toggle_label">Show</span> Prompt Sent to the Model</button>
+                        </div>
+
+                        <!-- What the model actually receives. Neither the built-in
+                             template nor the appended language directive is visible
+                             in the field above, so tuning terminology means editing
+                             one input to a prompt you cannot otherwise read. -->
+                        <div id="llm_effective_wrap" style="display:none; margin-top: 8px;">
+                            <div id="llm_effective_note" style="color: var(--text-secondary); font-size: 0.75em; margin-bottom: 4px;"></div>
+                            <pre id="llm_effective_prompt" style="white-space: pre-wrap; word-break: break-word; background: var(--bg-tertiary); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 8px 10px; font-size: 0.78em; max-height: 260px; overflow-y: auto; margin: 0;"></pre>
+                        </div>
                     </div>
 
                     <div class="form-group">
@@ -1065,6 +1079,7 @@
             document.getElementById('target_language').value = code;
             updateTargetLanguageLabel();
             updateLanguageGrid();
+            scheduleEffectivePromptRefresh();   // the language directive is part of the prompt
 
             // If whisper_translate is selected but target changed away from English, revert to NLLB
             const method = document.getElementById('translation_method').value;
@@ -1568,6 +1583,68 @@
             }
         }
 
+        // ---- system prompt: default, clear, and what is actually sent --------
+
+        let llmDefaultPrompt = '';       // built-in template, fetched once
+        let llmEffectiveShown = false;
+        let llmEffectiveTimer = null;
+
+        async function refreshEffectivePrompt() {
+            if (!llmEffectiveShown) return;
+            const target = document.getElementById('target_language').value || 'en';
+            const prompt = document.getElementById('llm_system_prompt').value;
+            try {
+                const url = '/api/translate/llm-prompt?target=' + encodeURIComponent(target) +
+                            '&prompt=' + encodeURIComponent(prompt);
+                const data = await fetch(url).then(r => r.json());
+                if (!data.success) return;
+                llmDefaultPrompt = data.default_template || llmDefaultPrompt;
+                document.getElementById('llm_effective_prompt').textContent = data.effective || '';
+                const unsaved = prompt !== (window._llmSavedPrompt || '');
+                document.getElementById('llm_effective_note').textContent =
+                    `${data.is_custom ? 'Your prompt' : 'Built-in prompt'}, target language ` +
+                    `${data.language_name}. This is the exact text the model receives` +
+                    `${unsaved ? ' (previewing unsaved edits)' : ''}.`;
+            } catch (e) { /* the preview is advisory */ }
+        }
+
+        function scheduleEffectivePromptRefresh() {
+            clearTimeout(llmEffectiveTimer);
+            llmEffectiveTimer = setTimeout(refreshEffectivePrompt, 350);
+        }
+
+        function toggleEffectivePrompt() {
+            llmEffectiveShown = !llmEffectiveShown;
+            document.getElementById('llm_effective_wrap').style.display = llmEffectiveShown ? '' : 'none';
+            document.getElementById('llm_effective_toggle_label').textContent = llmEffectiveShown ? 'Hide' : 'Show';
+            refreshEffectivePrompt();
+        }
+
+        async function resetLlmPrompt() {
+            // Put the shipped template in the box so it can be edited, rather than
+            // emptying the field — "reset" should show what you are starting from.
+            if (!llmDefaultPrompt) {
+                try {
+                    const data = await fetch('/api/translate/llm-prompt').then(r => r.json());
+                    llmDefaultPrompt = data.default_template || '';
+                } catch (e) {
+                    showAlert('Could not load the default prompt.', 'error');
+                    return;
+                }
+            }
+            document.getElementById('llm_system_prompt').value = llmDefaultPrompt;
+            markDirty();
+            refreshEffectivePrompt();
+            showAlert('Default prompt restored — Save Settings to apply it.', 'success');
+        }
+
+        function clearLlmPrompt() {
+            document.getElementById('llm_system_prompt').value = '';
+            markDirty();
+            refreshEffectivePrompt();
+            showAlert('Prompt cleared — the built-in prompt will be used. Save Settings to apply.', 'success');
+        }
+
         function collectLlmSettings() {
             return {
                 provider: document.getElementById('llm_provider').value,
@@ -1600,6 +1677,13 @@
             setRange('llm_n_ctx', 'llmNCtxValue', llm.n_ctx, 2048);
             setRange('llm_max_tokens', 'llmMaxTokensValue', llm.max_tokens, 160);
             setRange('llm_timeout_ms', 'llmTimeoutValue', llm.timeout_ms, 8000);
+            window._llmSavedPrompt = llm.system_prompt || '';
+            const promptEl = document.getElementById('llm_system_prompt');
+            if (!promptEl.dataset.wired) {
+                promptEl.addEventListener('input', scheduleEffectivePromptRefresh);
+                promptEl.dataset.wired = '1';
+            }
+            refreshEffectivePrompt();
             loadLlmModels(llm.gguf_repo, llm.gguf_file);
         }
 

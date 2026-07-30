@@ -6793,6 +6793,41 @@ def list_gguf_repo_files():
                     "files": sorted(files, key=lambda f: f["name"])})
 
 
+@app.route("/api/translate/llm-prompt", methods=["GET"])
+def get_llm_prompt():
+    """The built-in prompt template, and the prompt actually sent to the model.
+
+    Worth exposing because neither is visible in the settings field: an empty
+    field means the built-in template is used, "{language}" is substituted, and
+    the configured target language is appended in any case. An operator tuning
+    terminology is editing one input to a prompt they could not otherwise read.
+
+    ``target`` overrides the configured target language so the page can preview
+    the effect of a language switch before saving it.
+    """
+    if not check_ip_whitelist():
+        return jsonify({"success": False, "error": "Access Denied"}), 403
+
+    lt = config.get("live_translation", {})
+    llm_cfg = lt.get("llm") or {}
+    target = (request.args.get("target") or lt.get("target_language") or "en").strip()
+    # A prompt passed here is previewed without being saved, so the page can show
+    # what an unsaved edit would send.
+    custom = request.args.get("prompt")
+    if custom is None:
+        custom = llm_cfg.get("system_prompt") or ""
+
+    return jsonify({
+        "success": True,
+        "default_template": _DEFAULT_LLM_SYSTEM_PROMPT,
+        "is_custom": bool((custom or "").strip()),
+        "target_language": target,
+        "language_name": TRANSLATION_LANGUAGES.get(target, target),
+        "effective": _llm_system_prompt(custom or _DEFAULT_LLM_SYSTEM_PROMPT,
+                                        target, TRANSLATION_LANGUAGES),
+    })
+
+
 @app.route("/api/translate/llm-test", methods=["POST"])
 def test_llm_translation():
     """Translate one fixed caption with the submitted (not yet saved) LLM settings.
