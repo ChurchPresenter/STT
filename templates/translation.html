@@ -581,7 +581,7 @@
                     <p><strong>Transcription:</strong> <span id="transcription_status">-</span></p>
                     <p id="remote_open_row" style="display:none;">
                         <strong>Remote:</strong> <span id="remote_endpoint_text" style="color: var(--text-secondary);"></span>
-                        <button type="button" onclick="openRemoteUI()" class="btn-save" style="margin: 0 0 0 8px; padding: 3px 12px; font-size: 0.8em;">Open</button>
+                        <button type="button" onclick="openRemoteUI()" class="btn-save" style="width: auto; margin: 0 0 0 8px; padding: 3px 12px; font-size: 0.8em;">Open</button>
                     </p>
                     <p id="remote_clients_row" style="display:none;"><strong>Translating for:</strong> <span id="remote_clients_list" style="color: var(--success);"></span></p>
                     <p id="trusted_clients_row" style="display:none;"><strong>Paired with:</strong> <span id="trusted_clients_list" style="color: var(--text-secondary);"></span></p>
@@ -1444,11 +1444,14 @@
         }
 
         // The endpoint is stored host:port ("192.168.2.52:8080"); a bare host:port
-        // is treated as a path by the browser, so it needs a scheme.
+        // is treated as a path by the browser, so it needs a scheme. Opens the
+        // remote's translation page rather than its root: the reason to go there
+        // is its model, prompt and translation status, not its caption view.
         function normaliseRemoteUrl(endpoint) {
             const ep = String(endpoint || '').trim();
             if (!ep) return '';
-            return /^https?:\/\//i.test(ep) ? ep : 'http://' + ep;
+            const base = (/^https?:\/\//i.test(ep) ? ep : 'http://' + ep).replace(/\/+$/, '');
+            return base + '/translation';
         }
 
         function openRemoteUI() {
