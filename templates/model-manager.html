@@ -471,7 +471,7 @@
                                 <option value="whisper_translate">Whisper Translate (English only)</option>
                                 <option value="whisper_forced_lang">Whisper Forced Language (Experimental)</option>
                             </select>
-                            <small>The engine that translates. The settings below apply to NLLB and MADLAD only.</small>
+                            <small>The engine that translates. The settings below configure the NLLB/MADLAD model — which those engines use directly, and an LLM falls back to.</small>
                         </div>
 
                         <!-- Shown when the active engine is not an NMT model, so the
@@ -1848,14 +1848,24 @@
         function onConfigTranslationMethodChange() {
             const method = document.getElementById('config_translation_method').value;
             const isNmt = method === 'nllb' || method === 'madlad';
+            // An LLM session still loads an NMT model: _translate_via_llm() returns
+            // None on a timeout or a caption that fails validation, and the NLLB or
+            // MADLAD model translates it instead. So these controls are live on an
+            // LLM session — they choose the model that covers for it. They were
+            // disabled here, which contradicted the very notice below telling the
+            // operator that they configure the fallback.
+            //
+            // Whisper is the genuinely inert case: it reuses the transcription
+            // model and loads no translation model at all.
+            const loadsNmt = isNmt || method === 'llm';
             ['config_translation_model', 'config_translation_use_gpu',
              'config_use_fp16', 'config_use_ctranslate2'].forEach(id => {
                 const el = document.getElementById(id);
                 if (!el) return;
-                el.disabled = !isNmt;
-                el.closest('.form-group').style.opacity = isNmt ? '' : '0.55';
+                el.disabled = !loadsNmt;
+                el.closest('.form-group').style.opacity = loadsNmt ? '' : '0.55';
             });
-            if (isNmt) syncCt2Fp16('config_use_ctranslate2', 'config_use_fp16');
+            if (loadsNmt) syncCt2Fp16('config_use_ctranslate2', 'config_use_fp16');
 
             const notice = document.getElementById('config_translation_not_nmt');
             const text = document.getElementById('config_translation_not_nmt_text');
@@ -1864,7 +1874,7 @@
             } else {
                 notice.style.display = '';
                 text.innerHTML = method === 'llm'
-                    ? 'Translating with an <strong>LLM</strong>. Its model, provider and system prompt are set in <a href="/translation" style="color: var(--accent);">Translation Settings</a>; the GGUF itself is downloaded under Translation Models below. The settings here apply only to the NLLB/MADLAD fallback.'
+                    ? 'Translating with an <strong>LLM</strong>. Its model, provider and system prompt are set in <a href="/translation" style="color: var(--accent);">Translation Settings</a>, and the GGUF is downloaded under Translation Models below. The settings here choose the NLLB/MADLAD model that takes over when the LLM times out or returns a caption that fails validation — so they are worth setting.'
                     : 'Translating with <strong>Whisper</strong>, which reuses the transcription model — no separate translation model is loaded, so the settings here are not in use.';
             }
         }
