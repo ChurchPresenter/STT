@@ -2854,10 +2854,37 @@ class WhisperLiveTranscriber:
         self.end_time_for_same_output = None
 
 
+# Use 'spawn' everywhere, not just where it is the platform default.
+#
+# The parent process loads the live-translation model, and when that runs on a local
+# GPU it initialises a CUDA context. A *forked* child inherits that context, and CUDA
+# forbids re-initialising it — so the transcription worker dies the moment it touches
+# the GPU:
+#
+#     RuntimeError: Cannot re-initialize CUDA in forked subprocess.
+#                   To use CUDA with multiprocessing, you must use the 'spawn' start method
+#
+# That makes "Restart Transcription" impossible on Linux+CUDA once translation has
+# loaded, which is exactly the configuration that runs translation on the same box.
+# macOS has always defaulted to spawn and this module is written for that path (see
+# the note below about the child re-importing and receiving its state as arguments),
+# so forcing it on Linux aligns the two rather than introducing an untried mode.
+#
+# Must happen before the Manager and Queues below: they inherit the active context,
+# and mixing contexts is unsupported.
+if multiprocessing.current_process().name == "MainProcess":
+    try:
+        if multiprocessing.get_start_method(allow_none=True) != "spawn":
+            multiprocessing.set_start_method("spawn", force=True)
+            print("[INIT] multiprocessing start method set to 'spawn' (CUDA-safe)")
+    except RuntimeError as e:
+        # Already started something; leave the existing method rather than crash.
+        print(f"[INIT] WARNING: could not set spawn start method: {e}")
+
 # Create shared state only in the main process.
 # On macOS, 'spawn' is the default start method (safe — avoids ObjC/fork crashes after
 # PyTorch/Whisper initialize the Objective-C runtime with background threads).
-# On Linux, 'fork' is the default; forked children inherit these objects in memory.
+# On Linux, 'fork' was the default; the block above now forces spawn there too.
 # With spawn (macOS), the child re-imports this module and must NOT recreate the Manager
 # (it would fail before bootstrap completes). Instead, the child receives these objects
 # as pickled arguments to thread1_function and assigns them to module globals there.
