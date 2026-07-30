@@ -1263,13 +1263,13 @@
                     // when translation is offloaded, its settings, model and logs
                     // all live over there, and the endpoint was previously only
                     // readable as text.
-                    const remoteRow = document.getElementById('remote_open_row');
+                    const remoteOpenRow = document.getElementById('remote_open_row');
                     if (data.remote_active && data.remote_endpoint) {
                         remoteEndpointUrl = normaliseRemoteUrl(data.remote_endpoint);
                         document.getElementById('remote_endpoint_text').textContent = data.remote_endpoint;
-                        remoteRow.style.display = '';
+                        remoteOpenRow.style.display = '';
                     } else {
-                        remoteRow.style.display = 'none';
+                        remoteOpenRow.style.display = 'none';
                     }
                     if (data.remote_active && data.remote_reachable === false) {
                         // Known unreachable — skip the proxied round-trips, which would just
