@@ -15,35 +15,12 @@
 
 
     <script type="text/javascript">
+      // Scrolling browser-tab title, so an operator with a wall of tabs can spot
+      // this one. Delay before it starts moving, and milliseconds per step.
       var start = 3000;
       var speed = 250;
 
-      function getParams(startAttr, speedAttr) {
-        var params = window.document.getElementsByTagName("script");
-
-        for (var i = 0; i < params.length; i++) {
-          if (params[i].src.indexOf("title-scroll.js") !== -1) {
-            if (
-              params[i].getAttribute(startAttr) !== null &&
-              params[i].getAttribute(startAttr) !== ""
-            ) {
-              start = params[i].getAttribute(startAttr);
-            }
-
-            if (
-              params[i].getAttribute(speedAttr) !== null &&
-              params[i].getAttribute(speedAttr) !== ""
-            ) {
-              speed = params[i].getAttribute(speedAttr);
-            }
-
-            return;
-          }
-        }
-      }
-
-      window.onload = function (e) {
-        getParams("data-start", "data-speed");
+      window.addEventListener("load", function () {
         var title_ref = window.document.getElementsByTagName("title")[0];
         // Continuous marquee: rotate the whole "title + separator" as one string
         // so the gap scrolls along with the text and wraps seamlessly, instead
@@ -57,7 +34,7 @@
             i = (i + 1) % full.length;
           }, speed);
         }, start);
-      };
+      });
     </script>
 
     <script>
@@ -67,15 +44,34 @@
        // Auto-scroll enabled by default
        var autoScrollEnabled = true;
 
+       // A numeric URL parameter, or the default when it is absent or unparseable.
+       // Not "|| fallback": several of these settings use 0 as a real value (0 ms
+       // drip = disabled, 0 opacity = invisible), and || turned that 0 straight
+       // back into the default — so the URL Builder's "disable drip" setting
+       // produced a URL the display quietly ignored.
+       function numParam(params, name, fallback) {
+         const value = parseFloat(params.get(name));
+         return Number.isFinite(value) ? value : fallback;
+       }
+
+       // A colour URL parameter, accepted only as 3/6/8 hex digits (no leading
+       // "#" — the callers add it). Colours from the URL end up inside style
+       // attributes, and an unvalidated one can close the attribute and open a
+       // tag of its own.
+       function hexColorParam(params, name) {
+         const raw = params.get(name);
+         return /^[0-9a-fA-F]{3}$|^[0-9a-fA-F]{6}$|^[0-9a-fA-F]{8}$/.test(raw || '') ? raw : null;
+       }
+
        $(document).ready(function () {
         // Get URL parameters for styling
         const urlParams = new URLSearchParams(window.location.search);
 
          // Extract all parameters with defaults
-         const fontSize = urlParams.get('fontSize') || 32;
+         const fontSize = numParam(urlParams, 'fontSize', 32);
          const transparentBg = urlParams.get('transparentBg') === 'true';
-         const bgColor = transparentBg ? 'transparent' : '#' + (urlParams.get('bgColor') || '000000'); // default black
-         const textColor = '#' + (urlParams.get('textColor') || 'ffffff'); // default white
+         const bgColor = transparentBg ? 'transparent' : '#' + (hexColorParam(urlParams, 'bgColor') || '000000'); // default black
+         const textColor = '#' + (hexColorParam(urlParams, 'textColor') || 'ffffff'); // default white
          const alignment = urlParams.get('alignment') || 'left';
          const fontFamily = urlParams.get('fontFamily') || 'Arial';
          const fontWeight = urlParams.get('fontWeight') || '400';
@@ -91,9 +87,9 @@
          const showMenu = urlParams.get('showMenu') !== 'false';
          const uppercase = urlParams.get('uppercase') === 'true';
          const inProgressStyle = urlParams.get('inProgressStyle') || 'italic';
-         const inProgressOpacity = parseFloat(urlParams.get('inProgressOpacity')) || 0.7;
-         const dripSpeed = parseInt(urlParams.get('dripSpeed')) || 30;  // ms per character drip-feed when in-progress is hidden (0 = disabled)
-         const maxLines = parseInt(urlParams.get('maxLines')) || 0;  // 0 = unlimited, 1-10 = caption mode
+         const inProgressOpacity = numParam(urlParams, 'inProgressOpacity', 0.7);
+         const dripSpeed = numParam(urlParams, 'dripSpeed', 30);  // ms per character drip-feed when in-progress is hidden (0 = disabled)
+         const maxLines = numParam(urlParams, 'maxLines', 0);  // 0 = unlimited, 1-10 = caption mode
 
          // Translation mode: 'transcribe' (default), 'translate', 'both'
          const translationMode = urlParams.get('mode') || 'transcribe';
@@ -120,7 +116,7 @@
            inProgressStyle,
            inProgressOpacity,
            maxLines,
-           fontSize: parseInt(fontSize),
+           fontSize,
            lineHeight: parseFloat(lineHeight),
            translationMode,
            translationLayout,
@@ -152,8 +148,11 @@
                   enabled: data.enabled,
                   disabled_colors: (data.disabled_colors || []).map(c => c.toLowerCase()),
                   words: data.words.map(w => {
-                    // Check for global word highlight color override
-                    const globalColorOverride = urlParams.get('wordHighlightColor');
+                    // Check for global word highlight color override. Hex digits
+                    // only: this value is interpolated into a style attribute when
+                    // a word is highlighted, so anything else in it would be
+                    // markup on every screen showing this URL.
+                    const globalColorOverride = hexColorParam(urlParams, 'wordHighlightColor');
                     return {
                       word: w.word,
                       color: globalColorOverride ? '#' + globalColorOverride : w.color,
@@ -206,9 +205,10 @@
           });
         }
 
-        // Hide menu buttons and status container if disabled
+        // Hide every piece of chrome when the URL asks for a bare output surface
+        // (OBS captures, projected screens, and the child iframes of "both" mode,
+        // which are always built with showMenu=false).
         if (!showMenu) {
-          $('.font-size-controls').hide();
           $('.status-container').hide();
         }
 
@@ -420,12 +420,10 @@
             const t = allTranslatedSegments.find(s => s.id === id);
             if (t) t.denied = denied;
           });
-          // Instant transcription refresh; force a clean rebuild of both views on the
-          // next periodic update (re-grabs element refs, avoids stale nodes).
+          // Instant transcription refresh (which invalidates its own view's cached
+          // nodes); the translation view is rebuilt on the next periodic update.
           if (typeof forceHighlightRerender === 'function') forceHighlightRerender();
-          _transcriptionStructureBuilt = false; _lastFinalizedHTML = ''; lastSegmentCount = -1;
           _translationStructureBuilt = false; _lastTranslationFinalizedHTML = ''; lastTranslatedSegmentCount = -1;
-          resetDripState(false);
           resetDripState(true);
         });
 
@@ -433,21 +431,10 @@
     </script>
 
     <style>
-      :root {
-        --primary-gradient: linear-gradient(135deg, #bb86fc 0%, #805ad5 100%);
-        --secondary-gradient: linear-gradient(135deg, #ed8936 0%, #dd6b20 100%);
-        --success-gradient: linear-gradient(135deg, #48bb78 0%, #38a169 100%);
-        --card-bg: #1c1c1c;
-        --text-primary: #e0e0e0;
-        --text-secondary: #999;
-        --border-color: #3a3a3a;
-        --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.3);
-        --shadow-md: 0 4px 6px rgba(0, 0, 0, 0.4);
-        --shadow-lg: 0 10px 15px rgba(0, 0, 0, 0.5);
-        --radius-sm: 8px;
-        --radius-md: 12px;
-        --radius-lg: 16px;
-      }
+      /* This page deliberately carries its own styling rather than extending
+         base.html: it is the output surface, sized and coloured by URL
+         parameters and often shown transparent inside OBS, so it must not
+         inherit the admin chrome. */
 
       * {
         margin: 0;
@@ -607,74 +594,51 @@
          text-align: inherit;
        }
 
-      /* Floating Action Buttons */
-      .font-size-controls {
+      /* Jump-to-latest pill — appears only while auto-scroll is paused, i.e.
+         while the reader is parked above the live edge. Mirrors the corrections
+         page's pill, in this page's own palette. Hidden with the rest of the
+         chrome when showMenu=false, so it can never appear on a projected
+         screen or inside an OBS capture. */
+      #jump-latest-btn {
         position: fixed;
-        right: 20px;
-        top: 50%;
-        transform: translateY(-50%);
-        display: flex;
-        flex-direction: column;
-        gap: 12px;
+        left: 50%;
+        bottom: 24px;
+        transform: translateX(-50%);
         z-index: 1000;
-      }
-
-      .font-size-controls button {
-        width: 48px;
-        height: 48px;
-        border-radius: 6px;
-        background: #2a2a2a;
-        color: #ffffff;
-        border: 1px solid #444;
-        cursor: pointer;
-        font-size: 16px;
-        display: flex;
+        display: none;  /* .visible switches it on; nothing else may show it */
         align-items: center;
-        justify-content: center;
-        box-shadow: 0 2px 4px rgba(0, 0, 0, 0.5);
+        gap: 8px;
+        padding: 8px 18px;
+        border: 1px solid #444;
+        border-radius: 18px;
+        background: #2a2a2a;
+        color: #e0e0e0;
+        cursor: pointer;
+        font-family: 'Segoe UI', 'Helvetica Neue', Arial, sans-serif;
+        font-size: 14px;
+        line-height: 1;
+        box-shadow: 0 2px 10px rgba(0, 0, 0, 0.5);
         transition: background-color 0.2s ease, border-color 0.2s ease;
       }
 
-      .font-size-controls button:hover {
+      #jump-latest-btn.visible {
+        display: flex;
+      }
+
+      #jump-latest-btn:hover {
         background: #3a3a3a;
         border-color: #666;
       }
 
-      .font-size-controls button:active {
-        transform: scale(0.95);
+      /* Caption mode is a thin strip along the bottom of the screen, so the
+         pill would sit on top of the captions it is offering to scroll. */
+      .caption-mode #jump-latest-btn {
+        bottom: auto;
+        top: 16px;
       }
 
-      .font-size-controls button i {
-        pointer-events: none;
-      }
-
-      /* Dark Mode Styles */
-      .dark-mode {
-        background: #111111;
-      }
-
-      .dark-mode .main-container {
-        background: rgba(28, 28, 28, 0.95);
-      }
-
-      .dark-mode .status-indicator {
-        background: #2a2a2a;
-        color: #e0e0e0;
-        border: 1px solid #444;
-      }
-
-      .dark-mode tbody tr {
-        background: #1c1c1c;
-        border: 1px solid #2a2a2a;
-      }
-
-      .dark-mode td {
-        color: #e0e0e0;
-      }
-
-      /* Light Mode Styles */
-      body.light-mode {
-        background: #f5f5f5;
+      @media (prefers-reduced-motion: reduce) {
+        #jump-latest-btn { transition: none; }
       }
 
       /* Empty State */
@@ -705,17 +669,6 @@
 
       /* Responsive Design */
       @media (max-width: 800px) {
-        .font-size-controls {
-          right: 10px;
-          gap: 8px;
-        }
-
-        .font-size-controls button {
-          width: 48px;
-          height: 48px;
-          font-size: 18px;
-        }
-
         #table-container {
           padding: 15px;
         }
@@ -925,7 +878,7 @@
             <div class="status-dot" id="translation-status-dot"></div>
             <span id="translation-status-text">Translation</span>
           </div>
-          <div id="disk-status-container" style="display: flex; align-items: center; gap: 6px; display: none;">
+          <div id="disk-status-container" style="align-items: center; gap: 6px; display: none;">
             <div class="status-dot" id="disk-status-dot"></div>
             <span id="disk-status-text">Disk Space</span>
           </div>
@@ -947,6 +900,11 @@
         </table>
       </div>
     </div>
+
+    <!-- Appears only while the reader has scrolled up and auto-scroll is paused -->
+    <button id="jump-latest-btn" type="button">
+      Scroll to latest <span aria-hidden="true">&#9660;</span>
+    </button>
 
     <!-- Both Mode Container (iframes for side-by-side or stacked view) -->
     <div id="both-mode-container">
@@ -1135,7 +1093,7 @@
            }
            const highlightedInProgress = applyWordHighlighting(lastIncompleteSegment.text);
            const styleClass = (window.displayConfig?.inProgressStyle === 'normal') ? 'in-progress-text normal-style' : 'in-progress-text';
-           const opacity = window.displayConfig?.inProgressOpacity || 0.7;
+           const opacity = window.displayConfig?.inProgressOpacity ?? 0.7;
            inProgressHTML = '<span class="' + styleClass + '" style="opacity: ' + opacity + '">' + highlightedInProgress + '</span>';
          }
 
@@ -1150,6 +1108,22 @@
          const textCell = $("<td>").html(cellHTML).css({"font-family": "inherit"});
          row.append(textCell);
          tableBody.append(row);
+
+         // The rebuild above threw away the structure updateTranscriptionDisplay()
+         // caches element references into, so #finalized-text and #in-progress-text
+         // now exist only as detached nodes. Without invalidating the cache, every
+         // later update writes into a node that is no longer in the document and
+         // the display silently freezes until the session stops or the page is
+         // reloaded — during a service, that is every update after a correction is
+         // applied or word highlighting is edited. The segment_denied handler used
+         // to do this at its own call site; it belongs here, where all four callers
+         // get it.
+         _transcriptionStructureBuilt = false;
+         _finalizedTextEl = null;
+         _inProgressTextEl = null;
+         _lastFinalizedHTML = '';
+         lastSegmentCount = -1;
+         resetDripState(false);
        }
 
        // Escape HTML special characters. Transcript/translation/correction text
@@ -1283,7 +1257,7 @@
        }
 
        function dripFeedText(newFullHTML, prevFullHTML, element, isTranslation) {
-         const dripSpeed = window.displayConfig?.dripSpeed || 30;
+         const dripSpeed = window.displayConfig?.dripSpeed ?? 30;
 
          // Baseline off what's ACTUALLY on screen right now, not prevFullHTML
          // (the previous call's target). If a prior drip was interrupted
@@ -1461,6 +1435,10 @@
            updateEmptyStateMessage();
            emptyState.style.display = 'block';
            table.classList.remove('has-content');
+           // Nothing left to scroll back to, so resume following and drop the pill
+           // rather than leaving it pointing at a display that was just cleared.
+           autoScrollEnabled = true;
+           if (window.updateJumpButton) window.updateJumpButton();
            return;
          } else {
            emptyState.style.display = 'none';
@@ -1555,7 +1533,7 @@
          if (hasInProgress && !window.displayConfig?.hideInProgress) {
            const highlightedInProgress = applyWordHighlighting(inProgressSegment.text);
            const styleClass = (window.displayConfig?.inProgressStyle === 'normal') ? 'in-progress-text normal-style' : 'in-progress-text';
-           const opacity = window.displayConfig?.inProgressOpacity || 0.7;
+           const opacity = window.displayConfig?.inProgressOpacity ?? 0.7;
            _inProgressTextEl.className = styleClass;
            _inProgressTextEl.style.opacity = opacity;
            _inProgressTextEl.innerHTML = highlightedInProgress;
@@ -1654,6 +1632,9 @@
              if (typeof data.is_running !== 'undefined') window.transcriptionIsRunning = data.is_running;
              updateEmptyStateMessage();
              emptyState.style.display = 'block';
+             // Nothing left to scroll back to (see the transcription path).
+             autoScrollEnabled = true;
+             if (window.updateJumpButton) window.updateJumpButton();
            }
            return;
          }
@@ -1749,7 +1730,7 @@
            if (hasInProgress) {
              const highlightedInProgress = applyWordHighlighting(effectiveInProgress.translated_text);
              const styleClass = (window.displayConfig?.inProgressStyle === 'normal') ? 'in-progress-text normal-style' : 'in-progress-text';
-             const opacity = window.displayConfig?.inProgressOpacity || 0.7;
+             const opacity = window.displayConfig?.inProgressOpacity ?? 0.7;
              _translationInProgressEl.className = styleClass;
              _translationInProgressEl.style.opacity = opacity;
              _translationInProgressEl.innerHTML = highlightedInProgress;
@@ -2099,13 +2080,37 @@
       // Detect manual scrolling and disable auto-scroll
       $(document).ready(function() {
         const container = $('#table-container')[0];
-        let isUserScrolling = false;
         let programmaticScroll = false; // Flag to ignore programmatic scrolls
 
         // Scroll to bottom on page load
         setTimeout(() => {
           container.scrollTop = container.scrollHeight;
         }, 100);
+
+        // Reading back through what was said means scrolling up, which pauses the
+        // auto-scroll — otherwise the next caption yanks the view to the bottom
+        // mid-sentence. The pill is the way back: while it is showing, the display
+        // is deliberately not following the live edge, and one click resumes.
+        // Never offered on a bare output surface (showMenu=false), where there is
+        // nobody to click it and it would be captured into the projection.
+        const jumpBtn = document.getElementById('jump-latest-btn');
+        function updateJumpButton() {
+          if (!jumpBtn) return;
+          const offer = !autoScrollEnabled && window.displayConfig?.showMenu !== false;
+          jumpBtn.classList.toggle('visible', offer);
+        }
+        window.updateJumpButton = updateJumpButton;
+
+        if (jumpBtn) {
+          jumpBtn.addEventListener('click', function() {
+            autoScrollEnabled = true;
+            // Jump rather than glide: a smooth scroll fires scroll events all the
+            // way down, each of them "not at the bottom", which would flash the
+            // pill back on for the length of the animation.
+            container.scrollTop = container.scrollHeight;
+            updateJumpButton();
+          });
+        }
 
         $(container).on('scroll', function() {
            // Ignore scroll events triggered by our own code
@@ -2119,15 +2124,10 @@
            const clientHeight = container.clientHeight;
            const isAtBottom = scrollTop + clientHeight >= scrollHeight - 10; // 10px threshold (more sensitive)
 
-           if (!isAtBottom) {
-             // User scrolled up, disable auto-scroll
-             autoScrollEnabled = false;
-             isUserScrolling = true;
-           } else {
-             // User is at bottom, immediately re-enable auto-scroll
-             autoScrollEnabled = true;
-             isUserScrolling = false;
-           }
+           // Scrolled up: stop following the live edge. Back at the bottom:
+           // resume immediately, so returning by hand needs no click.
+           autoScrollEnabled = isAtBottom;
+           updateJumpButton();
         });
 
         // Expose programmaticScroll flag globally for typing animation
@@ -2142,7 +2142,7 @@
           updateFontSize(newSize);
           // If inside an iframe, notify parent to update its URL
           if (window.parent !== window) {
-            window.parent.postMessage({ type: 'iframeFontSizeChanged', size: newSize }, '*');
+            window.parent.postMessage({ type: 'iframeFontSizeChanged', size: newSize }, window.location.origin);
           }
         });
 
@@ -2151,7 +2151,7 @@
           const newSize = Math.min(currentSize + 4, 120);
           updateFontSize(newSize);
           if (window.parent !== window) {
-            window.parent.postMessage({ type: 'iframeFontSizeChanged', size: newSize }, '*');
+            window.parent.postMessage({ type: 'iframeFontSizeChanged', size: newSize }, window.location.origin);
           }
         });
 
@@ -2165,7 +2165,7 @@
           window.history.replaceState({}, '', url);
 
           // Recalculate caption mode if active
-          const maxLines = parseInt(url.searchParams.get('maxLines')) || 0;
+          const maxLines = numParam(url.searchParams, 'maxLines', 0);
           if (maxLines > 0) {
             // Re-measure line height with new font size
             const lineHeight = url.searchParams.get('lineHeight') || '1.5';
@@ -2196,15 +2196,18 @@
           const iframeOriginal = document.getElementById('iframe-original');
           const iframeTranslated = document.getElementById('iframe-translated');
           if (iframeOriginal?.contentWindow) {
-            iframeOriginal.contentWindow.postMessage({ type: 'updateFontSize', size: size }, '*');
+            iframeOriginal.contentWindow.postMessage({ type: 'updateFontSize', size: size }, window.location.origin);
           }
           if (iframeTranslated?.contentWindow) {
-            iframeTranslated.contentWindow.postMessage({ type: 'updateFontSize', size: size }, '*');
+            iframeTranslated.contentWindow.postMessage({ type: 'updateFontSize', size: size }, window.location.origin);
           }
         }
 
         // Listen for font size updates from parent (when running inside an iframe in "both" mode)
         window.addEventListener('message', function(event) {
+          // "both" mode embeds this same page from this same origin, so anything
+          // from elsewhere is not part of that conversation.
+          if (event.origin !== window.location.origin) return;
           if (event.data?.type === 'updateFontSize') {
             updateFontSize(event.data.size);
           }
@@ -2221,10 +2224,10 @@
             const iframeOriginal = document.getElementById('iframe-original');
             const iframeTranslated = document.getElementById('iframe-translated');
             if (iframeOriginal?.contentWindow) {
-              iframeOriginal.contentWindow.postMessage({ type: 'updateFontSize', size: size }, '*');
+              iframeOriginal.contentWindow.postMessage({ type: 'updateFontSize', size: size }, window.location.origin);
             }
             if (iframeTranslated?.contentWindow) {
-              iframeTranslated.contentWindow.postMessage({ type: 'updateFontSize', size: size }, '*');
+              iframeTranslated.contentWindow.postMessage({ type: 'updateFontSize', size: size }, window.location.origin);
             }
           }
         });
