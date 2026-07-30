@@ -757,10 +757,14 @@ from stt.ct2_translate import (  # noqa: F401
 )
 # Session provenance: which models/decode settings produced a given transcript.
 from stt.llm_translate import (
+    DEFAULT_SYSTEM_PROMPT_TEMPLATE as _DEFAULT_LLM_SYSTEM_PROMPT,
     build_chat_messages as _llm_chat_messages,
     build_chat_payload as _llm_chat_payload,
+    build_system_prompt as _llm_system_prompt,
     local_model_path as _llm_local_model_path,
+    looks_like_reasoning_model as _llm_looks_like_reasoning,
     resolve_gpu_layers as _llm_resolve_gpu_layers,
+    scan_gguf_models as _scan_gguf_models,
     extract_chat_text as _llm_extract_text,
     validate_translation as _llm_validate,
 )
@@ -5951,6 +5955,7 @@ def get_translation_settings():
     languages_by_method = {
         "nllb": languages_for_method("nllb"),
         "madlad": languages_for_method("madlad"),
+        "llm": languages_for_method("llm"),
     }
 
     return jsonify({
@@ -6041,6 +6046,44 @@ def save_translation_settings():
         _remote["sync_dictionary_on_edit"] = bool(
             data["remote"].get("sync_dictionary_on_edit", _remote.get("sync_dictionary_on_edit", True)))
         config["live_translation"]["remote"] = _remote
+
+    # Save LLM translation config (same preserve-what-the-UI-didn't-send shape as
+    # remote above, so a form that omits the GGUF fields can't wipe them).
+    if "llm" in data:
+        _llm = dict(config.get("live_translation", {}).get("llm", {}) or {})
+        _sent = data["llm"] if isinstance(data["llm"], dict) else {}
+        _provider = str(_sent.get("provider", _llm.get("provider", "endpoint")) or "endpoint").lower()
+        _llm["provider"] = "local" if _provider == "local" else "endpoint"
+        for _key in ("endpoint", "model", "api_key", "system_prompt",
+                     "gguf_repo", "gguf_file", "gguf_path"):
+            if _key in _sent:
+                _llm[_key] = str(_sent.get(_key) or "")
+        # n_gpu_layers is "auto" or an int, so it is kept as a string-or-number
+        # rather than coerced — resolve_gpu_layers() interprets it at load time.
+        if "n_gpu_layers" in _sent:
+            _llm["n_gpu_layers"] = _sent["n_gpu_layers"] if _sent["n_gpu_layers"] not in ("", None) else "auto"
+        if "max_tokens" in _sent:
+            _llm["max_tokens"] = coerce_int(_sent.get("max_tokens"), 160, lo=16, hi=1024)
+        if "n_ctx" in _sent:
+            _llm["n_ctx"] = coerce_int(_sent.get("n_ctx"), 2048, lo=512, hi=32768)
+        if "timeout_ms" in _sent:
+            _llm["timeout_ms"] = coerce_int(_sent.get("timeout_ms"), 8000, lo=500, hi=120000)
+        if "warmup_timeout_ms" in _sent:
+            _llm["warmup_timeout_ms"] = coerce_int(_sent.get("warmup_timeout_ms"), 180000, lo=1000, hi=900000)
+        if "keep_alive" in _sent:
+            _llm["keep_alive"] = _sent["keep_alive"]
+        _llm_before = dict(config.get("live_translation", {}).get("llm", {}) or {})
+        config["live_translation"]["llm"] = _llm
+        # Only a change that affects which weights are resident forces a reload —
+        # the in-process load costs seconds (minutes on a cold CUDA box), and the
+        # system prompt is applied per caption, so re-reading it is free.
+        _reload_keys = ("provider", "gguf_repo", "gguf_file", "gguf_path",
+                        "n_gpu_layers", "n_ctx")
+        if any(_llm_before.get(k) != _llm.get(k) for k in _reload_keys):
+            try:
+                unload_local_llm()
+            except Exception:
+                pass  # a failed unload must not fail the save
 
     # Save translation alternatives count to corrections config
     if "translation_count" in data:
@@ -6422,8 +6465,18 @@ def get_translation_status():
     # Show Whisper model when using Whisper translation methods
     _method = trans_config.get("translation_method", "nllb")
     _using_whisper = _method in ("whisper_translate", "whisper_forced_lang")
+    # An LLM session must not be described by the NMT fields. A paired machine reads
+    # this endpoint to record what actually translated its captions, and reporting
+    # the standby NMT model there put "google/madlad400-3b-mt, device: cpu" into a
+    # transcript whose captions came from a GGUF on the GPU.
+    _llm_cfg = trans_config.get("llm") or {}
+    _using_llm = _method == "llm"
+    _llm_local = _using_llm and (_llm_cfg.get("provider") or "endpoint").strip().lower() == "local"
     if _using_whisper:
         _status_model = "whisper/" + config.get("model", {}).get("whisper", {}).get("model", "whisper")
+    elif _using_llm:
+        _status_model = ((_llm_cfg.get("gguf_file") or _llm_cfg.get("gguf_repo"))
+                         if _llm_local else _llm_cfg.get("model")) or "llm"
     else:
         _status_model = trans_config.get("translation_model", "facebook/nllb-200-distilled-600M")
 
@@ -6444,8 +6497,9 @@ def get_translation_status():
         "target_language_name": TRANSLATION_LANGUAGES.get(
             trans_config.get("target_language", "en"), "English"
         ),
-        "model_loaded": True if (remote_active or _using_whisper) else is_live_translation_model_loaded(),
-        "model_loading": False if (remote_active or _using_whisper) else is_live_translation_model_loading(),
+        "model_loaded": (_local_llm is not None if _llm_local else True)
+        if (remote_active or _using_whisper or _using_llm) else is_live_translation_model_loaded(),
+        "model_loading": False if (remote_active or _using_whisper or _using_llm) else is_live_translation_model_loading(),
         "translation_model": _status_model,
         "translation_method": _method,
         "remote_active": remote_active,
@@ -6457,7 +6511,8 @@ def get_translation_status():
         # Device the local NLLB model actually landed on ('cuda'/'mps'/'cpu',
         # null until loaded). 'cpu' on a machine meant to accelerate is the
         # classic cause of seconds-per-sentence translations.
-        "model_device": _live_translation_device if not (remote_active or _using_whisper) else None,
+        "model_device": _llm_device_label() if _using_llm else (
+            _live_translation_device if not (remote_active or _using_whisper) else None),
         # EMA of local NLLB per-translation latency (ms); null until a local
         # translation has run. High values flag the seconds-per-sentence problem.
         "local_translate_ms_ema": round(_local_translate_ms_ema, 1) if _local_translate_ms_ema is not None else None,
@@ -6475,7 +6530,13 @@ def get_translation_status():
         # Machine A reads these to show what this offload box will run with.
         "use_ctranslate2": bool(trans_config.get("use_ctranslate2", False)),
         "ct2_compute_type": trans_config.get("ct2_compute_type", "auto"),
-        "is_ctranslate2": bool(_live_translation_is_ct2) if not (remote_active or _using_whisper) else None,
+        "is_ctranslate2": None if _using_llm else (
+            bool(_live_translation_is_ct2) if not (remote_active or _using_whisper) else None),
+        # What an LLM session is actually running, so a paired machine records the
+        # model that translated rather than the NMT model standing by.
+        "llm_provider": (_llm_cfg.get("provider") or "endpoint") if _using_llm else None,
+        "llm_model": _status_model if _using_llm else None,
+        "llm_endpoint": (_llm_cfg.get("endpoint") or "") if (_using_llm and not _llm_local) else None,
     }
 
     # Only expose sensitive info (clients, pairs) to local/whitelisted or paired callers
@@ -6615,6 +6676,118 @@ def translate_unload():
         return jsonify({"success": True, "message": "Unloading translation model"})
 
     return jsonify({"success": True, "message": "Model not loaded"})
+
+
+@app.route("/api/models/gguf-list", methods=["GET"])
+def list_gguf_models():
+    """Downloaded GGUF models for the LLM translation picker.
+
+    ``runtime_available`` reports whether llama-cpp-python is importable, so the
+    settings page can say plainly that the in-process provider cannot run here
+    instead of letting a service discover it by falling back to the NMT model.
+    """
+    if not check_ip_whitelist():
+        return jsonify({"success": False, "error": "Access Denied"}), 403
+    return jsonify({
+        "success": True,
+        "runtime_available": local_llm_available(),
+        "models": _scan_gguf_models(MODELS_DIR),
+    })
+
+
+@app.route("/api/models/gguf-repo-files", methods=["GET"])
+def list_gguf_repo_files():
+    """The .gguf files a HuggingFace repo publishes, with sizes, newest-first by name.
+
+    A quantisation picker needs this because a GGUF repo carries a dozen variants of
+    one model and only one of them should ever be downloaded.
+    """
+    if not check_ip_whitelist():
+        return jsonify({"success": False, "error": "Access Denied"}), 403
+
+    repo_id = (request.args.get("repo_id") or "").strip()
+    if not repo_id:
+        return jsonify({"success": False, "error": "repo_id required"}), 400
+
+    try:
+        from huggingface_hub import HfApi as _HfApi
+        info = _HfApi().model_info(repo_id, files_metadata=True)
+        files = [{"name": s.rfilename, "size_bytes": s.size or 0}
+                 for s in (info.siblings or [])
+                 if s.rfilename.lower().endswith(".gguf")]
+    except Exception as e:
+        return jsonify({"success": False, "error": f"{type(e).__name__}: {e}"}), 502
+
+    downloaded = set()
+    try:
+        local = os.path.join(MODELS_DIR, repo_id.replace("/", "--"))
+        downloaded = {n for n in os.listdir(local) if n.lower().endswith(".gguf")}
+    except OSError:
+        pass
+    for f in files:
+        f["downloaded"] = f["name"] in downloaded
+
+    return jsonify({"success": True, "repo_id": repo_id,
+                    "files": sorted(files, key=lambda f: f["name"])})
+
+
+@app.route("/api/translate/llm-test", methods=["POST"])
+def test_llm_translation():
+    """Translate one fixed caption with the submitted (not yet saved) LLM settings.
+
+    Translating something real is the only check worth offering: it catches an
+    unreachable endpoint, a wrong model name, a missing GGUF — and the failure that
+    actually cost a service, a reasoning model that answers every caption with
+    "Okay, let's tackle this translation request…". No connectivity probe reveals
+    that one, which is why looks_like_reasoning_model() is reported here.
+    """
+    if not check_ip_whitelist():
+        return jsonify({"success": False, "error": "Access Denied"}), 403
+
+    data = _control_params(keep_blank=True)
+    llm_cfg = data.get("llm") if isinstance(data.get("llm"), dict) else data
+    lt = config.get("live_translation", {})
+    target_lang = str(data.get("target_language") or lt.get("target_language") or "en")
+
+    # A cold in-process load is far slower than a caption's budget, and this is an
+    # explicit, operator-initiated action — so it gets the warm-up timeout, not the
+    # caption one.
+    timeout = coerce_float(llm_cfg.get("warmup_timeout_ms"),
+                           coerce_float(lt.get("llm", {}).get("warmup_timeout_ms"), 180000),
+                           lo=1000, hi=900000) / 1000.0
+
+    # Clear a previous failed load so a corrected setting can actually be retried.
+    if (llm_cfg.get("provider") or "").strip().lower() == "local":
+        unload_local_llm()
+
+    source = "Да будет мир Твой, Господи, с нами всегда."
+    started = time.time()
+    try:
+        clean, raw, extra = _translate_via_llm(source, "ru", target_lang,
+                                               timeout_override=timeout,
+                                               llm_cfg_override=llm_cfg,
+                                               return_raw=True)
+    except Exception as e:
+        return jsonify({"success": False, "error": f"{type(e).__name__}: {e}"})
+    elapsed_ms = int((time.time() - started) * 1000)
+
+    if raw is None:
+        reason = extra if isinstance(extra, str) else None
+        return jsonify({"success": False,
+                        "error": reason or "No output — check the model, endpoint and file path.",
+                        "elapsed_ms": elapsed_ms})
+
+    return jsonify({
+        "success": True,
+        "source": source,
+        "raw": raw,
+        "translation": clean,
+        "accepted": clean is not None,
+        "reason": None if clean else "not a usable translation",
+        "elapsed_ms": elapsed_ms,
+        "reasoning_model": _llm_looks_like_reasoning(extra) if isinstance(extra, dict)
+        else bool(_llm_looks_like_reasoning({"message": {"content": raw}})),
+    })
 
 
 @app.route("/api/translate/preload", methods=["POST"])
@@ -10756,10 +10929,18 @@ def download_model():
             if not try_register_download(model_id):
                 return jsonify({"success": False, "error": "Download already in progress"}), 409
 
+            # A GGUF repo publishes a dozen quantisations of the same model, so the
+            # caller names the one file it wants; without this the download pulls
+            # 40+ GB to obtain the ~2-5 GB the operator picked.
+            _include = data.get("include") or data.get("gguf_file") or None
+            if isinstance(_include, str):
+                _include = [_include]
+
             try:
                 # Per-file download with resume + cancellation
                 # (huggingface_hub's snapshot_download hangs on large files)
-                outcome = download_hf_repo_files(model_id, local_dir, model_id)
+                outcome = download_hf_repo_files(model_id, local_dir, model_id,
+                                                 include=_include)
                 if outcome == "cancelled":
                     print(f"[CANCELLED] Download cancelled for {model_id}")
                     finish_download(model_id, cancelled=True)
@@ -13758,19 +13939,12 @@ def _translate_via_remote(text, source_lang, target_lang, endpoint,
         return text
 
 
-_DEFAULT_LLM_SYSTEM_PROMPT = (
-    "You translate live captions for a church service. Output ONLY the translation — "
-    "no notes, no explanation, no reasoning, no quotation marks. Render biblical and "
-    "liturgical terminology the way English Bibles and church usage do, and use the "
-    "standard English spelling of biblical names. Keep the speaker's register: plain "
-    "spoken language, not archaic English, except inside direct scripture quotations. "
-    "Preserve meaning exactly — never add, omit, explain, or answer the text. If the "
-    "input is a fragment, translate it as a fragment. If the input is a scripture "
-    "reference, translate only the reference; do not quote the passage."
-)
+# The prompt template lives in stt/llm_translate.py, where it is parameterised
+# by target language and unit-tested.
 
 
 _local_llm = None
+_local_llm_path = ""        # file the resident model was loaded from
 _local_llm_failed = False   # a load that failed once; do not retry per caption
 _local_llm_lock = threading.Lock()
 
@@ -13789,27 +13963,35 @@ def local_llm_available():
         return False
 
 
-def get_local_llm():
+def get_local_llm(llm_cfg_override=None):
     """Singleton in-process GGUF model, or None if unavailable.
 
     This is the provider that needs no server, no second installer and no extra port:
     one pip dependency and one model file, which is what makes LLM translation
     workable on a fresh Windows/Linux/macOS install where nothing else is present.
     """
-    global _local_llm, _local_llm_failed
-    if _local_llm is not None:
-        return _local_llm
+    global _local_llm, _local_llm_failed, _local_llm_path
     if not local_llm_available():
         print("[LLM-LOCAL] llama-cpp-python is not installed; "
               "install it or set live_translation.llm.provider to 'endpoint'")
         return None
 
-    llm_cfg = config.get("live_translation", {}).get("llm") or {}
+    llm_cfg = llm_cfg_override if llm_cfg_override is not None else (
+        config.get("live_translation", {}).get("llm") or {})
     gguf_repo = (llm_cfg.get("gguf_repo") or "").strip()
     gguf_file = (llm_cfg.get("gguf_file") or "").strip()
     path = (llm_cfg.get("gguf_path") or "").strip()
     if not path and gguf_repo and gguf_file:
         path = _llm_local_model_path(MODELS_DIR, gguf_repo, gguf_file)
+
+    # A different model than the resident one (the settings page testing a fresh
+    # choice) means the resident one is the wrong answer — swap rather than
+    # silently reporting on a model the operator is no longer asking about.
+    if _local_llm is not None and path and path != _local_llm_path:
+        unload_local_llm()
+    if _local_llm is not None:
+        return _local_llm
+
     if not path or not os.path.isfile(path):
         print(f"[LLM-LOCAL] model file not found ({path or 'unset'}); "
               "download it in the Model Manager")
@@ -13845,6 +14027,7 @@ def get_local_llm():
                 n_gpu_layers=n_gpu_layers,
                 verbose=False,
             )
+            _local_llm_path = path
             print(f"[LLM-LOCAL] loaded {os.path.basename(path)}")
         except Exception as e:
             print(f"[LLM-LOCAL] load failed: {e}")
@@ -13862,11 +14045,37 @@ def get_local_llm():
     return _local_llm
 
 
+def _llm_device_label():
+    """Where the in-process GGUF is running: 'metal', 'cuda', 'cpu', or None.
+
+    Reported so a paired machine records the device that actually translated. An
+    endpoint provider returns None — the device belongs to the other machine and
+    guessing it here would assert something this box cannot know.
+    """
+    llm_cfg = config.get("live_translation", {}).get("llm") or {}
+    if (llm_cfg.get("provider") or "endpoint").strip().lower() != "local":
+        return None
+    if _local_llm is None:
+        return None
+    try:
+        if _llm_resolve_gpu_layers(llm_cfg.get("n_gpu_layers", "auto"), True) == 0:
+            return "cpu"
+        _lazy_import_ml_libraries()
+        if torch.cuda.is_available():
+            return "cuda"
+        if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+            return "metal"
+    except Exception:
+        pass
+    return "cpu"
+
+
 def unload_local_llm():
     """Release the in-process model, and allow a later load to be retried."""
-    global _local_llm, _local_llm_failed
+    global _local_llm, _local_llm_failed, _local_llm_path
     with _local_llm_lock:
         _local_llm_failed = False
+        _local_llm_path = ""
         if _local_llm is not None:
             _local_llm = None
             import gc
@@ -13874,9 +14083,9 @@ def unload_local_llm():
             print("[LLM-LOCAL] model unloaded")
 
 
-def _translate_via_local_llm(text, system_prompt, max_tokens):
+def _translate_via_local_llm(text, system_prompt, max_tokens, llm_cfg_override=None):
     """One caption through the in-process GGUF model. Returns raw text or None."""
-    llm = get_local_llm()
+    llm = get_local_llm(llm_cfg_override)
     if llm is None:
         return None
     try:
@@ -13891,7 +14100,8 @@ def _translate_via_local_llm(text, system_prompt, max_tokens):
         return None
 
 
-def _translate_via_llm(text, source_lang, target_lang, timeout_override=None):
+def _translate_via_llm(text, source_lang, target_lang, timeout_override=None,
+                       llm_cfg_override=None, return_raw=False):
     """Translate one caption with an LLM. Returns the caption, or None to fall back.
 
     None means "use the NMT model instead". An LLM can return its own reasoning, a
@@ -13904,21 +14114,28 @@ def _translate_via_llm(text, source_lang, target_lang, timeout_override=None):
     server: Ollama (``/api/chat``), llama-server, LM Studio, vLLM or a hosted API
     (``/v1/chat/completions``). Nothing here is Ollama-specific.
     """
-    llm_cfg = config.get("live_translation", {}).get("llm") or {}
-    system_prompt = llm_cfg.get("system_prompt") or _DEFAULT_LLM_SYSTEM_PROMPT
+    llm_cfg = llm_cfg_override if llm_cfg_override is not None else (
+        config.get("live_translation", {}).get("llm") or {})
+    # The configured target language must reach the prompt, not just the validator:
+    # the wrong-script screen looks for Cyrillic, so an English answer to a Spanish
+    # request passes it and the session captions the wrong language in silence.
+    system_prompt = _llm_system_prompt(
+        llm_cfg.get("system_prompt") or _DEFAULT_LLM_SYSTEM_PROMPT,
+        target_lang, TRANSLATION_LANGUAGES)
     max_tokens = coerce_int(llm_cfg.get("max_tokens"), 160, lo=16, hi=1024)
 
     # provider "local" runs the model in-process from a GGUF: no server, no extra
     # installer, no port — which is what makes this workable on a fresh install that
     # has no inference runtime of its own.
     if (llm_cfg.get("provider") or "endpoint").strip().lower() == "local":
-        return _llm_validate(_translate_via_local_llm(text, system_prompt, max_tokens),
-                             text, target_lang)
+        raw = _translate_via_local_llm(text, system_prompt, max_tokens, llm_cfg_override)
+        clean = _llm_validate(raw, text, target_lang)
+        return (clean, raw, None) if return_raw else clean
 
     endpoint = (llm_cfg.get("endpoint") or "").strip()
     model = (llm_cfg.get("model") or "").strip()
     if not endpoint or not model:
-        return None
+        return (None, None, None) if return_raw else None
 
     payload = _llm_chat_payload(
         model, text, system_prompt,
@@ -13945,9 +14162,11 @@ def _translate_via_llm(text, source_lang, target_lang, timeout_override=None):
         data = resp.json()
     except Exception as e:
         print(f"[LLM-TRANSLATE] call failed ({type(e).__name__}: {e})")
-        return None
+        return (None, None, f"{type(e).__name__}: {e}") if return_raw else None
 
-    return _llm_validate(_llm_extract_text(data), text, target_lang)
+    raw = _llm_extract_text(data)
+    clean = _llm_validate(raw, text, target_lang)
+    return (clean, raw, data) if return_raw else clean
 
 
 def translate_live_text(text, source_lang, target_lang, return_extras=False, num_alternatives=0, generation_params=None, local_only=False):

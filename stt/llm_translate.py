@@ -68,16 +68,79 @@ _STRIPPABLE_PREFIXES = (
 )
 
 
+# The shipped prompt, as a template. "{language}" is filled with the configured
+# target language's English name, because the wording that makes this feature work
+# — render terminology the way that language's Bibles and churches do — is
+# necessarily language-specific. An earlier version hard-coded English here, and a
+# session configured for Spanish silently produced English captions: the target
+# language reached only the validator, whose wrong-script screen looks for Cyrillic
+# and so waved English through.
+DEFAULT_SYSTEM_PROMPT_TEMPLATE = (
+    "You translate live captions for a church service. Output ONLY the translation — "
+    "no notes, no explanation, no reasoning, no quotation marks. Render biblical and "
+    "liturgical terminology the way {language} Bibles and church usage do, and use the "
+    "standard {language} spelling of biblical names. Keep the speaker's register: plain "
+    "spoken language, not archaic {language}, except inside direct scripture quotations. "
+    "Preserve meaning exactly — never add, omit, explain, or answer the text. If the "
+    "input is a fragment, translate it as a fragment. If the input is a scripture "
+    "reference, translate only the reference; do not quote the passage."
+)
+
+
+def language_name(code: Optional[str], names: Optional[Mapping[str, str]] = None) -> str:
+    """English name for a UI language code ("es" -> "Spanish").
+
+    Unknown codes return the code itself rather than a guess or an empty string, so
+    a prompt built from one still names *something* specific and the operator can
+    see what was sent. ``names`` is the catalog to look in, passed by the caller so
+    this module stays free of import-time dependencies.
+    """
+    text = (code or "").strip()
+    if not text:
+        return ""
+    if names:
+        found = names.get(text) or names.get(text.lower())
+        if found:
+            return str(found)
+    return text
+
+
+def build_system_prompt(base_prompt: str, target_lang: Optional[str],
+                        names: Optional[Mapping[str, str]] = None) -> str:
+    """The system prompt for a given target language.
+
+    Fills "{language}" in a template, and then states the target explicitly at the
+    end regardless. The trailing directive is not redundant belt-and-braces: an
+    operator's custom prompt is written for whatever language they had configured
+    when they wrote it, and without it a later target-language switch would leave
+    the model still being told to produce the old one — the silent failure this
+    function exists to prevent. Stating the target twice costs a few tokens; a
+    service captioned into the wrong language costs rather more.
+    """
+    name = language_name(target_lang, names)
+    text = (base_prompt or "").strip() or DEFAULT_SYSTEM_PROMPT_TEMPLATE
+    if "{language}" in text:
+        text = text.replace("{language}", name or "the target language")
+    if not name:
+        return text
+    return f"{text}\n\nTranslate into {name}. Output only {name}."
+
+
 def build_chat_messages(text: str, system_prompt: str,
-                        draft: Optional[str] = None) -> List[Dict[str, str]]:
+                        draft: Optional[str] = None,
+                        source_name: str = "Source") -> List[Dict[str, str]]:
     """OpenAI-style messages for one caption.
 
     ``draft`` switches to post-editing (source plus an NMT draft). Measurement favours
     leaving it None — translating from the source caught meaning errors that
     post-editing anchored on and missed — but the shape is kept because post-editing
     was better on terminology and may be wanted when both models can be resident.
+
+    ``source_name`` labels the source line in that post-editing prompt; it defaults
+    to a neutral word rather than naming a language, since the source is often
+    "auto".
     """
-    user = f"Russian: {text}\nDraft translation: {draft}" if draft else text
+    user = f"{source_name}: {text}\nDraft translation: {draft}" if draft else text
     return [{"role": "system", "content": system_prompt},
             {"role": "user", "content": user}]
 
@@ -119,6 +182,44 @@ def local_model_path(models_dir: str, gguf_repo: str, gguf_file: str) -> str:
     follows the same convention and is found by the same browse/delete tooling.
     """
     return os.path.join(models_dir, gguf_repo.replace("/", "--"), gguf_file)
+
+
+def scan_gguf_models(models_dir: str) -> List[Dict[str, Any]]:
+    """Downloaded GGUF models as [{repo, files: [{name, size_bytes}]}], repo-sorted.
+
+    The inverse of local_model_path: a directory named for the repo with "/"
+    replaced by "--", holding one or more quantisations. Only directories that
+    actually contain a .gguf are reported, so a half-deleted or unrelated model
+    directory does not appear as an empty choice in the picker.
+
+    A missing or unreadable models directory yields [] rather than raising — the
+    caller is a settings page that must still render.
+    """
+    out: List[Dict[str, Any]] = []
+    try:
+        entries = sorted(os.listdir(models_dir))
+    except OSError:
+        return out
+    for entry in entries:
+        path = os.path.join(models_dir, entry)
+        if not os.path.isdir(path):
+            continue
+        files: List[Dict[str, Any]] = []
+        try:
+            names = sorted(os.listdir(path))
+        except OSError:
+            continue
+        for name in names:
+            if not name.lower().endswith(".gguf"):
+                continue
+            try:
+                size = os.path.getsize(os.path.join(path, name))
+            except OSError:
+                size = 0
+            files.append({"name": name, "size_bytes": size})
+        if files:
+            out.append({"repo": entry.replace("--", "/"), "dir": entry, "files": files})
+    return out
 
 
 def resolve_gpu_layers(n_gpu_layers: Any, has_gpu: bool) -> int:

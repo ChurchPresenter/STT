@@ -228,6 +228,10 @@ def remote_provenance(status: Optional[Mapping[str, Any]]) -> Dict[str, str]:
         ("dtype", "model_dtype"),
         ("ct2", "is_ctranslate2"),
         ("ct2_compute_type", "ct2_compute_type"),
+        # Present only when the remote translates with an LLM; an NMT remote omits
+        # them and they are simply absent from the transcript.
+        ("llm_provider", "llm_provider"),
+        ("llm_endpoint", "llm_endpoint"),
     )
     meta: Dict[str, str] = {}
     for suffix, source in fields:

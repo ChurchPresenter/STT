@@ -294,6 +294,7 @@
                     <select id="translation_method" data-a-controlled onchange="onTranslationMethodChange()">
                         <option value="nllb">NLLB Model (any language)</option>
                         <option value="madlad">MADLAD-400 (Google, any language)</option>
+                        <option value="llm">LLM (instruction model, best terminology)</option>
                         <option value="whisper_translate">Whisper Translate (English only)</option>
                         <option value="whisper_forced_lang">Whisper Forced Language (Experimental)</option>
                     </select>
@@ -306,6 +307,110 @@
                 <div id="whisper_forced_warning" style="display:none; background: var(--warning-bg); border: 1px solid var(--warning); border-radius: var(--radius-sm); padding: 8px 12px; margin-bottom: 10px;">
                     <small style="color: #ff9900; font-size: 0.8em;">Experimental: Forces Whisper to output in the target language. Quality varies by language pair. Whisper runs twice per audio chunk.</small>
                 </div>
+
+                <!-- LLM translation. Unlike an NMT model an LLM can be told the
+                     domain ("render biblical terminology as English Bibles do"),
+                     which fixes a class of error no decoding parameter reaches. -->
+                <div id="llm_settings_group" style="display:none;">
+                    <div id="llm_unavailable_notice" style="display:none; background: var(--warning-bg); border: 1px solid var(--warning); border-radius: var(--radius-sm); padding: 8px 12px; margin-bottom: 10px;">
+                        <small style="color: #ffcc00; font-size: 0.8em;">
+                            <strong>llama-cpp-python is not installed</strong>, so the in-process
+                            provider cannot run here. Captions will fall back to the NMT model.
+                            Install it with <code>pip install llama-cpp-python</code>, or use the
+                            Endpoint provider to reach a server on another machine.
+                        </small>
+                    </div>
+
+                    <div class="form-group">
+                        <label for="llm_provider">Provider</label>
+                        <select id="llm_provider" data-a-controlled onchange="onLlmProviderChange()">
+                            <option value="local">Local (in-process GGUF — no server needed)</option>
+                            <option value="endpoint">Endpoint (any OpenAI-compatible server)</option>
+                        </select>
+                        <small style="color: var(--text-secondary); font-size: 0.75em;">Local runs a GGUF in this process — no extra installer, service or port. Endpoint talks to Ollama, llama-server, LM Studio, vLLM or a hosted API.</small>
+                    </div>
+
+                    <div id="llm_local_fields">
+                        <div class="form-group">
+                            <label for="llm_gguf_repo">GGUF Model</label>
+                            <select id="llm_gguf_repo" data-a-controlled onchange="onLlmGgufRepoChange()">
+                                <!-- Populated from downloaded GGUF models -->
+                            </select>
+                            <small style="color: var(--text-secondary); font-size: 0.75em;">Downloaded GGUF models. Add more from the <a href="/model-manager">Model Manager</a>.</small>
+                        </div>
+                        <div class="form-group">
+                            <label for="llm_gguf_file">Quantisation</label>
+                            <select id="llm_gguf_file" data-a-controlled>
+                                <!-- Populated from the files in the selected repo -->
+                            </select>
+                            <small style="color: var(--text-secondary); font-size: 0.75em;">Q4_K_M is the usual balance of size and quality.</small>
+                        </div>
+                        <div class="form-group">
+                            <label for="llm_n_gpu_layers">GPU Layers</label>
+                            <input type="text" id="llm_n_gpu_layers" data-a-controlled placeholder="auto" style="width:100%;">
+                            <small style="color: var(--text-secondary); font-size: 0.75em;">"auto" = all layers when an accelerator is present, none otherwise. 0 = CPU only (works everywhere; a caption is short). On an NVIDIA box already running Whisper, offloading all layers has been seen to crash the process — prefer the Endpoint provider there.</small>
+                        </div>
+                        <div class="form-group">
+                            <label for="llm_n_ctx">Context Size: <span id="llmNCtxValue">2048</span></label>
+                            <input type="range" id="llm_n_ctx" data-a-controlled min="512" max="8192" value="2048" step="512"
+                                   oninput="document.getElementById('llmNCtxValue').textContent = this.value"
+                                   style="width:100%;">
+                        </div>
+                    </div>
+
+                    <div id="llm_endpoint_fields" style="display:none;">
+                        <div class="form-group">
+                            <label for="llm_endpoint">Endpoint URL</label>
+                            <input type="text" id="llm_endpoint" data-a-controlled placeholder="http://192.168.1.50:11434/api/chat" style="width:100%;">
+                            <small style="color: var(--text-secondary); font-size: 0.75em;">The full chat URL: Ollama <code>/api/chat</code>, OpenAI-compatible <code>/v1/chat/completions</code>.</small>
+                        </div>
+                        <div class="form-group">
+                            <label for="llm_model">Model Name</label>
+                            <input type="text" id="llm_model" data-a-controlled placeholder="qwen2.5:7b-instruct" style="width:100%;">
+                        </div>
+                        <div class="form-group">
+                            <label for="llm_api_key">API Key <span style="color: var(--text-secondary); font-weight: normal;">(optional)</span></label>
+                            <input type="password" id="llm_api_key" data-a-controlled autocomplete="off" style="width:100%;">
+                            <small style="color: var(--text-secondary); font-size: 0.75em;">Sent as a bearer token. Leave empty for a local server.</small>
+                        </div>
+                    </div>
+
+                    <button onclick="testLlmConnection()" class="btn-save" id="llm_test_btn">Test Translation</button>
+                    <div id="llm_test_result" style="display:none; margin-top: 8px; padding: 8px 12px; border-radius: var(--radius-sm); font-size: 0.8em;"></div>
+
+                    <hr class="divider">
+
+                    <!-- The single highest-value control here: the prompt is what
+                         teaches the model the service's terminology, and it is the
+                         reason an LLM beats an NMT model on this material. -->
+                    <div class="form-group">
+                        <label for="llm_system_prompt">System Prompt</label>
+                        <textarea id="llm_system_prompt" data-a-controlled rows="8" style="width:100%; font-family: inherit; font-size: 0.85em;" placeholder="Leave empty to use the built-in prompt."></textarea>
+                        <small style="color: var(--text-secondary); font-size: 0.75em;">
+                            How the model is told to translate — the tuning surface for terminology
+                            (e.g. "вечеря = communion", "render biblical names as English Bibles do").
+                            <code>{language}</code> is replaced with the target language. Leave empty
+                            for the built-in prompt. The configured target language is always appended,
+                            so a prompt written for one language still follows a later switch.
+                        </small>
+                    </div>
+
+                    <div class="form-group">
+                        <label for="llm_max_tokens">Max Tokens: <span id="llmMaxTokensValue">160</span></label>
+                        <input type="range" id="llm_max_tokens" data-a-controlled min="16" max="512" value="160" step="16"
+                               oninput="document.getElementById('llmMaxTokensValue').textContent = this.value"
+                               style="width:100%;">
+                        <small style="color: var(--text-secondary); font-size: 0.75em;">A caption is short — measured p50 19 tokens, p90 41. Headroom is for long sentences, not for commentary.</small>
+                    </div>
+
+                    <div class="form-group">
+                        <label for="llm_timeout_ms">Caption Timeout: <span id="llmTimeoutValue">8000</span> ms</label>
+                        <input type="range" id="llm_timeout_ms" data-a-controlled min="500" max="30000" value="8000" step="500"
+                               oninput="document.getElementById('llmTimeoutValue').textContent = this.value"
+                               style="width:100%;">
+                        <small style="color: var(--text-secondary); font-size: 0.75em;">Past this the caption falls back to the NMT model rather than arriving late.</small>
+                    </div>
+                </div><!-- /llm_settings_group -->
 
                 <div id="nllb_settings_group">
                 <div class="form-group" id="local_model_settings">
@@ -795,6 +900,8 @@
                     loadRemoteModels();
                     toggleRemoteFields();
 
+                    applyLlmSettings(currentSettings.llm);
+
                     // Translation method first, then load THAT engine's model list
                     // and re-select the saved model within it.
                     const translationMethod = currentSettings.translation_method || 'nllb';
@@ -990,6 +1097,7 @@
                     repetition_penalty: parseFloat(document.getElementById('repetition_penalty').value),
                 },
                 context_window: parseInt(document.getElementById('context_window').value),
+                llm: collectLlmSettings(),
                 remote: {
                     enabled: document.getElementById('remote_translation_enabled').checked,
                     endpoint: document.getElementById('remote_translation_endpoint').value.trim(),
@@ -1251,8 +1359,19 @@
             const whisperForcedWarn = document.getElementById('whisper_forced_warning');
             const nllbRemoteSection = document.getElementById('nllb_remote_section');
             const nllbSettingsGroup = document.getElementById('nllb_settings_group');
+            const llmSettingsGroup = document.getElementById('llm_settings_group');
 
-            if (method === 'nllb' || method === 'madlad') {
+            // The LLM keeps the offload section: this box may translate locally with
+            // an LLM, or hand captions to a paired machine that does.
+            llmSettingsGroup.style.display = method === 'llm' ? '' : 'none';
+
+            if (method === 'llm') {
+                nllbRemoteSection.style.display = '';
+                nllbSettingsGroup.style.display = 'none';
+                whisperTransWarn.style.display = 'none';
+                whisperForcedWarn.style.display = 'none';
+                onLlmProviderChange();
+            } else if (method === 'nllb' || method === 'madlad') {
                 nllbRemoteSection.style.display = '';
                 nllbSettingsGroup.style.display = '';
                 whisperTransWarn.style.display = 'none';
@@ -1286,6 +1405,136 @@
                     showAlert('Whisper Translate only supports English. Target language set to English.', 'warning');
                 }
             }
+        }
+
+        // ---- LLM translation -------------------------------------------------
+
+        // Cached GGUF listing: {repo: [file, ...]}, so changing repo repopulates the
+        // quantisation dropdown without another round trip.
+        let llmGgufModels = {};
+        let llmLocalAvailable = null;   // null = not probed yet
+
+        function onLlmProviderChange() {
+            const local = document.getElementById('llm_provider').value === 'local';
+            document.getElementById('llm_local_fields').style.display = local ? '' : 'none';
+            document.getElementById('llm_endpoint_fields').style.display = local ? 'none' : '';
+            // Absent llama-cpp-python is not an error — it degrades to the NMT
+            // model — but the operator has to be told, or a service silently
+            // captions with the wrong engine.
+            document.getElementById('llm_unavailable_notice').style.display =
+                (local && llmLocalAvailable === false) ? '' : 'none';
+        }
+
+        function onLlmGgufRepoChange(selectFile) {
+            const repo = document.getElementById('llm_gguf_repo').value;
+            const sel = document.getElementById('llm_gguf_file');
+            const files = llmGgufModels[repo] || [];
+            sel.innerHTML = files.length
+                ? files.map(f => `<option value="${escapeHtml(f)}">${escapeHtml(f)}</option>`).join('')
+                : '<option value="">No files found</option>';
+            if (selectFile && files.includes(selectFile)) sel.value = selectFile;
+        }
+
+        async function loadLlmModels(selectRepo, selectFile) {
+            try {
+                const r = await fetch('/api/models/gguf-list');
+                const data = await r.json();
+                llmLocalAvailable = data.runtime_available === true;
+                llmGgufModels = {};
+                (data.models || []).forEach(m => { llmGgufModels[m.repo] = m.files || []; });
+                const repos = Object.keys(llmGgufModels);
+                const sel = document.getElementById('llm_gguf_repo');
+                sel.innerHTML = repos.length
+                    ? repos.map(r2 => `<option value="${escapeHtml(r2)}">${escapeHtml(r2)}</option>`).join('')
+                    : '<option value="">No GGUF models downloaded</option>';
+                if (selectRepo && repos.includes(selectRepo)) sel.value = selectRepo;
+                onLlmGgufRepoChange(selectFile);
+                onLlmProviderChange();
+            } catch (e) {
+                console.error('Failed to load GGUF models:', e);
+            }
+        }
+
+        // Translating one real sentence is the only check that means anything: it
+        // catches an unreachable endpoint, a wrong model name, and — the failure
+        // that cost a service — a reasoning model that narrates instead of
+        // answering, which no connectivity probe would reveal.
+        async function testLlmConnection() {
+            const btn = document.getElementById('llm_test_btn');
+            const out = document.getElementById('llm_test_result');
+            btn.disabled = true;
+            btn.textContent = 'Testing...';
+            out.style.display = 'block';
+            out.style.background = 'var(--bg-tertiary)';
+            out.style.border = '1px solid var(--border)';
+            out.innerHTML = 'Loading the model and translating a test caption. A cold start can take a minute.';
+            try {
+                const r = await fetch('/api/translate/llm-test', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify(collectLlmSettings())
+                });
+                const data = await r.json();
+                const ok = data.success && data.accepted;
+                out.style.background = ok ? 'var(--success-bg, var(--bg-tertiary))' : 'var(--warning-bg)';
+                out.style.border = '1px solid ' + (ok ? 'var(--success, var(--border))' : 'var(--warning)');
+                let html = '';
+                if (!data.success) {
+                    html = `<strong>Failed:</strong> ${escapeHtml(data.error || 'unknown error')}`;
+                } else {
+                    html = `<strong>${escapeHtml(data.source || '')}</strong><br>` +
+                           `→ ${escapeHtml(data.translation || data.raw || '(no output)')}`;
+                    if (data.elapsed_ms != null) html += `<br><span style="color: var(--text-secondary);">${data.elapsed_ms} ms</span>`;
+                    if (!data.accepted) {
+                        html += `<br><span style="color: #ffcc00;">Rejected by validation (${escapeHtml(data.reason || 'unusable output')}) — captions would fall back to the NMT model.</span>`;
+                    }
+                    if (data.reasoning_model) {
+                        html += `<br><span style="color: #ffcc00;">This model appears to emit its reasoning. Measured against a real service, such a model returned "Okay, let's tackle this translation request…" for every caption. Choose a non-reasoning instruct model.</span>`;
+                    }
+                }
+                out.innerHTML = html;
+            } catch (e) {
+                out.style.background = 'var(--warning-bg)';
+                out.innerHTML = `<strong>Failed:</strong> ${escapeHtml(e.message || String(e))}`;
+            } finally {
+                btn.disabled = false;
+                btn.textContent = 'Test Translation';
+            }
+        }
+
+        function collectLlmSettings() {
+            return {
+                provider: document.getElementById('llm_provider').value,
+                endpoint: document.getElementById('llm_endpoint').value.trim(),
+                model: document.getElementById('llm_model').value.trim(),
+                api_key: document.getElementById('llm_api_key').value,
+                gguf_repo: document.getElementById('llm_gguf_repo').value,
+                gguf_file: document.getElementById('llm_gguf_file').value,
+                n_gpu_layers: document.getElementById('llm_n_gpu_layers').value.trim() || 'auto',
+                n_ctx: parseInt(document.getElementById('llm_n_ctx').value, 10),
+                system_prompt: document.getElementById('llm_system_prompt').value,
+                max_tokens: parseInt(document.getElementById('llm_max_tokens').value, 10),
+                timeout_ms: parseInt(document.getElementById('llm_timeout_ms').value, 10)
+            };
+        }
+
+        function applyLlmSettings(llm) {
+            if (!llm) llm = {};
+            document.getElementById('llm_provider').value = llm.provider === 'endpoint' ? 'endpoint' : 'local';
+            document.getElementById('llm_endpoint').value = llm.endpoint || '';
+            document.getElementById('llm_model').value = llm.model || '';
+            document.getElementById('llm_api_key').value = llm.api_key || '';
+            document.getElementById('llm_n_gpu_layers').value = (llm.n_gpu_layers === undefined || llm.n_gpu_layers === '') ? 'auto' : llm.n_gpu_layers;
+            document.getElementById('llm_system_prompt').value = llm.system_prompt || '';
+            const setRange = (id, labelId, value, fallback) => {
+                const v = (value === undefined || value === null || value === '') ? fallback : value;
+                document.getElementById(id).value = v;
+                document.getElementById(labelId).textContent = v;
+            };
+            setRange('llm_n_ctx', 'llmNCtxValue', llm.n_ctx, 2048);
+            setRange('llm_max_tokens', 'llmMaxTokensValue', llm.max_tokens, 160);
+            setRange('llm_timeout_ms', 'llmTimeoutValue', llm.timeout_ms, 8000);
+            loadLlmModels(llm.gguf_repo, llm.gguf_file);
         }
 
         function escapeHtml(s) {

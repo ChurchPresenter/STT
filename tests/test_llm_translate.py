@@ -4,17 +4,25 @@ The rejection fixtures are verbatim outputs observed while measuring candidate m
 against real captions — not invented cases.
 """
 
+import os
+
 import pytest
 
 from stt.llm_translate import (
+    DEFAULT_SYSTEM_PROMPT_TEMPLATE,
     build_chat_messages,
     build_chat_payload,
+    build_system_prompt,
     extract_chat_text,
+    language_name,
     local_model_path,
     looks_like_reasoning_model,
     resolve_gpu_layers,
+    scan_gguf_models,
     validate_translation,
 )
+
+NAMES = {"en": "English", "es": "Spanish", "de": "German", "ru": "Russian"}
 
 SRC = "Да будет мир Твой, Господи, с нами всегда."
 GOOD = "May Your peace, Lord, remain with us always."
@@ -28,9 +36,82 @@ class TestBuildChatMessages:
         assert m[1]["content"] == "Мир вам."
 
     def test_draft_switches_to_post_editing(self):
-        m = build_chat_messages("Мир вам.", "SYS", draft="Peace be with you.")
+        m = build_chat_messages("Мир вам.", "SYS", draft="Peace be with you.",
+                                source_name="Russian")
         assert "Russian: Мир вам." in m[1]["content"]
         assert "Draft translation: Peace be with you." in m[1]["content"]
+
+    def test_source_label_defaults_to_a_neutral_word(self):
+        # The source is frequently "auto", so the label must not assert a language.
+        m = build_chat_messages("Мир вам.", "SYS", draft="Peace be with you.")
+        assert "Source: Мир вам." in m[1]["content"]
+        assert "Russian" not in m[1]["content"]
+
+
+class TestLanguageName:
+    def test_known_code(self):
+        assert language_name("es", NAMES) == "Spanish"
+
+    def test_case_insensitive(self):
+        assert language_name("ES", NAMES) == "Spanish"
+
+    def test_unknown_code_returns_the_code(self):
+        # Not a guess and not empty: the operator can see what was actually sent.
+        assert language_name("zz", NAMES) == "zz"
+
+    @pytest.mark.parametrize("code", [None, "", "   "])
+    def test_missing_code_is_empty(self, code):
+        assert language_name(code, NAMES) == ""
+
+    def test_without_a_catalog(self):
+        assert language_name("es") == "es"
+
+
+class TestBuildSystemPrompt:
+    """The regression: a Spanish session that silently produced English."""
+
+    def test_template_is_filled_with_the_target_language(self):
+        p = build_system_prompt(DEFAULT_SYSTEM_PROMPT_TEMPLATE, "es", NAMES)
+        assert "Spanish Bibles" in p
+        assert "{language}" not in p
+        assert "English" not in p, "the shipped prompt must not assert English"
+
+    def test_english_target_reads_naturally(self):
+        p = build_system_prompt(DEFAULT_SYSTEM_PROMPT_TEMPLATE, "en", NAMES)
+        assert "English Bibles" in p
+        assert "Translate into English." in p
+
+    def test_target_is_stated_explicitly(self):
+        assert "Translate into German." in build_system_prompt("", "de", NAMES)
+
+    def test_custom_prompt_still_gets_the_target_appended(self):
+        """A custom prompt is written for the language configured at the time.
+
+        Without the appended directive, switching the target later would leave the
+        model still being told to produce the old language — silently, because the
+        validator's wrong-script screen cannot tell English from Spanish.
+        """
+        custom = "You translate for a Baptist service. Render вечеря as communion."
+        p = build_system_prompt(custom, "es", NAMES)
+        assert p.startswith(custom)
+        assert "Translate into Spanish." in p
+
+    def test_custom_prompt_may_use_the_placeholder_too(self):
+        p = build_system_prompt("Answer in {language} only.", "de", NAMES)
+        assert "Answer in German only." in p
+
+    def test_blank_base_falls_back_to_the_shipped_template(self):
+        p = build_system_prompt("   ", "en", NAMES)
+        assert "live captions for a church service" in p
+
+    def test_unknown_target_still_names_something(self):
+        p = build_system_prompt(DEFAULT_SYSTEM_PROMPT_TEMPLATE, "zz", NAMES)
+        assert "Translate into zz." in p
+
+    def test_missing_target_leaves_the_prompt_usable(self):
+        p = build_system_prompt(DEFAULT_SYSTEM_PROMPT_TEMPLATE, "", NAMES)
+        assert "{language}" not in p
+        assert "Translate into" not in p
 
 
 class TestBuildChatPayload:
@@ -174,6 +255,53 @@ class TestLocalModelPath:
 
     def test_repo_without_a_slash(self):
         assert local_model_path("/m", "somerepo", "q4.gguf") == "/m/somerepo/q4.gguf"
+
+
+class TestScanGgufModels:
+    """The inverse of local_model_path, driving the settings-page picker."""
+
+    def _make(self, root, repo_dir, *files):
+        d = root / repo_dir
+        d.mkdir(parents=True)
+        for name in files:
+            (d / name).write_bytes(b"x" * 10)
+        return d
+
+    def test_finds_a_repo_and_restores_the_slash(self, tmp_path):
+        self._make(tmp_path, "ggml-org--gemma-3-4b-it-GGUF", "gemma-3-4b-it-Q4_K_M.gguf")
+        found = scan_gguf_models(str(tmp_path))
+        assert [m["repo"] for m in found] == ["ggml-org/gemma-3-4b-it-GGUF"]
+        assert found[0]["files"][0]["name"] == "gemma-3-4b-it-Q4_K_M.gguf"
+        assert found[0]["files"][0]["size_bytes"] == 10
+
+    def test_round_trips_with_local_model_path(self, tmp_path):
+        repo = "ggml-org/gemma-3-4b-it-GGUF"
+        path = local_model_path(str(tmp_path), repo, "q4.gguf")
+        os.makedirs(os.path.dirname(path))
+        open(path, "wb").write(b"x")
+        assert scan_gguf_models(str(tmp_path))[0]["repo"] == repo
+
+    def test_lists_every_quantisation(self, tmp_path):
+        self._make(tmp_path, "some--repo", "m-Q4_K_M.gguf", "m-Q8_0.gguf", "README.md")
+        files = [f["name"] for f in scan_gguf_models(str(tmp_path))[0]["files"]]
+        assert files == ["m-Q4_K_M.gguf", "m-Q8_0.gguf"], "non-gguf files must not appear"
+
+    def test_directory_without_a_gguf_is_omitted(self, tmp_path):
+        # An NMT model directory shares this tree; it is not a choice here.
+        self._make(tmp_path, "google--madlad400-3b-mt", "model.safetensors")
+        assert scan_gguf_models(str(tmp_path)) == []
+
+    def test_missing_directory_is_not_an_error(self, tmp_path):
+        assert scan_gguf_models(str(tmp_path / "nope")) == []
+
+    def test_loose_files_at_the_root_are_ignored(self, tmp_path):
+        (tmp_path / "stray.gguf").write_bytes(b"x")
+        assert scan_gguf_models(str(tmp_path)) == []
+
+    def test_repos_are_sorted(self, tmp_path):
+        self._make(tmp_path, "zzz--b", "b.gguf")
+        self._make(tmp_path, "aaa--a", "a.gguf")
+        assert [m["repo"] for m in scan_gguf_models(str(tmp_path))] == ["aaa/a", "zzz/b"]
 
 
 class TestResolveGpuLayers:

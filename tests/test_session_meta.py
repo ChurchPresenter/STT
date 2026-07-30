@@ -284,6 +284,28 @@ class TestRemoteProvenance:
         "ct2_compute_type": "auto",
     }
 
+    def test_records_an_llm_remote(self):
+        """The remote translates with an LLM, so the transcript must say so.
+
+        Reporting the standby NMT model here is how a session whose captions came
+        from a GGUF on the GPU was recorded as "google/madlad400-3b-mt, cpu".
+        """
+        meta = remote_provenance({
+            "success": True,
+            "translation_model": "gemma-3-4b-it-Q4_K_M.gguf",
+            "translation_method": "llm",
+            "model_device": "metal",
+            "llm_provider": "local",
+        })
+        assert meta["mt.remote.effective.method"] == "llm"
+        assert meta["mt.remote.effective.model"] == "gemma-3-4b-it-Q4_K_M.gguf"
+        assert meta["mt.remote.effective.device"] == "metal"
+        assert meta["mt.remote.effective.llm_provider"] == "local"
+
+    def test_nmt_remote_carries_no_llm_keys(self):
+        meta = remote_provenance(self.STATUS)
+        assert not [k for k in meta if "llm" in k]
+
     def test_maps_the_remote_status_payload(self):
         meta = remote_provenance(self.STATUS)
         assert meta["mt.remote.effective.model"] == "google/madlad400-3b-mt"

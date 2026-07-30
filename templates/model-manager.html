@@ -607,6 +607,41 @@
                             </div>
                         </div>
 
+                        <!-- GGUF models for LLM translation. A GGUF repo publishes a
+                             dozen quantisations of one model, so this picks a single
+                             file rather than downloading the whole repo. -->
+                        <div style="margin-bottom: 15px;">
+                            <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px;">
+                                <h5 style="margin: 0; color: var(--text-primary);">🧠 LLM Translation Models (GGUF)</h5>
+                            </div>
+                            <small style="color: var(--text-secondary); display: block; margin-bottom: 10px;">
+                                An instruction model can be told the domain — "render biblical terminology
+                                as English Bibles do" — which fixes errors no decoding parameter reaches.
+                                Runs in-process with no server or extra port. Select one in
+                                <a href="/translation" style="color: var(--accent);">Translation Settings</a>.
+                            </small>
+
+                            <div id="gguf_runtime_notice" style="display:none; background: var(--warning-bg); border: 1px solid var(--warning); border-radius: var(--radius-sm); padding: 8px 12px; margin-bottom: 10px;">
+                                <small style="color: #ffcc00;">
+                                    <strong>llama-cpp-python is not installed.</strong> You can still download a
+                                    model here, but running it in-process needs <code>pip install llama-cpp-python</code>.
+                                    Without it, LLM translation falls back to the NMT model.
+                                </small>
+                            </div>
+
+                            <div style="display: flex; gap: 8px; margin-bottom: 10px; flex-wrap: wrap;">
+                                <input type="text" id="gguf_repo_input" placeholder="ggml-org/gemma-3-4b-it-GGUF"
+                                       style="flex: 1 1 260px; min-width: 0;" list="gguf_repo_suggestions">
+                                <datalist id="gguf_repo_suggestions">
+                                    <option value="ggml-org/gemma-3-4b-it-GGUF">Gemma 3 4B Instruct — small, fast, good terminology</option>
+                                    <option value="bartowski/Qwen2.5-7B-Instruct-GGUF">Qwen2.5 7B Instruct — stronger, needs more memory</option>
+                                    <option value="bartowski/Llama-3.2-3B-Instruct-GGUF">Llama 3.2 3B Instruct — smallest useful option</option>
+                                </datalist>
+                                <button class="model-btn" onclick="loadGgufRepoFiles()" style="background: var(--accent); padding: 5px 10px; font-size: 0.8em;">Browse Quantisations</button>
+                            </div>
+                            <div id="gguf_files_list" aria-live="polite" aria-label="GGUF quantisation list"></div>
+                        </div>
+
                     </div>
 
                     <!-- TTS Models (separate tab) -->
@@ -1244,6 +1279,7 @@
             loadSileroVADStatus(); // Load Silero VAD status
             loadPANNsStatus(); // Load PANNs music/speech detector status
             loadTTSModels(); // Load TTS models
+            refreshGgufRuntimeNotice(); // Whether llama-cpp-python can run a GGUF here
 
             // Check transcription status and poll periodically
             checkTranscriptionStatus();
@@ -2430,6 +2466,93 @@
                 // Stop download progress tracking
                 stopDownloadProgress(`whisper-${modelName}`);
             }
+        }
+
+        // ---- GGUF models for LLM translation --------------------------------
+
+        function formatGgufSize(bytes) {
+            if (!bytes) return '';
+            const gb = bytes / (1024 * 1024 * 1024);
+            return gb >= 1 ? gb.toFixed(1) + ' GB' : (bytes / (1024 * 1024)).toFixed(0) + ' MB';
+        }
+
+        async function loadGgufRepoFiles() {
+            const repo = document.getElementById('gguf_repo_input').value.trim();
+            const listEl = document.getElementById('gguf_files_list');
+            if (!repo) {
+                showAlert('Enter a HuggingFace GGUF repo id.', 'error');
+                return;
+            }
+            listEl.innerHTML = '<div class="model-item"><div class="model-info"><div class="model-name" style="color: var(--text-secondary);">Loading quantisations…</div></div></div>';
+            try {
+                const data = await fetch('/api/models/gguf-repo-files?repo_id=' + encodeURIComponent(repo)).then(r => r.json());
+                if (!data.success) {
+                    listEl.innerHTML = `<div class="model-item"><div class="model-info"><div class="model-name" style="color: var(--warning);">${escapeHtmlMM(data.error || 'Could not read that repo')}</div></div></div>`;
+                    return;
+                }
+                if (!data.files.length) {
+                    listEl.innerHTML = '<div class="model-item"><div class="model-info"><div class="model-name" style="color: var(--text-secondary);">No .gguf files in that repo.</div></div></div>';
+                    return;
+                }
+                listEl.innerHTML = data.files.map(f => {
+                    // Q4_K_M is the usual size/quality balance, so it is called out
+                    // rather than leaving a dozen equally-weighted choices.
+                    const recommended = /Q4_K_M/i.test(f.name);
+                    return `
+                    <div class="model-item ${f.downloaded ? 'model-item--success' : ''}">
+                        <div class="model-info">
+                            <div class="model-name">${escapeHtmlMM(f.name)}${recommended ? ' <span style="color: var(--accent); font-size: 0.8em;">recommended</span>' : ''}</div>
+                            <div style="color: var(--text-secondary); font-size: 0.8em;">${formatGgufSize(f.size_bytes)}${f.downloaded ? ' — downloaded' : ''}</div>
+                        </div>
+                        <button class="model-btn" ${f.downloaded ? 'disabled' : ''}
+                                onclick="downloadGgufFile('${escapeHtmlMM(data.repo_id)}', '${escapeHtmlMM(f.name)}')">
+                            ${f.downloaded ? 'Downloaded' : 'Download'}
+                        </button>
+                    </div>`;
+                }).join('');
+            } catch (e) {
+                listEl.innerHTML = `<div class="model-item"><div class="model-info"><div class="model-name" style="color: var(--warning);">${escapeHtmlMM(e.message || String(e))}</div></div></div>`;
+            }
+        }
+
+        async function downloadGgufFile(repoId, fileName) {
+            if (isTranscriptionRunning) {
+                showAlert('Stop transcription before downloading models.', 'error');
+                return;
+            }
+            try {
+                startDownloadProgress(repoId);
+                // include= keeps this to the one quantisation; the repo holds a dozen.
+                const data = await fetch('/api/models/download', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ model_id: repoId, include: fileName })
+                }).then(r => r.json());
+                if (data.success) {
+                    showAlert(`✅ ${fileName} downloaded`, 'success');
+                    loadGgufRepoFiles();
+                } else {
+                    showAlert('❌ Download failed: ' + data.error, 'error');
+                }
+            } catch (error) {
+                showAlert('❌ Download error: ' + error.message, 'error');
+            } finally {
+                stopDownloadProgress(repoId);
+            }
+        }
+
+        function escapeHtmlMM(s) {
+            return String(s == null ? '' : s)
+                .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+                .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+        }
+
+        async function refreshGgufRuntimeNotice() {
+            try {
+                const data = await fetch('/api/models/gguf-list').then(r => r.json());
+                document.getElementById('gguf_runtime_notice').style.display =
+                    data.runtime_available === false ? '' : 'none';
+            } catch (e) { /* the notice is advisory; a failed probe just leaves it hidden */ }
         }
 
         async function downloadHuggingFaceModel(modelId) {

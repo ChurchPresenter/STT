@@ -1233,10 +1233,16 @@ def supported_target(lang: str, method: str) -> bool:
 def languages_for_method(method: str) -> Dict[str, str]:
     """UI short code -> English name for every language the given engine supports.
 
-    ``method`` is "madlad" or "nllb" (anything non-"madlad" is treated as NLLB).
+    ``method`` is "madlad", "llm", or "nllb" (anything else is treated as NLLB).
     Excludes the special "auto" entry, which the UI adds separately. Used to
     drive the model-aware language picker so each engine only offers the
     languages it can actually translate to.
+
+    An LLM has no target-token table, so its true coverage is "whatever the
+    chosen model knows" and cannot be enumerated from here. It is given the NLLB
+    list deliberately: a broad curated set that a general instruction model can
+    be expected to handle, rather than the full catalog, which would promise
+    hundreds of low-resource languages a small quantised model translates badly.
     """
     table = MADLAD_LANG_CODES if method == "madlad" else NLLB_LANG_CODES
     return {code: TRANSLATION_LANGUAGES[code]
