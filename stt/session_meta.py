@@ -730,7 +730,15 @@ def append_changes(db_path: str, changes: Mapping[str, str],
     if not changes:
         return False
     if changed_at is None:
-        changed_at = datetime.now().isoformat(timespec="seconds")
+        # Milliseconds, not seconds: the row key is "<key>@<timestamp>", so two
+        # changes to one key inside the same second collided on that key and the
+        # second INSERT OR REPLACEd the first — a real change disappearing rather
+        # than being recorded. A shorter second-precision stamp from an older
+        # session still sorts before a millisecond one in the same second, so
+        # both readers that treat lexicographic order as chronological
+        # (latest_values here, the preview panel in file-manager.html) are
+        # unaffected.
+        changed_at = datetime.now().isoformat(timespec="milliseconds")
     try:
         with _connect(db_path) as conn:
             cursor = conn.cursor()
@@ -745,6 +753,37 @@ def append_changes(db_path: str, changes: Mapping[str, str],
     except Exception as e:
         print(f"[SESSION-META] WARNING: could not record settings change: {e}")
         return False
+
+
+def append_new_changes(db_path: str, values: Mapping[str, str],
+                       changed_at: Optional[str] = None) -> Dict[str, str]:
+    """Append only the values that actually differ from what is already recorded.
+
+    ``append_changes`` writes whatever it is handed, and its "the caller has
+    diffed already" invariant held for exactly one of its three callers. The
+    other two re-appended values identical to the recorded ones — a probe of an
+    unchanged remote on every offloaded save, and an unload/reload of the same
+    translation model — filling the timeline with rows that carry no
+    information. The guard belongs here, where no caller can skip it.
+
+    Compares against ``latest_values``, not against the base keys: a setting that
+    goes A -> B -> A has genuinely returned to A, and that return is a change
+    worth a row. Diffing against the base key is precisely the bug this replaces.
+
+    Returns the mapping that was written ({} when nothing differed), so a caller
+    can log what really happened rather than announcing a write that did not
+    occur. Never raises: an unreadable database yields {}.
+    """
+    if not values:
+        return {}
+    stored, read_error = load_session_meta(db_path)
+    if read_error:
+        print(f"[SESSION-META] WARNING: could not read before appending: {read_error}")
+        return {}
+    fresh = changed_keys(latest_values(stored), values)
+    if not fresh:
+        return {}
+    return fresh if append_changes(db_path, fresh, changed_at) else {}
 
 
 def _read_all(uri: str) -> Tuple[Dict[str, str], Optional[str]]:

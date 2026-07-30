@@ -811,13 +811,13 @@ from stt.llm_translate import (
 )
 from stt.session_meta import (
     append_changes as _session_meta_append,
+    append_new_changes as _session_meta_append_new,
     build_session_meta as _build_session_meta,
     changed_keys as _session_meta_changed_keys,
     glossary_provenance as _glossary_provenance,
     is_offloaded as _translation_is_offloaded,
     latest_values as _session_meta_latest,
     load_session_meta as _load_session_meta,
-    read_session_meta as _read_session_meta,
     remote_provenance as _remote_provenance,
     write_missing as _session_meta_write_missing,
     write_session_meta as _write_session_meta,
@@ -1133,12 +1133,13 @@ def _reprobe_remote_provenance_async():
 
     def _probe():
         remote = _fetch_remote_provenance()
-        if not remote:
-            return
-        current = _read_session_meta(active_db)
-        changes = _session_meta_changed_keys(current, remote)
-        if changes:
-            _session_meta_append(active_db, changes)
+        if remote:
+            # Guarded append: this fires on every offload-touching save, and the
+            # remote usually answers with what it answered last time. It used to
+            # diff against the raw table, whose base key still holds the
+            # session-start value, so an unchanged remote was re-recorded under a
+            # fresh timestamp on every save.
+            _session_meta_append_new(active_db, remote)
 
     threading.Thread(target=_probe, daemon=True).start()
 
@@ -1154,13 +1155,19 @@ def _record_session_meta_change(**values):
     that began in one configuration and changed reads differently from one that
     started in the final configuration. Never raises — a failed provenance write
     must not break a live language switch.
+
+    Records nothing when the value already stands: the translation model reloads
+    for reasons other than a change of model (an unload to free VRAM, a settings
+    save that rebuilds it), and each reload used to append another identical
+    mt.effective.model row.
     """
     if not _session_meta_enabled():
         return
     active_db = transcription_state.get("db_name") if transcription_state else None
     if not active_db or not values:
         return
-    _session_meta_append(active_db, {k: "" if v is None else str(v) for k, v in values.items()})
+    _session_meta_append_new(
+        active_db, {k: "" if v is None else str(v) for k, v in values.items()})
 
 
 # Regenerated on every call, so it can never be compared for equality.

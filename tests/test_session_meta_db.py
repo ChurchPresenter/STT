@@ -6,8 +6,10 @@ import sqlite3
 
 from stt.session_meta import (
     append_changes,
+    append_new_changes,
     build_session_meta,
     changed_keys,
+    latest_values,
     load_session_meta,
     read_history,
     read_session_meta,
@@ -162,6 +164,138 @@ class TestAppendChanges:
         keys = [k for k in read_session_meta(db) if k.startswith("mt.target_language@")]
         assert len(keys) == 1
         assert "T" in keys[0]
+
+
+class TestAppendNewChanges:
+    """The guarded append: a row only when the value actually differs.
+
+    append_changes writes whatever it is handed, and two of its three callers did
+    not diff first — an offload probe that fires on every save and answers the
+    same thing each time, and a translation model that reloads without changing.
+    Both filled the timeline with rows carrying no information.
+    """
+
+    def test_a_genuine_change_is_appended(self, tmp_path):
+        db = session_db(tmp_path)
+        write_session_meta(db, meta_for(config_at(target_language="en")))
+
+        written = append_new_changes(db, {"mt.target_language": "es"},
+                                     changed_at="2026-05-20T19:10:00.000")
+
+        assert written == {"mt.target_language": "es"}
+        assert read_session_meta(db)["mt.target_language@2026-05-20T19:10:00.000"] == "es"
+
+    def test_a_value_equal_to_the_base_key_is_not_appended(self, tmp_path):
+        db = session_db(tmp_path)
+        base = meta_for(config_at(target_language="en"))
+        write_session_meta(db, base)
+
+        assert append_new_changes(db, {"mt.target_language": "en"}) == {}
+        assert read_session_meta(db) == base
+
+    def test_repeating_the_last_change_is_not_appended(self, tmp_path):
+        """The reprobe loop: an unchanged remote answered on every offloaded save."""
+        db = session_db(tmp_path)
+        write_session_meta(db, meta_for(config_at()))
+        remote = {"mt.remote.effective.model": "gemma-3-4b-it-Q4_K_M.gguf",
+                  "mt.remote.effective.method": "llm"}
+        append_new_changes(db, remote, changed_at="2026-05-20T19:10:00.000")
+        after_first = len(read_session_meta(db))
+
+        for i in range(10):
+            assert append_new_changes(db, remote, changed_at=f"2026-05-20T19:2{i}:00.000") == {}
+
+        assert len(read_session_meta(db)) == after_first
+
+    def test_returning_to_an_earlier_value_is_a_change(self, tmp_path):
+        """A -> B -> A must record the return; only diffing the base key would miss it."""
+        db = session_db(tmp_path)
+        write_session_meta(db, meta_for(config_at(target_language="en")))
+        append_new_changes(db, {"mt.target_language": "es"},
+                           changed_at="2026-05-20T19:10:00.000")
+
+        assert append_new_changes(db, {"mt.target_language": "en"},
+                                  changed_at="2026-05-20T19:20:00.000")
+
+        assert read_history(read_session_meta(db), "mt.target_language") == [
+            ("", "en"),
+            ("2026-05-20T19:10:00.000", "es"),
+            ("2026-05-20T19:20:00.000", "en"),
+        ]
+
+    def test_a_key_never_recorded_before_is_appended(self, tmp_path):
+        # mt.effective.* is never a base key: the model loads after the db exists.
+        db = session_db(tmp_path)
+        write_session_meta(db, meta_for(config_at()))
+
+        written = append_new_changes(db, {"mt.effective.model": MADLAD_DEFAULT},
+                                     changed_at="2026-05-20T19:10:00.000")
+        assert written == {"mt.effective.model": MADLAD_DEFAULT}
+
+    def test_only_the_differing_keys_are_written(self, tmp_path):
+        db = session_db(tmp_path)
+        write_session_meta(db, meta_for(config_at(target_language="en")))
+
+        written = append_new_changes(db, {"mt.target_language": "es",
+                                          "mt.context_window": "1"},
+                                     changed_at="2026-05-20T19:10:00.000")
+
+        assert written == {"mt.target_language": "es"}
+        assert "mt.context_window@2026-05-20T19:10:00.000" not in read_session_meta(db)
+
+    def test_empty_values_are_a_noop(self, tmp_path):
+        assert append_new_changes(session_db(tmp_path), {}) == {}
+
+    def test_unreadable_database_does_not_raise(self, tmp_path):
+        # Provenance is best-effort; a broken read must not break the caller.
+        broken = str(tmp_path / "not-a-db.db")
+        with open(broken, "w", encoding="utf-8") as f:
+            f.write("this is not sqlite")
+        assert append_new_changes(broken, {"a": "b"}) == {}
+
+    def test_records_into_a_session_with_no_provenance_table(self, tmp_path):
+        db = session_db(tmp_path)
+        assert append_new_changes(db, {"mt.target_language": "es"},
+                                  changed_at="2026-05-20T19:10:00.000")
+
+    def test_two_changes_in_the_same_second_both_survive(self, tmp_path):
+        """Second-precision keys collided, and the later value replaced the earlier."""
+        db = session_db(tmp_path)
+        write_session_meta(db, meta_for(config_at(target_language="en")))
+
+        append_new_changes(db, {"mt.target_language": "es"},
+                           changed_at="2026-05-20T19:10:00.100")
+        append_new_changes(db, {"mt.target_language": "de"},
+                           changed_at="2026-05-20T19:10:00.900")
+
+        stored = read_session_meta(db)
+        assert read_history(stored, "mt.target_language") == [
+            ("", "en"),
+            ("2026-05-20T19:10:00.100", "es"),
+            ("2026-05-20T19:10:00.900", "de"),
+        ]
+        assert latest_values(stored)["mt.target_language"] == "de"
+
+    def test_default_timestamp_has_millisecond_precision(self, tmp_path):
+        db = session_db(tmp_path)
+        append_new_changes(db, {"mt.target_language": "es"})
+        stamp = next(k for k in read_session_meta(db)
+                     if k.startswith("mt.target_language@")).split("@", 1)[1]
+        assert "." in stamp, "sub-second precision is what stops same-second collisions"
+
+    def test_a_second_precision_row_still_sorts_before_a_later_one(self, tmp_path):
+        """Sessions written by an older build carry second-precision rows.
+
+        Both readers treat lexicographic order as chronological, so a mixed
+        timeline must still resolve to the genuinely last value.
+        """
+        db = session_db(tmp_path)
+        write_session_meta(db, meta_for(config_at(target_language="en")))
+        append_changes(db, {"mt.target_language": "es"}, changed_at="2026-05-20T19:10:00")
+        append_new_changes(db, {"mt.target_language": "de"},
+                           changed_at="2026-05-20T19:10:00.500")
+
+        assert latest_values(read_session_meta(db))["mt.target_language"] == "de"
 
 
 class TestLiveSession:
