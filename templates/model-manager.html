@@ -1732,7 +1732,21 @@
         }
 
         // --- Translation Model Configuration ---
+        // Remembered from the last /api/translation/settings read, so a rebuild
+        // that isn't told which model is configured can still show the truth.
+        let _configuredTranslationModel = '';
+
         async function populateTranslationModelDropdown(selectedModel) {
+            // updateConfigUI() rebuilds this list on every switch to the
+            // Translation context and passes nothing. Without a default, the
+            // re-selection below was skipped and the control silently fell to
+            // whichever model sorted first — displaying nllb-200-distilled-1.3B
+            // on a box configured for madlad400-3b-mt. Saving from that screen
+            // then wrote the wrong model into the config.
+            if (selectedModel === undefined) {
+                const current = document.getElementById('config_translation_model').value;
+                selectedModel = current || _configuredTranslationModel;
+            }
             try {
                 // Both engines' downloaded models are selectable here.
                 const [nllbData, madladData] = await Promise.all([
@@ -1755,10 +1769,19 @@
                             option.textContent = model.name || model.model_id;
                             select.appendChild(option);
                         });
-                        if (selectedModel && select.querySelector(`option[value="${selectedModel}"]`)) {
-                            select.value = selectedModel;
-                        }
                     }
+                    // The configured model may not be downloaded on this machine —
+                    // an offload box translates elsewhere and keeps no weights. It
+                    // still has to appear, and stay selected: dropping it meant the
+                    // next Save quietly replaced it with a model that happened to
+                    // be present.
+                    if (selectedModel && !select.querySelector(`option[value="${selectedModel}"]`)) {
+                        const missing = document.createElement('option');
+                        missing.value = selectedModel;
+                        missing.textContent = (selectedModel.split('/').pop() || selectedModel) + ' (not downloaded)';
+                        select.insertBefore(missing, select.firstChild);
+                    }
+                    if (selectedModel) select.value = selectedModel;
                 }
             } catch (error) {
                 console.error('Error loading NLLB models:', error);
@@ -1783,6 +1806,7 @@
 
                 if (settings.success) {
                     const model = settings.settings.translation_model || 'facebook/nllb-200-distilled-600M';
+                    _configuredTranslationModel = model;
                     await populateTranslationModelDropdown(model);
                     const s = settings.settings || {};
                     document.getElementById('config_translation_method').value = s.translation_method || 'nllb';
