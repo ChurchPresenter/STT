@@ -55,6 +55,8 @@ def test_darwin_homebrew_git_skips_clt_check(monkeypatch):
 def test_darwin_xcode_select_missing_is_unusable(monkeypatch):
     monkeypatch.setattr(watchdog.sys, "platform", "darwin")
     monkeypatch.setattr(watchdog, "_which", lambda name: "/usr/bin/git")
+    # As in _patch: the host's realpath would rewrite the POSIX path.
+    monkeypatch.setattr(watchdog.os.path, "realpath", lambda path: path)
 
     def raise_oserror(cmd, **kwargs):
         raise FileNotFoundError("xcode-select")
