@@ -147,6 +147,94 @@ class TestIsWhisperHallucination:
         assert not is_whisper_hallucination("anything", [])
 
 
+# Every distinct subtitle-credit hallucination Whisper produced in one
+# recorded service. One of these — "Редактор субтитров
+# А.Семкин" — escaped the filter of the day and was translated and displayed as
+# "Subtitle Editor A.Semkin"; its second occurrence was stopped only by duplicate
+# detection. Kept verbatim so the shipped phrase list can never silently regress
+# on real observed data.
+OBSERVED_HALLUCINATIONS = [
+    "Субтитры создавал DimaTorzok",
+    "Субтитры сделал DimaTorzok",
+    "Субтитры делал DimaTorzok",
+    "Субтитры подогнал «Симон»",
+    "Редактор субтитров А.Семкин",
+    "Субтитры подготовлены Данилу Куликову",
+    "Субтитры подогнал Игорь Негода.",
+    # Doubled in one line, as the rolling window produced them
+    "Субтитры создавал DimaTorzok Субтитры создавал DimaTorzok",
+    "Субтитры сделал DimaTorzok Субтитры создавал DimaTorzok",
+    "Субтитры подогнал «Симон» Субтитры создавал DimaTorzok",
+    # Glued onto real hymn text — the case a whole-line phrase can never match
+    "Слова песни продолжаются здесь, Субтитры подогнал «Симон»",
+    "Строка песни, и ещё одна строка песни, Субтитры подогнал «Симон»",
+    "а а а а а а а а а а а а а Субтитры подогнал «Симон»",
+    "Субтитры подогнал «Симон» слова песни, ещё слова песни, и снова слова песни,",
+    "Субтитры создавал DimaTorzok Продолжение следует...",
+]
+
+# Ordinary speech from the same recording. These must survive: an over-broad stem that
+# catches the credits but also silences the sermon is a worse bug than the one
+# being fixed.
+LEGITIMATE_SPEECH = [
+    "Доброе утро, братья и сестры!",
+    "Помолимся вместе.",
+    "Книга Псалмов, 23 глава, 1 стих.",
+    "Итак, если мы говорим об этом, то и поступать нам следует точно так же.",
+    "Первое, мы понимаем, что этот пример оставлен здесь для всех нас.",
+    "И далее написано, какие именно действия нам следует предпринимать.",
+    "Вопросы для размышления.",
+    "Продолжение будет позже на неделе.",  # contains "Продолжение" but not the stem
+]
+
+
+class TestObservedHallucinationsAreCaught:
+    """Regression guard against observed service data."""
+
+    def test_code_default_catches_every_observed_variant(self):
+        missed = [t for t in OBSERVED_HALLUCINATIONS
+                  if not is_whisper_hallucination(t, DEFAULT_WHISPER_HALLUCINATIONS)]
+        assert not missed, f"these would reach the audience: {missed}"
+
+    def test_the_one_that_escaped_is_caught(self):
+        # The specific line that was published as "Subtitle Editor A.Semkin".
+        assert is_whisper_hallucination("Редактор субтитров А.Семкин",
+                                       DEFAULT_WHISPER_HALLUCINATIONS)
+
+    def test_translated_credits_are_caught_too(self):
+        # This filter also runs on translated output, so the English form of a
+        # credit that slipped through in the source must not be publishable.
+        for text in ("Subtitle Editor A.Semkin", "Subtitles by Some Name",
+                     "Subtitles created by someone"):
+            assert is_whisper_hallucination(text, DEFAULT_WHISPER_HALLUCINATIONS), text
+
+    def test_unseen_name_variants_are_caught_by_the_stems(self):
+        # The whole point of stems: a name nobody has observed yet still matches.
+        for text in ("Субтитры сделал КтоТоНовый",
+                     "Редактор субтитров В.Иванов",
+                     "Корректор субтитров кто-то",
+                     "Субтитры подогнал НовоеИмя"):
+            assert is_whisper_hallucination(text, DEFAULT_WHISPER_HALLUCINATIONS), text
+
+    def test_legitimate_speech_survives(self):
+        caught = [t for t in LEGITIMATE_SPEECH
+                  if is_whisper_hallucination(t, DEFAULT_WHISPER_HALLUCINATIONS)]
+        assert not caught, f"real speech would be silenced: {caught}"
+
+    def test_shipped_config_default_matches_the_code_default(self):
+        """config.default.json is what installs actually use — it must agree."""
+        import json
+        import os
+        cfg_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                                "config", "config.default.json")
+        with open(cfg_path, encoding="utf-8") as f:
+            phrases = json.load(f)["hallucination_filter"]["phrases"]
+        missed = [t for t in OBSERVED_HALLUCINATIONS if not is_whisper_hallucination(t, phrases)]
+        assert not missed, f"shipped config would let these through: {missed}"
+        caught = [t for t in LEGITIMATE_SPEECH if is_whisper_hallucination(t, phrases)]
+        assert not caught, f"shipped config would silence real speech: {caught}"
+
+
 class TestApplyProfanityFilter:
     CFG = {"enabled": True, "words": ["darn", "heck"], "replacement": "****"}
 

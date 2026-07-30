@@ -52,10 +52,32 @@ def filter_hallucinated_text(text: Optional[str], language: str = "auto") -> Opt
 # Matching is substring-based (phrase anywhere in the sentence, case/punctuation insensitive),
 # so one entry catches all surface variants (e.g. "DimaTorzok" catches all 3 Russian credit lines).
 # User can override/extend this list via config.json hallucination_filter.phrases
+# Fallback when hallucination_filter.phrases is absent from config. Kept in step
+# with config/config.default.json, which is what a real install actually uses.
+#
+# Every entry is a STEM, matched as a substring: Whisper credits a different
+# invented name each time ("Субтитры сделал DimaTorzok", "Субтитры подогнал
+# «Симон»", "Редактор субтитров А.Семкин", "Субтитры подготовлены Данилу
+# Куликову"), so a whole observed line only ever catches the one instance someone
+# noticed. Stems must stay long enough not to appear in genuine speech — hence
+# "Субтитры подогнал" rather than bare "Субтитры".
 DEFAULT_WHISPER_HALLUCINATIONS = [
-    "DimaTorzok",           # catches all Субтитры * DimaTorzok variants
+    "DimaTorzok",           # any "Субтитры <verb> DimaTorzok" phrasing
+    "Редактор субтитров",
+    "Корректор субтитров",
+    "Субтитры подогнал",
+    "Субтитры создавал",
+    "Субтитры сделал",
+    "Субтитры делал",
+    "Субтитры подготовил",
+    "Субтитры подготовлены",
     "Продолжение следует",
-    "for watching",         # catches "thank you for watching", "thanks for watching", etc.
+    # English too: this filter also runs on translated output, so a credit that
+    # slipped through in the source can't be published in translation either.
+    "Subtitle Editor",
+    "Subtitles by",
+    "Subtitles created by",
+    "for watching",         # "thank you for watching", "thanks for watching", ...
     "Please subscribe",
     "Like and subscribe",
     "Don't forget to subscribe",
@@ -102,7 +124,18 @@ def apply_profanity_filter(text: str, cfg: dict) -> str:
 
 
 def is_whisper_hallucination(text: Optional[str], phrases: Sequence[str]) -> bool:
-    """Check if text is a known Whisper hallucination (exact phrase match, case/punctuation insensitive)."""
+    """Whether text contains a known Whisper hallucination.
+
+    Each phrase is matched as a **substring** of the text, after normalising both
+    for case and punctuation — not as an exact equality. That is what lets a short
+    stem do the work: Whisper credits a different invented name every time
+    (a "Субтитры сделал ..." or "Редактор субтитров ..." followed by whatever name
+    it invents), and it glues the credit onto real speech, so a whole-line phrase
+    only ever catches the one instance someone happened to observe.
+
+    Configure stems accordingly (see hallucination_filter._phrases_comment), and
+    keep them long enough that they cannot appear in genuine speech.
+    """
     if not text:
         return False
 
