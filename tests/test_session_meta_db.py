@@ -206,6 +206,61 @@ class TestLiveSession:
             conn.close()
 
 
+class TestDirectionFlip:
+    """A bilingual service flips both languages at once; both must be recorded.
+
+    Reproduces the real 23:09 flip on .62 — transcription ru->en and translation
+    en->ru together. Recording only the translation half leaves asr.language
+    reading as the session's starting value while the per-row source_language
+    column says otherwise, which is worse than silence: it looks authoritative.
+    """
+
+    def test_both_halves_of_a_flip_are_recorded(self, tmp_path):
+        db = session_db(tmp_path)
+        cfg = config_at(target_language="en")
+        cfg["audio"] = {"language": "ru"}
+        write_session_meta(db, meta_for(cfg))
+
+        # 23:09:16 - flip: ASR told the audio is English, translate into Russian.
+        append_changes(db, {"asr.language": "en"}, changed_at="2026-05-20T23:09:16")
+        append_changes(db, {"mt.target_language": "ru"}, changed_at="2026-05-20T23:09:16")
+        # 23:12:07 - flipped back.
+        append_changes(db, {"asr.language": "ru"}, changed_at="2026-05-20T23:12:07")
+        append_changes(db, {"mt.target_language": "en"}, changed_at="2026-05-20T23:12:07")
+
+        stored = read_session_meta(db)
+        assert read_history(stored, "asr.language") == [
+            ("", "ru"), ("2026-05-20T23:09:16", "en"), ("2026-05-20T23:12:07", "ru")]
+        assert read_history(stored, "mt.target_language") == [
+            ("", "en"), ("2026-05-20T23:09:16", "ru"), ("2026-05-20T23:12:07", "en")]
+
+    def test_flip_timeline_agrees_with_per_row_source_language(self, tmp_path):
+        db = session_db(tmp_path)
+        cfg = config_at(target_language="en")
+        cfg["audio"] = {"language": "ru"}
+        write_session_meta(db, meta_for(cfg))
+        with sqlite3.connect(db) as conn:
+            conn.execute("ALTER TABLE transcriptions ADD COLUMN source_language TEXT")
+            conn.executemany(
+                "INSERT INTO transcriptions (timestamp, text, translated_text, "
+                "translation_language, source_language) VALUES (?, ?, ?, ?, ?)",
+                [("23:05:03", "Мир вам", "Peace be with you", "en", "ru"),
+                 ("23:09:26", "A short line goes here.", "Короткая строка здесь.", "ru", "en"),
+                 ("23:12:18", "Вы знаете", "You know", "en", "ru")],
+            )
+            conn.commit()
+        append_changes(db, {"asr.language": "en"}, changed_at="2026-05-20T23:09:16")
+        append_changes(db, {"asr.language": "ru"}, changed_at="2026-05-20T23:12:07")
+
+        stored = read_session_meta(db)
+        recorded = {v for _, v in read_history(stored, "asr.language")}
+        with sqlite3.connect(db) as conn:
+            per_row = {r[0] for r in conn.execute(
+                "SELECT DISTINCT source_language FROM transcriptions "
+                "WHERE source_language IS NOT NULL")}
+        assert recorded == per_row, "provenance must not contradict the rows"
+
+
 class TestWriteMissing:
     """Late-arriving session-start facts: the remote's model needs a network call."""
 

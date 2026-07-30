@@ -379,6 +379,15 @@ def save_config(config_to_save):
         with _config_lock, _config_file_lock:
             _atomic_write_json(CONFIG_FILE, config_to_save)
         print(f"[OK] Configuration saved to '{CONFIG_FILE}'")
+        # Single choke point for session provenance: any settings change that
+        # reaches disk is recorded against the running session, whichever route
+        # made it. Guarded because config persistence is critical and must not
+        # fail on a provenance problem — including a NameError if some future
+        # caller invokes save_config before this module finishes importing.
+        try:
+            _sync_session_meta_from_config()
+        except Exception as e:
+            print(f"[SESSION-META] WARNING: could not sync provenance after save: {e}")
         return True
     except Exception as e:
         print(f"[ERROR] Failed to save config: {e}")
@@ -751,6 +760,7 @@ from stt.session_meta import (
     build_session_meta as _build_session_meta,
     changed_keys as _session_meta_changed_keys,
     is_offloaded as _translation_is_offloaded,
+    latest_values as _session_meta_latest,
     load_session_meta as _load_session_meta,
     read_session_meta as _read_session_meta,
     remote_provenance as _remote_provenance,
@@ -1039,7 +1049,11 @@ def _reprobe_remote_provenance_async():
 
 
 def _record_session_meta_change(**values):
-    """Append a mid-session settings change to the active session db.
+    """Append a mid-session change to the active session db.
+
+    For runtime facts that aren't in config — which model actually loaded, on
+    which device. Config-driven settings are handled wholesale by
+    _sync_session_meta_from_config() and must not be recorded here too.
 
     Append-only: the base key keeps meaning "at session start", so a session
     that began in one configuration and changed reads differently from one that
@@ -1052,6 +1066,53 @@ def _record_session_meta_change(**values):
     if not active_db or not values:
         return
     _session_meta_append(active_db, {k: "" if v is None else str(v) for k, v in values.items()})
+
+
+# Regenerated on every call, so it can never be compared for equality.
+_SESSION_META_VOLATILE = frozenset({"session.started_at"})
+
+
+def _sync_session_meta_from_config():
+    """Append any provenance-relevant setting that just changed in config.
+
+    Hooked into save_config (and /api/config's direct write) rather than into
+    each settings route. There are ~30 config writers, and hooking them one at a
+    time is exactly how the transcription-language switch and the three
+    hallucination-filter toggles went unrecorded — a session could flip the ASR
+    language mid-service while asr.language still read as the starting value,
+    contradicting the per-row source_language column. One choke point covers
+    every present and future path by construction.
+
+    Diffs against the latest recorded value (base key as superseded by any
+    appended change), so a setting that already changed isn't re-appended on
+    every subsequent save. Settings that appear for the first time become base
+    keys — they were never anything else — while genuine changes append.
+    """
+    if not _session_meta_enabled():
+        return
+    active_db = transcription_state.get("db_name") if transcription_state else None
+    if not active_db:
+        return
+    try:
+        stored, read_error = _load_session_meta(active_db)
+        if read_error or not stored:
+            return  # no session provenance yet: nothing to diff against
+        latest = _session_meta_latest(stored)
+        current = _current_session_meta()
+        changes, additions = {}, {}
+        for key, value in current.items():
+            if key in _SESSION_META_VOLATILE:
+                continue
+            if key not in latest:
+                additions[key] = value
+            elif latest[key] != value:
+                changes[key] = value
+        if additions:
+            _session_meta_write_missing(active_db, additions)
+        if changes:
+            _session_meta_append(active_db, changes)
+    except Exception as e:
+        print(f"[SESSION-META] Could not sync settings change: {e}")
 
 
 def _translate_text_ct2(text, source_lang, target_lang, translator, tokenizer,
@@ -4532,13 +4593,12 @@ def update_config():
         except Exception as e:
             print(f"[REMOTE] Could not propagate live_translation change to remote: {e}")
 
-        # Append whatever this edit actually changed to the session's provenance.
-        # target_language is excluded because the switch helper above already
-        # recorded it; recording it twice would imply two switches.
+        # This route writes config directly rather than through save_config, so
+        # the provenance choke point has to be invoked explicitly here.
+        _sync_session_meta_from_config()
         _meta_changes = _session_meta_changed_keys(_meta_before, _current_session_meta())
-        _meta_changes.pop("mt.target_language", None)
-        if _meta_changes:
-            _record_session_meta_change(**_meta_changes)
+        if any(k.startswith(("mt.offloaded", "mt.remote.")) for k in _meta_changes):
+            _reprobe_remote_provenance_async()
 
         # Determine which settings need restart (compare pre-merge snapshot
         # against the now-merged config)
@@ -5949,15 +6009,10 @@ def save_translation_settings():
     if new_remote_model:
         _propagate_model_settings_to_remote(new_remote_model, new_method)
 
-    # Append whatever actually changed to the session's provenance.
-    # mt.target_language is excluded: _apply_translation_language_switch above
-    # already recorded it, and recording it twice would imply two switches.
+    # Settings changes are recorded by save_config via
+    # _sync_session_meta_from_config. What that can't know is what the REMOTE is
+    # now running, so an offload change still triggers a re-probe.
     _meta_changes = _session_meta_changed_keys(_meta_before, _current_session_meta())
-    _meta_changes.pop("mt.target_language", None)
-    if _meta_changes:
-        _record_session_meta_change(**_meta_changes)
-    # Offload settings that changed mean a different box (or a different model on
-    # the same box) now translates, so re-probe what the remote is running.
     if any(k.startswith(("mt.offloaded", "mt.remote.")) for k in _meta_changes):
         _reprobe_remote_provenance_async()
 
@@ -6070,6 +6125,8 @@ def _apply_transcription_language_switch(new_language):
             config_queue.put({"type": "config_update", "config": _config_snapshot()})
         except (OSError, ValueError):
             pass
+    # The switch is recorded in the session's provenance by save_config above,
+    # via _sync_session_meta_from_config.
     print(f"[TRANSCRIPTION] Hot-switched language: {old_language} -> {new_language}")
     return old_language
 
@@ -6143,12 +6200,10 @@ def _apply_translation_language_switch(new_language):
             except Exception as _e:
                 print(f"[HOT-SWITCH] Could not notify remote server of language change: {_e}")
 
-    # Record the switch in the session's provenance so a transcript that changed
-    # target language mid-service doesn't read as though it were that language
-    # all along. The per-row translation_language column shows which rows went
-    # where; this shows when and from what.
-    if old_language != new_language:
-        _record_session_meta_change(**{"mt.target_language": new_language})
+    # The switch is recorded in the session's provenance by save_config above,
+    # so a transcript that changed target language mid-service doesn't read as
+    # though it were that language all along. The per-row translation_language
+    # column shows which rows went where; provenance shows when and from what.
 
     # Don't clear cache — old segments keep their cached translations (stale-lang fallback).
     # Only new segments will be translated to the new language.

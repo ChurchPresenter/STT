@@ -307,6 +307,22 @@ def build_session_meta(config: Optional[Mapping[str, Any]], version: str, commit
     return meta
 
 
+def latest_values(meta: Mapping[str, str]) -> Dict[str, str]:
+    """Every key's value as of now, with appended changes applied.
+
+    A base key holds the session-start value and a "<key>@<timestamp>" row
+    supersedes it from that moment. Comparing live config against this — rather
+    than against the base keys — is what stops a setting that already changed
+    from being re-appended on every subsequent config write.
+    """
+    latest = {k: v for k, v in meta.items() if CHANGE_SUFFIX not in k}
+    for key in sorted(meta):  # sorted -> chronological per key, so last wins
+        root, separator, _ = key.partition(CHANGE_SUFFIX)
+        if separator:
+            latest[root] = meta[key]
+    return latest
+
+
 def changed_keys(previous: Mapping[str, str], current: Mapping[str, str]) -> Dict[str, str]:
     """Keys whose value differs, for appending a mid-session change.
 

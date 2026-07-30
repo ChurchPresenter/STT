@@ -6,6 +6,7 @@ from stt.session_meta import (
     build_session_meta,
     changed_keys,
     is_offloaded,
+    latest_values,
     read_history,
     remote_provenance,
     resolve_asr_implementation,
@@ -384,6 +385,48 @@ class TestChangedKeys:
     def test_identical_config_yields_nothing(self):
         same = {"mt.method": "madlad"}
         assert changed_keys(same, dict(same)) == {}
+
+
+class TestLatestValues:
+    """What config must be diffed against, so a change isn't re-appended forever."""
+
+    def test_unchanged_keys_pass_through(self):
+        assert latest_values({"mt.method": "madlad"}) == {"mt.method": "madlad"}
+
+    def test_appended_change_supersedes_the_base_key(self):
+        meta = {"mt.target_language": "en", "mt.target_language@2026-05-20T19:10:00": "es"}
+        assert latest_values(meta)["mt.target_language"] == "es"
+
+    def test_last_change_wins(self):
+        meta = {
+            "mt.target_language": "en",
+            "mt.target_language@2026-05-20T19:10:00": "es",
+            "mt.target_language@2026-05-20T20:05:00": "de",
+        }
+        assert latest_values(meta)["mt.target_language"] == "de"
+
+    def test_a_change_back_to_the_original_is_the_latest(self):
+        # Flipped away and back: latest is the original value, so nothing more
+        # should be appended on the next config write.
+        meta = {
+            "asr.language": "ru",
+            "asr.language@2026-05-20T23:09:16": "en",
+            "asr.language@2026-05-20T23:12:07": "ru",
+        }
+        assert latest_values(meta)["asr.language"] == "ru"
+
+    def test_change_only_key_still_appears(self):
+        assert latest_values({"mt.x@2026-05-20T19:00:00": "v"}) == {"mt.x": "v"}
+
+    def test_keys_sharing_a_prefix_are_not_confused(self):
+        meta = {"mt.model": "a", "mt.model_configured": "b",
+                "mt.model@2026-05-20T19:00:00": "c"}
+        result = latest_values(meta)
+        assert result["mt.model"] == "c"
+        assert result["mt.model_configured"] == "b"
+
+    def test_empty(self):
+        assert latest_values({}) == {}
 
 
 class TestReadHistory:
