@@ -463,11 +463,36 @@
                     <!-- Translation Model Settings -->
                     <div id="config_translation_settings" style="display: none;">
                         <div class="form-group">
+                            <label for="config_translation_method">Translation Method</label>
+                            <select id="config_translation_method" onchange="onConfigTranslationMethodChange()">
+                                <option value="nllb">NLLB Model (any language)</option>
+                                <option value="madlad">MADLAD-400 (Google, any language)</option>
+                                <option value="llm">LLM (instruction model, best terminology)</option>
+                                <option value="whisper_translate">Whisper Translate (English only)</option>
+                                <option value="whisper_forced_lang">Whisper Forced Language (Experimental)</option>
+                            </select>
+                            <small>The engine that translates. The settings below apply to NLLB and MADLAD only.</small>
+                        </div>
+
+                        <!-- Shown when the active engine is not an NMT model, so the
+                             controls below describe something that is not running. -->
+                        <div id="config_translation_not_nmt" style="display:none; background: var(--info-bg, var(--bg-tertiary)); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 8px 12px; margin-bottom: 10px;">
+                            <small id="config_translation_not_nmt_text" style="color: var(--text-secondary);"></small>
+                        </div>
+
+                        <div class="form-group">
                             <label for="config_translation_model">Translation Model</label>
                             <select id="config_translation_model">
                                 <option value="">Loading downloaded models...</option>
                             </select>
                             <small>Select from downloaded NLLB &amp; MADLAD models</small>
+                        </div>
+                        <div class="form-group">
+                            <label style="display: flex; align-items: center; gap: 8px; cursor: pointer;">
+                                <input type="checkbox" id="config_translation_use_gpu" style="width:auto;">
+                                Use GPU for translation
+                            </label>
+                            <small>Disable to run the translation model on CPU, freeing GPU memory for transcription. Reloads the model.</small>
                         </div>
                         <div class="form-group">
                             <label style="display: flex; align-items: center; gap: 8px; cursor: pointer;">
@@ -1760,9 +1785,12 @@
                     const model = settings.settings.translation_model || 'facebook/nllb-200-distilled-600M';
                     await populateTranslationModelDropdown(model);
                     const s = settings.settings || {};
+                    document.getElementById('config_translation_method').value = s.translation_method || 'nllb';
+                    document.getElementById('config_translation_use_gpu').checked = s.use_gpu !== false;
                     document.getElementById('config_use_fp16').checked = s.use_fp16 === true;
                     document.getElementById('config_use_ctranslate2').checked = s.use_ctranslate2 === true;
                     syncCt2Fp16('config_use_ctranslate2', 'config_use_fp16');
+                    onConfigTranslationMethodChange();
 
                     // Update summary — model + precision/backend (the 8/16 state).
                     // On an LLM session none of that applies: the engine is
@@ -1789,21 +1817,56 @@
             }
         }
 
+        // The NMT model/precision controls describe NLLB and MADLAD. On any other
+        // engine they are not what runs, so they are disabled and labelled rather
+        // than left looking like the live configuration — the same mistake the
+        // status endpoint made when it reported CTranslate2 for a llama.cpp session.
+        function onConfigTranslationMethodChange() {
+            const method = document.getElementById('config_translation_method').value;
+            const isNmt = method === 'nllb' || method === 'madlad';
+            ['config_translation_model', 'config_translation_use_gpu',
+             'config_use_fp16', 'config_use_ctranslate2'].forEach(id => {
+                const el = document.getElementById(id);
+                if (!el) return;
+                el.disabled = !isNmt;
+                el.closest('.form-group').style.opacity = isNmt ? '' : '0.55';
+            });
+            if (isNmt) syncCt2Fp16('config_use_ctranslate2', 'config_use_fp16');
+
+            const notice = document.getElementById('config_translation_not_nmt');
+            const text = document.getElementById('config_translation_not_nmt_text');
+            if (isNmt) {
+                notice.style.display = 'none';
+            } else {
+                notice.style.display = '';
+                text.innerHTML = method === 'llm'
+                    ? 'Translating with an <strong>LLM</strong>. Its model, provider and system prompt are set in <a href="/translation" style="color: var(--accent);">Translation Settings</a>; the GGUF itself is downloaded under Translation Models below. The settings here apply only to the NLLB/MADLAD fallback.'
+                    : 'Translating with <strong>Whisper</strong>, which reuses the transcription model — no separate translation model is loaded, so the settings here are not in use.';
+            }
+        }
+
         async function saveTranslationConfig() {
+            const method = document.getElementById('config_translation_method').value;
             const model = document.getElementById('config_translation_model').value;
-            if (!model) {
+            // Only the NMT engines need a model chosen here. Requiring one
+            // unconditionally made this panel unsavable on a box that translates
+            // with an LLM or Whisper and has no NMT model downloaded at all.
+            if (!model && (method === 'nllb' || method === 'madlad')) {
                 showAlert('No translation model selected. Download one from the Model Library below.', 'error');
                 return;
             }
             try {
+                const payload = {
+                    translation_method: method,
+                    use_gpu: document.getElementById('config_translation_use_gpu').checked,
+                    use_fp16: document.getElementById('config_use_fp16').checked,
+                    use_ctranslate2: document.getElementById('config_use_ctranslate2').checked
+                };
+                if (model) payload.translation_model = model;
                 const response = await fetch('/api/translation/settings', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                        translation_model: model,
-                        use_fp16: document.getElementById('config_use_fp16').checked,
-                        use_ctranslate2: document.getElementById('config_use_ctranslate2').checked
-                    })
+                    body: JSON.stringify(payload)
                 });
                 const data = await response.json();
                 if (data.success) {
