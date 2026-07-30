@@ -49,7 +49,7 @@ class TestRotateIfLarge:
         log = tmp_path / "stt.log"
         log.write_text("small")
         watchdog._rotate_if_large(str(log), max_bytes=1000, backups=3)
-        assert log.read_text() == "small"
+        assert log.read_text(encoding="utf-8") == "small"
         assert not (tmp_path / "stt.log.1").exists()
 
     def test_rotation_chain(self, tmp_path):
@@ -59,9 +59,9 @@ class TestRotateIfLarge:
         (tmp_path / "stt.log.2").write_text("oldest")
         watchdog._rotate_if_large(str(log), max_bytes=5, backups=3)
         assert not log.exists()
-        assert (tmp_path / "stt.log.1").read_text() == "current-big-content"
-        assert (tmp_path / "stt.log.2").read_text() == "older"
-        assert (tmp_path / "stt.log.3").read_text() == "oldest"
+        assert (tmp_path / "stt.log.1").read_text(encoding="utf-8") == "current-big-content"
+        assert (tmp_path / "stt.log.2").read_text(encoding="utf-8") == "older"
+        assert (tmp_path / "stt.log.3").read_text(encoding="utf-8") == "oldest"
 
     def test_missing_file_is_noop(self, tmp_path):
         watchdog._rotate_if_large(str(tmp_path / "nope.log"), max_bytes=5, backups=3)
@@ -89,7 +89,7 @@ class TestMigrateConfigLayout:
         (data / "word_highlighting.json").write_text("{}")
         (data / "unrelated.json").write_text("{}")
         watchdog.migrate_config_layout()
-        assert (cfg / "config.json").read_text() == '{"a": 1}'
+        assert (cfg / "config.json").read_text(encoding="utf-8") == '{"a": 1}'
         assert (cfg / "word_highlighting.json").exists()
         assert not (data / "config.json").exists()
         assert (data / "unrelated.json").exists()  # only known names migrate
@@ -103,7 +103,7 @@ class TestMigrateConfigLayout:
         (data / "config.json").write_text('{"old": true}')
         (cfg / "config.json").write_text('{"live": true}')
         watchdog.migrate_config_layout()
-        assert (cfg / "config.json").read_text() == '{"live": true}'
+        assert (cfg / "config.json").read_text(encoding="utf-8") == '{"live": true}'
         assert (data / "config.json").exists()  # left in place, nothing to do
 
     def test_idempotent_on_empty_dirs(self, tmp_path, monkeypatch):
@@ -119,7 +119,7 @@ class TestWriteVersion:
         vf = tmp_path / "VERSION"
         monkeypatch.setattr(watchdog, "VERSION_FILE", str(vf))
         watchdog.write_version("26.1.64")
-        assert vf.read_text() == "26.1.64\n"
+        assert vf.read_text(encoding="utf-8") == "26.1.64\n"
         assert sorted(p.name for p in tmp_path.iterdir()) == ["VERSION"]
 
 

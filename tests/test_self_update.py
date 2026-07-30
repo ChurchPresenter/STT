@@ -74,7 +74,7 @@ def test_fast_forward(repos):
     assert updated is True
     assert reason == "fast-forwarded"
     assert _head(clone) != before
-    assert (clone / "file.txt").read_text() == "v2\n"
+    assert (clone / "file.txt").read_text(encoding="utf-8") == "v2\n"
 
 
 def test_up_to_date(repos):
@@ -100,7 +100,7 @@ def test_dirty_worktree_is_left_untouched(repos):
     assert updated is False
     assert reason == "dirty-worktree"
     assert _head(clone) == before
-    assert (clone / "file.txt").read_text() == "my local edits\n"  # not discarded
+    assert (clone / "file.txt").read_text(encoding="utf-8") == "my local edits\n"  # not discarded
 
 
 def test_unpushed_commits_are_not_clobbered(repos):
@@ -170,7 +170,7 @@ def test_missing_marker_triggers_sync_and_writes_marker(tmp_path, synced_calls):
 
     assert len(synced_calls) == 1
     marker = tmp_path / ".venv" / ".requirements-synced"
-    assert marker.read_text().strip() == self_update._requirements_hash(str(tmp_path))
+    assert marker.read_text(encoding="utf-8").strip() == self_update._requirements_hash(str(tmp_path))
 
 
 def test_matching_marker_skips_sync(tmp_path, synced_calls):

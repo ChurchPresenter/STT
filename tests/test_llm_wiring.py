@@ -149,7 +149,7 @@ class TestLocalLlmLoadPreconditions:
         import ast
         from pathlib import Path
 
-        src = (Path(__file__).resolve().parent.parent / "speech_to_text.py").read_text()
+        src = (Path(__file__).resolve().parent.parent / "speech_to_text.py").read_text(encoding="utf-8")
         func = next(n for n in ast.parse(src).body
                     if isinstance(n, ast.FunctionDef) and n.name == "get_local_llm")
 

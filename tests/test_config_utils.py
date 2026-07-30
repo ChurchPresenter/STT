@@ -18,13 +18,13 @@ class TestAtomicWriteJson:
     def test_writes_valid_json(self, tmp_path):
         path = tmp_path / "cfg.json"
         _atomic_write_json(str(path), {"a": 1, "b": {"c": 2}})
-        assert json.loads(path.read_text()) == {"a": 1, "b": {"c": 2}}
+        assert json.loads(path.read_text(encoding="utf-8")) == {"a": 1, "b": {"c": 2}}
 
     def test_overwrites_existing(self, tmp_path):
         path = tmp_path / "cfg.json"
         path.write_text('{"old": true}')
         _atomic_write_json(str(path), {"new": True})
-        assert json.loads(path.read_text()) == {"new": True}
+        assert json.loads(path.read_text(encoding="utf-8")) == {"new": True}
 
     def test_no_temp_litter_on_success(self, tmp_path):
         _atomic_write_json(str(tmp_path / "cfg.json"), {"a": 1})
@@ -35,15 +35,15 @@ class TestAtomicWriteJson:
         path.write_text('{"old": true}')
         with pytest.raises(TypeError):
             _atomic_write_json(str(path), {"bad": object()})
-        assert json.loads(path.read_text()) == {"old": True}
+        assert json.loads(path.read_text(encoding="utf-8")) == {"old": True}
         assert sorted(p.name for p in tmp_path.iterdir()) == ["cfg.json"]
 
     def test_ensure_ascii_toggle(self, tmp_path):
         path = tmp_path / "cfg.json"
         _atomic_write_json(str(path), {"w": "señor"}, ensure_ascii=False)
-        assert "señor" in path.read_text()
+        assert "señor" in path.read_text(encoding="utf-8")
         _atomic_write_json(str(path), {"w": "señor"})
-        assert "se\\u00f1or" in path.read_text()
+        assert "se\\u00f1or" in path.read_text(encoding="utf-8")
 
 
 class TestMergeMissingKeys:
@@ -82,7 +82,7 @@ class TestRestoreConfigFromTemplate:
         template.write_text('{"fresh": true}')
         target = tmp_path / "config.json"
         assert restore_config_from_template(str(template), str(target)) is True
-        assert json.loads(target.read_text()) == {"fresh": True}
+        assert json.loads(target.read_text(encoding="utf-8")) == {"fresh": True}
 
     def test_missing_template_returns_false(self, tmp_path):
         target = tmp_path / "config.json"

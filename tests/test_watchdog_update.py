@@ -70,8 +70,8 @@ def test_successful_update_applies_files_and_version(updater, tmp_path):
 
     upd._apply_update("9.9.9", url)
 
-    assert (source_dir / "new.txt").read_text() == "new content"
-    assert (source_dir / "old.txt").read_text() == "updated"
+    assert (source_dir / "new.txt").read_text(encoding="utf-8") == "new content"
+    assert (source_dir / "old.txt").read_text(encoding="utf-8") == "updated"
     assert watchdog.read_version() == "9.9.9"
     assert "Updated to 9.9.9" in upd.state.values["last_update_result"]
     assert upd.pm.calls == ["stop", "start"], "app must be stopped for the swap and restarted after"
@@ -87,7 +87,7 @@ def test_zip_slip_is_rejected_before_stopping_the_app(updater, tmp_path):
     upd._apply_update("9.9.9", zip_path.as_uri())
 
     assert not (tmp_path / "escape.txt").exists()
-    assert (source_dir / "old.txt").read_text() == "old content", "no files may change"
+    assert (source_dir / "old.txt").read_text(encoding="utf-8") == "old content", "no files may change"
     assert watchdog.read_version() != "9.9.9", "version must not be recorded"
     assert "failed" in upd.state.values["last_update_result"].lower()
     assert upd.pm.calls == [], "rejected before the app is ever stopped"
@@ -111,7 +111,7 @@ def test_swap_failure_restores_previous_version(updater, tmp_path, monkeypatch):
 
     upd._apply_update("9.9.9", url)
 
-    assert (source_dir / "old.txt").read_text() == "old content", "old version must be restored"
+    assert (source_dir / "old.txt").read_text(encoding="utf-8") == "old content", "old version must be restored"
     assert not (source_dir / "a.txt").exists(), "partially applied items must be rolled back"
     assert not (source_dir / "boom.txt").exists()
     assert watchdog.read_version() != "9.9.9", "failed update must not record the new version"
@@ -130,7 +130,7 @@ def test_dep_install_failure_restores_previous_version(updater, tmp_path, monkey
 
     upd._apply_update("9.9.9", url)
 
-    assert (source_dir / "old.txt").read_text() == "old content", "old version must be restored"
+    assert (source_dir / "old.txt").read_text(encoding="utf-8") == "old content", "old version must be restored"
     assert not (source_dir / "new.txt").exists()
     assert watchdog.read_version() != "9.9.9"
     assert upd.pm.calls == ["stop", "start"]
@@ -145,7 +145,7 @@ def test_preserved_venv_is_not_touched(updater, tmp_path):
 
     upd._apply_update("9.9.9", url)
 
-    assert (venv / "marker.txt").read_text() == "keep me"
+    assert (venv / "marker.txt").read_text(encoding="utf-8") == "keep me"
     assert not (venv / "evil.txt").exists(), ".venv content from the archive must be skipped"
     assert (source_dir / "a.txt").exists()
     assert watchdog.read_version() == "9.9.9"
@@ -232,7 +232,7 @@ def test_main_channel_detects_and_applies_update(git_updater):
 
     upd.apply_pending_update()
 
-    assert (clone / "file.txt").read_text() == "v2\n"
+    assert (clone / "file.txt").read_text(encoding="utf-8") == "v2\n"
     assert _head(clone) == _head(seed)
     assert upd.pm.calls == ["stop", "start"]
     assert not (clone / "VERSION").exists(), "branch mode must not write the VERSION file"

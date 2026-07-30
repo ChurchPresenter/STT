@@ -24,7 +24,7 @@ def extract_definitions(source_file, names, extra_globals=None):
     Extracted functions keep their source line behavior (local imports etc.)
     but resolve module globals from the stub namespace, which tests control.
     """
-    src = (REPO / source_file).read_text()
+    src = (REPO / source_file).read_text(encoding="utf-8")
     tree = ast.parse(src)
     found = {}
     for node in tree.body:

@@ -118,7 +118,7 @@ class TestMoveFileWithStructure:
         dest = tmp_path / "dest"
         ok, err = move_file_with_structure(str(src), str(dest), str(work))
         assert (ok, err) == (True, None)
-        assert (dest / "backup" / "2026" / "a.db").read_text() == "data"
+        assert (dest / "backup" / "2026" / "a.db").read_text(encoding="utf-8") == "data"
         assert not src.exists()
 
     def test_flat_copy_keeps_source(self, tmp_path):

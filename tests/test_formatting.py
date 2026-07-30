@@ -156,7 +156,7 @@ class TestConvertDbToSrt:
     def test_creates_srt_with_filtered_rows(self, session_db, tmp_path):
         srt_path = convert_db_to_srt(session_db, html_enabled=False)
         assert srt_path == session_db.replace(".db", ".srt")
-        content = (tmp_path / "Transcriptions.srt").read_text()
+        content = (tmp_path / "Transcriptions.srt").read_text(encoding="utf-8")
         assert "First sentence." in content
         assert "Last sentence." in content
         assert "Denied row." not in content
@@ -165,7 +165,7 @@ class TestConvertDbToSrt:
 
     def test_timing_rules(self, session_db, tmp_path):
         convert_db_to_srt(session_db, html_enabled=False)
-        content = (tmp_path / "Transcriptions.srt").read_text()
+        content = (tmp_path / "Transcriptions.srt").read_text(encoding="utf-8")
         blocks = content.strip().split("\n\n")
         # First entry ends where the next begins (t=2s)
         assert "00:00:00,000 --> 00:00:02,000" in blocks[0]
@@ -195,7 +195,7 @@ class TestConvertDbToTranslationSrt:
     def test_creates_translated_srt(self, session_db, tmp_path):
         out = convert_db_to_translation_srt(session_db)
         assert out == session_db.replace(".db", ".translated.srt")
-        content = (tmp_path / "Transcriptions.translated.srt").read_text()
+        content = (tmp_path / "Transcriptions.translated.srt").read_text(encoding="utf-8")
         assert "Primera frase." in content
         assert "Última frase." in content
         # Rows without a translation are excluded entirely
@@ -216,7 +216,7 @@ class TestConvertDbToHtml:
     def test_builds_html_with_marked_badge(self, session_db, tmp_path):
         html_path = convert_db_to_html(session_db)
         assert html_path == session_db.replace(".db", ".html")
-        content = (tmp_path / "Transcriptions.html").read_text()
+        content = (tmp_path / "Transcriptions.html").read_text(encoding="utf-8")
         assert content.startswith("<!DOCTYPE html>")
         assert "First sentence." in content
         assert "Denied row." not in content
@@ -231,7 +231,7 @@ class TestConvertDbToHtml:
             conn.execute("INSERT INTO transcriptions (timestamp, text) VALUES ('2026-07-23 10:00:00', 'legacy row')")
         html_path = convert_db_to_html(db_path)
         assert html_path is not None
-        content = (tmp_path / "old.html").read_text()
+        content = (tmp_path / "old.html").read_text(encoding="utf-8")
         assert "legacy row" in content
         assert 'class="segment marked"' not in content
 
@@ -239,12 +239,12 @@ class TestConvertDbToHtml:
         cfg_path = tmp_path / "word_highlighting.json"
         cfg_path.write_text(json.dumps({"enabled": True, "words": [{"word": "First", "color": "#ff0000"}]}))
         convert_db_to_html(session_db, highlight_config_path=str(cfg_path))
-        content = (tmp_path / "Transcriptions.html").read_text()
+        content = (tmp_path / "Transcriptions.html").read_text(encoding="utf-8")
         assert '<span style="color: #ff0000;">First</span>' in content
 
     def test_translation_toggle_and_text_when_present(self, session_db, tmp_path):
         convert_db_to_html(session_db)
-        content = (tmp_path / "Transcriptions.html").read_text()
+        content = (tmp_path / "Transcriptions.html").read_text(encoding="utf-8")
         # Independent transcription + translation toggles (checkbox + CSS + listener)
         assert 'id="showTranscription"' in content
         assert 'id="showTranslation"' in content
@@ -280,7 +280,7 @@ class TestConvertDbToHtml:
                 ("2026-07-23 10:00:00", "hi", "<b>hola</b>"),
             )
         convert_db_to_html(db_path)
-        content = (tmp_path / "esc.html").read_text()
+        content = (tmp_path / "esc.html").read_text(encoding="utf-8")
         assert "&lt;b&gt;hola&lt;/b&gt;" in content
         assert "<b>hola</b>" not in content
 
@@ -290,7 +290,7 @@ class TestConvertDbToHtml:
             conn.execute("CREATE TABLE transcriptions (id INTEGER PRIMARY KEY, timestamp TEXT, text TEXT, translated_text TEXT, denied INTEGER, is_final INTEGER)")
             conn.execute("INSERT INTO transcriptions (timestamp, text, denied, is_final) VALUES ('2026-07-23 10:00:00', 'just source', 0, 1)")
         convert_db_to_html(db_path)
-        content = (tmp_path / "plain.html").read_text()
+        content = (tmp_path / "plain.html").read_text(encoding="utf-8")
         assert "just source" in content
         # No transcription/translation show-hide checkboxes without a translation
         assert 'id="showTranscription"' not in content
@@ -310,7 +310,7 @@ class TestConvertDbToHtml:
             conn.execute("INSERT INTO transcriptions (timestamp, text) VALUES ('2026-07-23 10:00:00', 'legacy row')")
         html_path = convert_db_to_html(db_path)
         assert html_path is not None
-        content = (tmp_path / "legacy.html").read_text()
+        content = (tmp_path / "legacy.html").read_text(encoding="utf-8")
         assert "legacy row" in content
         assert 'id="showTranslation"' not in content
         assert 'class="translation"' not in content

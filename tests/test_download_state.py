@@ -71,7 +71,7 @@ def test_progress_persisted_and_restored(tmp_path):
     progress = tmp_path / "download_progress.json"
     downloads.configure(str(progress))
     downloads.try_register_download("m1", total=100)
-    assert json.loads(progress.read_text())["m1"]["status"] == "downloading"
+    assert json.loads(progress.read_text(encoding="utf-8"))["m1"]["status"] == "downloading"
 
     # Simulate a restart: state cleared, then restored from disk in place
     dict_id = id(downloads.active_downloads)

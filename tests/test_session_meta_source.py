@@ -20,7 +20,7 @@ import pytest
 from conftest import extract_definitions
 
 REPO = Path(__file__).resolve().parent.parent
-SRC = (REPO / "speech_to_text.py").read_text()
+SRC = (REPO / "speech_to_text.py").read_text(encoding="utf-8")
 
 
 def _current_session_meta(*, global_config, session_config, state=None):
