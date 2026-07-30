@@ -170,6 +170,7 @@ import json
 import re
 import secrets
 import shutil
+import socket
 import statistics
 from pathlib import Path
 from datetime import timedelta, datetime
@@ -732,6 +733,7 @@ from stt.nllb_catalog import (  # noqa: F401
     madlad_anti_repetition_defaults,
     supported_target,
     languages_for_method,
+    resolve_translation_model_id as _resolve_translation_model_id,
 )
 from stt.ct2_translate import (  # noqa: F401
     resolve_compute_type as _ct2_resolve_compute_type,
@@ -743,6 +745,14 @@ from stt.ct2_translate import (  # noqa: F401
     decode_ct2_tokens as _ct2_decode_tokens,
     score_to_confidence as _ct2_score_to_confidence,
 )
+# Session provenance: which models/decode settings produced a given transcript.
+from stt.session_meta import (
+    append_changes as _session_meta_append,
+    build_session_meta as _build_session_meta,
+    changed_keys as _session_meta_changed_keys,
+    read_session_meta as _read_session_meta,
+    write_session_meta as _write_session_meta,
+)
 
 # Default MADLAD-400 model when the translation engine is set to "madlad".
 MADLAD_DEFAULT_MODEL = "google/madlad400-3b-mt"
@@ -751,16 +761,12 @@ MADLAD_DEFAULT_MODEL = "google/madlad400-3b-mt"
 def _resolve_live_translation_model_id(lt_cfg):
     """Effective live-translation model id for the configured engine.
 
-    translate_text() branches on the LOADED model, so the engine ("nllb"/
-    "madlad") and the model id must agree. If the engine is 'madlad' but the
-    configured model isn't a MADLAD model (e.g. a stale NLLB id), fall back to
-    the MADLAD default so 'madlad' doesn't silently run NLLB weights.
+    Thin wrapper over stt.nllb_catalog.resolve_translation_model_id so session
+    provenance (stt/session_meta.py) records the model that actually loads
+    rather than a possibly-stale configured string, with no chance of the two
+    resolutions drifting apart.
     """
-    method = (lt_cfg or {}).get("translation_method", "nllb")
-    model_id = (lt_cfg or {}).get("translation_model")
-    if method == "madlad" and not is_madlad_model(model_id or ""):
-        return MADLAD_DEFAULT_MODEL
-    return model_id
+    return _resolve_translation_model_id(lt_cfg, MADLAD_DEFAULT_MODEL)
 
 
 def _maybe_half_translation_model(model, device, use_fp16):
@@ -931,6 +937,55 @@ def _apply_glossary(text, source_lang, target_lang):
     except Exception as e:
         print(f"[WARNING] Glossary application failed: {e}")
         return text
+
+
+def _session_meta_enabled():
+    """Whether provenance recording is on (config/config.default.json: session_meta)."""
+    return bool(config.get("session_meta", {}).get("enabled", True))
+
+
+def _current_session_meta():
+    """Provenance mapping for the running config, or {} when disabled.
+
+    The ASR model loads at init step 3 and the database is created at step 4, so
+    what actually loaded is already known here and belongs in the session-start
+    values rather than in the change log. The translation model loads lazily
+    (usually after the db exists), so its effective values are appended later by
+    _record_session_meta_change().
+    """
+    if not _session_meta_enabled():
+        return {}
+    meta = _build_session_meta(
+        config, SERVER_VERSION, SERVER_COMMIT, SERVER_DESCRIBE,
+        socket.gethostname(), MADLAD_DEFAULT_MODEL,
+    )
+    try:
+        if transcription_state is not None:
+            loaded = transcription_state.get("loaded_model")
+            if loaded:
+                meta["asr.effective.model"] = str(loaded)
+            device = transcription_state.get("loaded_model_device")
+            if device:
+                meta["asr.effective.device"] = str(device)
+    except Exception:
+        pass  # provenance is best-effort; a missing state proxy is not an error
+    return meta
+
+
+def _record_session_meta_change(**values):
+    """Append a mid-session settings change to the active session db.
+
+    Append-only: the base key keeps meaning "at session start", so a session
+    that began in one configuration and changed reads differently from one that
+    started in the final configuration. Never raises — a failed provenance write
+    must not break a live language switch.
+    """
+    if not _session_meta_enabled():
+        return
+    active_db = transcription_state.get("db_name") if transcription_state else None
+    if not active_db or not values:
+        return
+    _session_meta_append(active_db, {k: "" if v is None else str(v) for k, v in values.items()})
 
 
 def _translate_text_ct2(text, source_lang, target_lang, translator, tokenizer,
@@ -1403,6 +1458,12 @@ def get_live_translation_model(use_gpu=True, model_id=None):
                 _live_translation_model_loaded = True
                 _live_translation_model_id = model_id
                 print(f"[LIVE-TRANSLATION] Live translation model loaded: {model_id or 'default'}")
+                # The weights that actually loaded, and the device they landed on.
+                # Only knowable here: loading is lazy, so the session db exists first.
+                _record_session_meta_change(**{
+                    "mt.effective.model": model_id,
+                    "mt.effective.device": _live_translation_device,
+                })
                 _warmup_translation_model(_live_translation_model, _live_translation_tokenizer, _live_translation_device)
             finally:
                 _live_translation_model_loading = False
@@ -3354,6 +3415,17 @@ def initialize_database():
         db_initialized = True
         # Make the DB file (and any WAL/SHM sidecars) readable by all users
         make_db_world_readable(db_name)
+
+        # Record which models and decode settings produced this session, so a
+        # transcript reviewed weeks later can be attributed to the transcription
+        # or the translation stage instead of being unattributable once the server
+        # is restarted or retuned. Written after the init transaction closes so
+        # there is only ever one writer, and non-fatal by contract: a session must
+        # start even when provenance can't be recorded.
+        if _session_meta_enabled():
+            _session_provenance = _current_session_meta()
+            if _write_session_meta(db_name, _session_provenance):
+                print(f"[DB] OK: Recorded session provenance ({len(_session_provenance)} settings)")
         # Stable per-session id = the .db filename stem (e.g. 2026-06-22_183007).
         # Stored on every row and emitted top-level on every socket payload so the
         # consumer can anchor socket<->db by exact match; re-derived each session.
@@ -4308,6 +4380,11 @@ def update_config():
         _lt_prev = config.get("live_translation", {})
         _prev_lt_target = _lt_prev.get("target_language")
         _prev_lt_remote_model = (_lt_prev.get("remote", {}) or {}).get("model", "")
+        # Provenance snapshot before the merge, for the same reason: deep_merge
+        # mutates config in place, so a post-merge read can't see what changed.
+        # This is the hot-reload path (config edited outside the Translations tab),
+        # so without it a mid-session retune would leave no record.
+        _meta_before = _current_session_meta()
 
         # Merge new config into existing config (preserves backend and other fields)
         with _config_lock:
@@ -4383,6 +4460,14 @@ def update_config():
                 _apply_translation_language_switch(_new_target)
         except Exception as e:
             print(f"[REMOTE] Could not propagate live_translation change to remote: {e}")
+
+        # Append whatever this edit actually changed to the session's provenance.
+        # target_language is excluded because the switch helper above already
+        # recorded it; recording it twice would imply two switches.
+        _meta_changes = _session_meta_changed_keys(_meta_before, _current_session_meta())
+        _meta_changes.pop("mt.target_language", None)
+        if _meta_changes:
+            _record_session_meta_change(**_meta_changes)
 
         # Determine which settings need restart (compare pre-merge snapshot
         # against the now-merged config)
@@ -5640,6 +5725,12 @@ def save_translation_settings():
     if "live_translation" not in config:
         config["live_translation"] = {}
 
+    # Provenance snapshot before any mutation, diffed at the end of this handler.
+    # Diffing the whole mapping covers every recorded setting (engine, model,
+    # context_window, generation params, CT2/fp16/GPU) without enumerating them
+    # here, so a setting added to build_session_meta is tracked automatically.
+    _meta_before = _current_session_meta()
+
     # Track if we need to handle model loading/unloading
     was_enabled = config.get("live_translation", {}).get("enabled", False)
     old_target_lang = config.get("live_translation", {}).get("target_language", "en")
@@ -5786,6 +5877,14 @@ def save_translation_settings():
     new_remote_model = (config.get("live_translation", {}).get("remote", {}) or {}).get("model", "")
     if new_remote_model:
         _propagate_model_settings_to_remote(new_remote_model, new_method)
+
+    # Append whatever actually changed to the session's provenance.
+    # mt.target_language is excluded: _apply_translation_language_switch above
+    # already recorded it, and recording it twice would imply two switches.
+    _meta_changes = _session_meta_changed_keys(_meta_before, _current_session_meta())
+    _meta_changes.pop("mt.target_language", None)
+    if _meta_changes:
+        _record_session_meta_change(**_meta_changes)
 
     return jsonify({
         "success": True,
@@ -5968,6 +6067,13 @@ def _apply_translation_language_switch(new_language):
                 )
             except Exception as _e:
                 print(f"[HOT-SWITCH] Could not notify remote server of language change: {_e}")
+
+    # Record the switch in the session's provenance so a transcript that changed
+    # target language mid-service doesn't read as though it were that language
+    # all along. The per-row translation_language column shows which rows went
+    # where; this shows when and from what.
+    if old_language != new_language:
+        _record_session_meta_change(**{"mt.target_language": new_language})
 
     # Don't clear cache — old segments keep their cached translations (stale-lang fallback).
     # Only new segments will be translated to the new language.
@@ -8665,6 +8771,31 @@ def preview_db():
         "total": total,
         "truncated": total > len(rows),
     })
+
+
+@app.route("/api/file-manager/session-meta", methods=["GET"])
+def session_meta_for_db():
+    """Which models and settings produced a session, from its session_meta table.
+
+    Opens read-only, so this is safe against a session that is still recording.
+    Sessions recorded before provenance existed simply have no such table — that
+    is normal and returns an empty mapping, not an error, so the UI can render an
+    empty state instead of a failure."""
+    if not check_ip_whitelist():
+        return jsonify({"success": False, "error": "Access denied"}), 403
+
+    path = request.args.get("path")
+    if not path:
+        return jsonify({"success": False, "error": "Path is required"}), 400
+
+    abs_path = safe_managed_path(path)  # commonpath + realpath confinement
+    if abs_path is None:
+        return jsonify({"success": False, "error": "Access denied"}), 403
+    if not os.path.isfile(abs_path):
+        return jsonify({"success": False, "error": "File not found"}), 404
+
+    meta = _read_session_meta(abs_path)
+    return jsonify({"success": True, "meta": meta, "recorded": bool(meta)})
 
 
 # File Mover Endpoints

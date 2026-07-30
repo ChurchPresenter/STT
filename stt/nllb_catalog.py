@@ -7,7 +7,7 @@ the monolith's import-time side effects. Stdlib-only; no config needed.
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 # UI short code -> NLLB FLORES-200 code, for the full 202-language FLORES set.
 # "auto"/unknown fall back to English. Codes with multiple scripts are keyed
@@ -1202,6 +1202,26 @@ def build_madlad_input(text: str, target_lang: str) -> str:
 def is_madlad_model(model_id: str) -> bool:
     """Whether a model id refers to a MADLAD-400 model (vs NLLB)."""
     return "madlad" in (model_id or "").lower()
+
+
+def resolve_translation_model_id(lt_cfg: Optional[dict], madlad_default: str) -> str:
+    """Effective live-translation model id for the configured engine.
+
+    translate_text() branches on the LOADED model, so the engine ("nllb"/
+    "madlad") and the model id must agree. If the engine is 'madlad' but the
+    configured model isn't a MADLAD model (e.g. a stale NLLB id), fall back to
+    ``madlad_default`` so 'madlad' doesn't silently run NLLB weights.
+
+    The monolith's _resolve_live_translation_model_id() delegates here, and
+    session provenance records the result, so the recorded model is the one that
+    actually ran rather than the possibly-stale configured string.
+    """
+    cfg = lt_cfg or {}
+    method = cfg.get("translation_method", "nllb")
+    model_id = cfg.get("translation_model")
+    if method == "madlad" and not is_madlad_model(model_id or ""):
+        return madlad_default
+    return model_id or ""
 
 
 def supported_target(lang: str, method: str) -> bool:

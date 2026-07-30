@@ -151,6 +151,11 @@
     "partials_retention_days": 0,
     "_partials_retention_days_comment": "Delete is_final=0 rows from session databases older than N days at server startup. 0 = keep partials forever. Final rows are never touched"
   },
+  "session_meta": {
+    "enabled": true,
+    "_enabled_comment": "Record which transcription and translation models, decode settings, and filters produced each session into a session_meta table in the session database. Without it, a transcript reviewed later can't be attributed to a model or setting once the server is restarted or retuned",
+    "_history_comment": "Settings changed mid-session (e.g. a hot language switch) are appended as '<key>@<timestamp>' rows; the unsuffixed key always holds the value at session start"
+  },
   "web_server": {
     "host": "0.0.0.0",
     "_host_comment": "Server host. 0.0.0.0 = accessible from network, 127.0.0.1 = localhost only",

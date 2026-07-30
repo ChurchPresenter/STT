@@ -46,6 +46,7 @@ module = [
     "stt.tts_catalog",
     "stt.calibration",
     "stt.model_memory",
+    "stt.session_meta",
 ]
 disallow_untyped_defs = true
 

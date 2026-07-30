@@ -12,8 +12,41 @@ from stt.nllb_catalog import (
     languages_for_method,
     madlad_anti_repetition_defaults,
     madlad_target_code,
+    resolve_translation_model_id,
     supported_target,
 )
+
+MADLAD_DEFAULT = "google/madlad400-3b-mt"
+
+
+class TestResolveTranslationModelId:
+    """The engine and the model id must agree, or madlad silently runs NLLB weights."""
+
+    def test_madlad_engine_with_stale_nllb_id_falls_back_to_default(self):
+        cfg = {"translation_method": "madlad",
+               "translation_model": "facebook/nllb-200-distilled-600M"}
+        assert resolve_translation_model_id(cfg, MADLAD_DEFAULT) == MADLAD_DEFAULT
+
+    def test_madlad_engine_with_madlad_id_is_untouched(self):
+        cfg = {"translation_method": "madlad", "translation_model": "google/madlad400-7b-mt"}
+        assert resolve_translation_model_id(cfg, MADLAD_DEFAULT) == "google/madlad400-7b-mt"
+
+    def test_madlad_engine_with_no_model_gets_the_default(self):
+        assert resolve_translation_model_id({"translation_method": "madlad"},
+                                            MADLAD_DEFAULT) == MADLAD_DEFAULT
+
+    def test_nllb_engine_keeps_its_model_even_if_odd(self):
+        cfg = {"translation_method": "nllb", "translation_model": "something/custom"}
+        assert resolve_translation_model_id(cfg, MADLAD_DEFAULT) == "something/custom"
+
+    def test_engine_defaults_to_nllb(self):
+        cfg = {"translation_model": "facebook/nllb-200-distilled-600M"}
+        assert resolve_translation_model_id(cfg, MADLAD_DEFAULT) == \
+            "facebook/nllb-200-distilled-600M"
+
+    def test_empty_and_none_config_yield_empty_string(self):
+        assert resolve_translation_model_id(None, MADLAD_DEFAULT) == ""
+        assert resolve_translation_model_id({}, MADLAD_DEFAULT) == ""
 
 
 class TestLanguageTables:

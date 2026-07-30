@@ -1266,6 +1266,76 @@
         }
 
         // Preview file functionality
+        // Session provenance — which models and settings produced this transcript.
+        // Grouped by stage so "was this a transcription or a translation problem?"
+        // is answerable at a glance. Settings changed mid-session arrive as
+        // "<key>@<timestamp>" rows and are shown as a timeline under their key,
+        // because a session that switched language reads very differently from one
+        // that started in its final configuration.
+        const SESSION_META_GROUPS = [
+            { label: 'Transcription', prefix: 'asr.' },
+            { label: 'Translation', prefix: 'mt.' },
+            { label: 'Filters', prefix: 'filter.' },
+            { label: 'Glossary', prefix: 'glossary.' },
+            { label: 'Build &amp; host', prefix: null },
+        ];
+
+        function renderSessionMeta(payload) {
+            if (!payload || !payload.success || !payload.recorded) {
+                // Sessions recorded before provenance existed have no such table.
+                return `<div style="margin-bottom:10px;padding:8px 12px;border:1px dashed var(--border);border-radius:var(--radius-sm);color:var(--text-secondary);font-size:0.85em;">
+                    No recorded settings — this session predates provenance recording, or it was disabled.
+                </div>`;
+            }
+            const meta = payload.meta || {};
+            // Split base keys from "<key>@<timestamp>" change rows.
+            const base = {}, history = {};
+            Object.keys(meta).forEach(k => {
+                const at = k.indexOf('@');
+                if (at > 0) {
+                    const root = k.slice(0, at);
+                    (history[root] = history[root] || []).push([k.slice(at + 1), meta[k]]);
+                } else {
+                    base[k] = meta[k];
+                }
+            });
+            Object.values(history).forEach(list => list.sort((a, b) => a[0].localeCompare(b[0])));
+            // A key may only ever have appeared as a change (e.g. a switch that
+            // landed before the base write) — don't drop it.
+            Object.keys(history).forEach(k => { if (!(k in base)) base[k] = ''; });
+
+            const used = new Set();
+            const sections = SESSION_META_GROUPS.map(group => {
+                const keys = Object.keys(base).filter(k =>
+                    group.prefix ? k.startsWith(group.prefix) : !used.has(k)).sort();
+                keys.forEach(k => used.add(k));
+                if (!keys.length) return '';
+                const rows = keys.map(k => {
+                    const changes = (history[k] || []).map(([when, value]) =>
+                        `<div style="color:var(--warning);font-size:0.9em;padding-left:12px;">→ ${escapeHtml(value)} <span style="color:var(--text-secondary);">at ${escapeHtml(when)}</span></div>`
+                    ).join('');
+                    const shown = base[k] === '' ? '—' : base[k];
+                    return `<tr>
+                        <td style="padding:3px 12px 3px 0;color:var(--text-secondary);white-space:nowrap;vertical-align:top;">${escapeHtml(k)}</td>
+                        <td style="padding:3px 0;vertical-align:top;">${escapeHtml(shown)}${changes}</td>
+                    </tr>`;
+                }).join('');
+                return `<div style="min-width:280px;flex:1;">
+                    <div style="font-weight:600;margin-bottom:4px;">${group.label}</div>
+                    <table style="border-collapse:collapse;font-size:0.85em;font-family:var(--font-mono,monospace);">${rows}</table>
+                </div>`;
+            }).join('');
+
+            const changedCount = Object.keys(history).length;
+            const summary = changedCount
+                ? `Recorded settings — ${changedCount} changed mid-session`
+                : 'Recorded settings';
+            return `<details style="margin-bottom:12px;border:1px solid var(--border);border-radius:var(--radius-sm);padding:8px 12px;">
+                <summary style="cursor:pointer;font-size:0.9em;">${summary}</summary>
+                <div style="display:flex;flex-wrap:wrap;gap:20px;margin-top:10px;">${sections}</div>
+            </details>`;
+        }
+
         async function previewFile(path, name) {
             const previewModal = document.getElementById('previewModal');
             const previewContent = document.getElementById('previewContent');
@@ -1353,8 +1423,14 @@
             // migrations show up here automatically.
             else if (ext === 'db' || ext === 'sqlite' || ext === 'sqlite3') {
                 try {
-                    const response = await fetch(`/api/file-manager/preview-db?path=${encodedPath}`);
+                    // Provenance and rows load together — one round trip each, in
+                    // parallel, so opening a preview isn't slower than before.
+                    const [response, metaResponse] = await Promise.all([
+                        fetch(`/api/file-manager/preview-db?path=${encodedPath}`),
+                        fetch(`/api/file-manager/session-meta?path=${encodedPath}`),
+                    ]);
                     const data = await response.json();
+                    const metaPanel = renderSessionMeta(await metaResponse.json().catch(() => null));
                     if (!data.success) {
                         previewContent.innerHTML = `
                             <div class="empty-state">
@@ -1364,7 +1440,8 @@
                                 <p>Use the download button to save the file.</p>
                             </div>`;
                     } else if (!data.rows.length) {
-                        previewContent.innerHTML = `<div class="empty-state"><p>Table <code>${escapeHtml(data.table)}</code> has no rows.</p></div>`;
+                        previewContent.innerHTML = metaPanel +
+                            `<div class="empty-state"><p>Table <code>${escapeHtml(data.table)}</code> has no rows.</p></div>`;
                     } else {
                         const th = 'text-align:left;padding:6px 10px;position:sticky;top:0;background:var(--bg-base);border-bottom:1px solid var(--border);white-space:nowrap;';
                         const head = `<tr>${data.columns.map(c =>
@@ -1381,7 +1458,7 @@
                         // Wide + scrollable (both axes) inside the modal; the table
                         // scrolls, not the page, so the Close button stays visible.
                         previewContent.style.maxHeight = '75vh';
-                        previewContent.innerHTML = note +
+                        previewContent.innerHTML = metaPanel + note +
                             `<div style="width:85vw;max-width:1200px;max-height:68vh;overflow:auto;border:1px solid var(--border);border-radius:var(--radius-sm);">
                                 <table style="border-collapse:collapse;font-size:0.85em;font-family:var(--font-mono,monospace);">${head}${body}</table>
                             </div>`;

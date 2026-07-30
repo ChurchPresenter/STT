@@ -37,6 +37,7 @@ Real-time speech transcription platform with a modern web interface, powered by 
 
 ### Storage & files
 - **Database storage** - SQLite per-session with SRT subtitle and HTML export, plus optional partial-snapshot recording
+- **Session provenance** - Each session database records the transcription and translation models, decode settings, and filters that produced it, including settings changed mid-session, so a transcript stays attributable long after the server is retuned
 - **Audio backup** - WAV and MPEG-TS formats with power-fail-safe continuous backup
 - **File manager** - Web-based browser for backups: rename, download, hide, bulk operations, type/day filters
 - **Remote file delivery** - Automatic backup to SMB/NAS shares
