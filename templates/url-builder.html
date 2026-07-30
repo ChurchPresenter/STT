@@ -868,10 +868,6 @@
         // ---- Profiles: save / recall / activate (root) / delete ----
         let profilesData = { profiles: [], active: '' };
 
-        function escapeHtml(s) {
-            return String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-        }
-
         // Current builder settings as a plain {param: value} object (from the generated URL).
         function getCurrentParams() {
             const params = new URLSearchParams(document.getElementById('customURL').value.split('?')[1]);

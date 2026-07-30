@@ -3430,7 +3430,12 @@
                         if (response.success) {
                             showAlert(`✅ ${response.message}`, 'success');
                             closeUploadModal();
-                            loadLocalModels(); // Refresh local models list
+                            // The uploaded model is a downloaded model like any
+                            // other. This called loadLocalModels(), which does not
+                            // exist — the ReferenceError skipped the dropdown
+                            // refresh below and left the Upload button disabled
+                            // and reading "Uploading..." after a successful upload.
+                            loadDownloadedModels(); // Refresh local models list
                             populateCustomModelDropdowns(); // Refresh custom model dropdowns
                         } else {
                             showAlert(`❌ Upload failed: ${response.error}`, 'error');

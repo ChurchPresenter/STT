@@ -983,6 +983,21 @@
             if (m) m.setAttribute('content', t === 'light' ? '#EAECEF' : '#050506');
         }
 
+        // Escape text that is about to be interpolated into HTML. Defined here,
+        // ahead of the per-page scripts block, so every page extending this has it:
+        // model-manager.html called it six times without defining it, and the
+        // ReferenceError left its Translation card reading "Loading..." forever.
+        //
+        // Quotes are escaped as well as angle brackets, because callers
+        // interpolate into attributes (title="...") as often as into text. The
+        // textContent/innerHTML trick some pages used does not escape quotes, so
+        // a transcript cell containing one closed the attribute it sat in.
+        window.escapeHtml = function (value) {
+            return String(value == null ? '' : value)
+                .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+                .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+        };
+
         // Reveal the header banner when the machine falls short of what the
         // configured models need. Server messages are complete sentences;
         // settings pages call refreshSysreqBanner() after saving config.

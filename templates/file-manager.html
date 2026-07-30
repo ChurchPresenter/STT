@@ -1537,12 +1537,6 @@
             document.getElementById('previewModal').classList.remove('active');
         }
 
-        function escapeHtml(text) {
-            const div = document.createElement('div');
-            div.textContent = text;
-            return div.innerHTML;
-        }
-
         // File Mover Functions
         async function loadFileMoverConfig() {
             try {
