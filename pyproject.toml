@@ -48,6 +48,7 @@ module = [
     "stt.model_memory",
     "stt.session_meta",
     "stt.http_params",
+    "stt.llm_translate",
 ]
 disallow_untyped_defs = true
 
