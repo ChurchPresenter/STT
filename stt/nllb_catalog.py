@@ -763,6 +763,58 @@ def get_default_nllb_models() -> List[Dict[str, Any]]:
     ]
 
 
+# --- LLM translation ---------------------------------------------------------
+# An LLM has no target-language token table, so unlike NLLB and MADLAD its
+# supported set is not a property of the model file — it is a judgement about
+# where a small quantised instruction model produces captions good enough to put
+# in front of a congregation. Offering the NLLB or MADLAD list here would promise
+# hundreds of low-resource languages that such a model translates badly, and a
+# bad caption is worse than no caption.
+#
+# So this is a deliberately short, high-resource set. The value is the language's
+# English name, which is what actually reaches the model (see
+# stt/llm_translate.py:build_system_prompt) rather than a code the model has
+# never been trained to interpret. Adding a language here is a one-line change
+# once someone has checked the output is usable.
+LLM_LANG_CODES: Dict[str, str] = {
+    "auto": "English",
+    # Western Europe
+    "en": "English",
+    "es": "Spanish",
+    "fr": "French",
+    "de": "German",
+    "it": "Italian",
+    "pt": "Portuguese",
+    "nl": "Dutch",
+    # Nordic
+    "sv": "Swedish",
+    "da": "Danish",
+    "no": "Norwegian",
+    "fi": "Finnish",
+    # Central and Eastern Europe — the languages this project is actually
+    # deployed into alongside Russian.
+    "pl": "Polish",
+    "cs": "Czech",
+    "uk": "Ukrainian",
+    "ru": "Russian",
+    "ro": "Romanian",
+    "hu": "Hungarian",
+    "bg": "Bulgarian",
+    "sr": "Serbian",
+    "el": "Greek",
+    # Other high-resource languages
+    "tr": "Turkish",
+    "ar": "Arabic",
+    "he": "Hebrew",
+    "zh": "Chinese (Simplified)",
+    "ja": "Japanese",
+    "ko": "Korean",
+    "vi": "Vietnamese",
+    "id": "Indonesian",
+    "hi": "Hindi",
+}
+
+
 # --- MADLAD-400 (Google) -----------------------------------------------------
 # MADLAD is a T5 MT model selected with a "<2xx>" target-language prefix on the
 # input text (no source language, no forced_bos_token). Codes are short and
@@ -1224,10 +1276,18 @@ def resolve_translation_model_id(lt_cfg: Optional[Mapping[str, Any]], madlad_def
     return model_id or ""
 
 
+def _codes_for_method(method: str) -> Dict[str, str]:
+    """The UI-code table the given engine supports."""
+    if method == "madlad":
+        return MADLAD_LANG_CODES
+    if method == "llm":
+        return LLM_LANG_CODES
+    return NLLB_LANG_CODES
+
+
 def supported_target(lang: str, method: str) -> bool:
     """Whether a UI target-language short code is valid for the active engine."""
-    table = MADLAD_LANG_CODES if method == "madlad" else NLLB_LANG_CODES
-    return lang in table
+    return lang in _codes_for_method(method)
 
 
 def languages_for_method(method: str) -> Dict[str, str]:
@@ -1238,13 +1298,11 @@ def languages_for_method(method: str) -> Dict[str, str]:
     drive the model-aware language picker so each engine only offers the
     languages it can actually translate to.
 
-    An LLM has no target-token table, so its true coverage is "whatever the
-    chosen model knows" and cannot be enumerated from here. It is given the NLLB
-    list deliberately: a broad curated set that a general instruction model can
-    be expected to handle, rather than the full catalog, which would promise
-    hundreds of low-resource languages a small quantised model translates badly.
+    The LLM gets its own short high-resource list (see LLM_LANG_CODES) rather
+    than NLLB's or MADLAD's, because its coverage is a judgement about output
+    quality rather than a property of a model file.
     """
-    table = MADLAD_LANG_CODES if method == "madlad" else NLLB_LANG_CODES
+    table = _codes_for_method(method)
     return {code: TRANSLATION_LANGUAGES[code]
             for code in table
             if code != "auto" and code in TRANSLATION_LANGUAGES}

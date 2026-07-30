@@ -9,6 +9,7 @@ from stt.nllb_catalog import (
     get_default_nllb_models,
     get_nllb_model_description,
     is_madlad_model,
+    LLM_LANG_CODES,
     languages_for_method,
     madlad_anti_repetition_defaults,
     madlad_target_code,
@@ -150,19 +151,26 @@ class TestEngineDetectionAndValidation:
     def test_supported_target_per_engine(self):
         assert supported_target("es", "nllb") is True
         assert supported_target("es", "madlad") is True
+        assert supported_target("es", "llm") is True
         assert supported_target("zz", "nllb") is False
         assert supported_target("zz", "madlad") is False
         # MADLAD-only language is valid for MADLAD, rejected for NLLB.
         assert supported_target("haw", "madlad") is True
         assert supported_target("haw", "nllb") is False
+        # The LLM list is deliberately short: a low-resource language the NMT
+        # engines cover is not offered, because a small quantised instruction
+        # model translates it badly and a bad caption is worse than none.
+        assert supported_target("ace-Latn", "nllb") is True
+        assert supported_target("ace-Latn", "llm") is False
 
 
 class TestLanguagesForMethod:
     def test_returns_named_supported_codes_without_auto(self):
-        for method in ("nllb", "madlad"):
+        for method in ("nllb", "madlad", "llm"):
             langs = languages_for_method(method)
             assert "auto" not in langs
-            table = MADLAD_LANG_CODES if method == "madlad" else NLLB_LANG_CODES
+            table = {"madlad": MADLAD_LANG_CODES, "llm": LLM_LANG_CODES}.get(
+                method, NLLB_LANG_CODES)
             # Exactly the engine's non-auto codes, each with a display name.
             assert set(langs) == {c for c in table if c != "auto"}
             for code, name in langs.items():
@@ -173,6 +181,35 @@ class TestLanguagesForMethod:
 
     def test_unknown_method_is_treated_as_nllb(self):
         assert languages_for_method("anything-else") == languages_for_method("nllb")
+
+    def test_llm_gets_its_own_short_list(self):
+        """Not NLLB's and not MADLAD's — a judgement about output quality.
+
+        An LLM has no target-token table, so its supported set is not a property
+        of the model file. Offering the NMT lists would promise hundreds of
+        low-resource languages a small quantised model handles badly.
+        """
+        llm = languages_for_method("llm")
+        assert 10 <= len(llm) <= 60, "the point of this list is that it is short"
+        assert len(llm) < len(languages_for_method("nllb"))
+        assert llm != languages_for_method("nllb")
+        assert llm != languages_for_method("madlad")
+
+    def test_llm_covers_the_languages_this_is_deployed_into(self):
+        llm = languages_for_method("llm")
+        for code in ("en", "es", "de", "fr", "ru", "uk", "pl"):
+            assert code in llm, f"{code} must be offered"
+
+    def test_every_llm_code_carries_a_display_name(self):
+        # The name is what reaches the model's prompt, so a missing one would
+        # send it a bare code it was never trained to interpret.
+        for code, name in LLM_LANG_CODES.items():
+            assert name and not name.islower(), f"{code} needs a language name"
+
+    def test_english_is_present_in_every_engine(self):
+        # switchLanguageSet() falls back to "en" when a target is unsupported.
+        for method in ("nllb", "madlad", "llm"):
+            assert "en" in languages_for_method(method)
 
 
 class TestMadladAntiRepetition:
