@@ -5,6 +5,8 @@ import pytest
 from stt.session_meta import (
     build_session_meta,
     changed_keys,
+    content_digest,
+    glossary_provenance,
     is_offloaded,
     latest_values,
     read_history,
@@ -273,6 +275,89 @@ class TestOffloadedTranslation:
         assert is_offloaded({}) is False
 
 
+class TestAudioShapingAndSegmentation:
+    def test_context_prompt_is_recorded_as_a_decode_input(self):
+        """Prior captions are passed to Whisper as initial_prompt, so the same
+        audio decodes differently depending on what preceded it."""
+        meta = build({"audio": {"context_prompt": {"enabled": True, "max_chars": 200}}})
+        assert meta["asr.context_prompt.enabled"] == "true"
+        assert meta["asr.context_prompt.max_chars"] == "200"
+
+    def test_loudness_normalization_is_recorded(self):
+        meta = build({"audio": {"loudness_normalization": {
+            "enabled": True, "target_rms_dbfs": -20, "max_gain": 10}}})
+        assert meta["asr.normalize.enabled"] == "true"
+        assert meta["asr.normalize.target_rms_dbfs"] == "-20"
+        assert meta["asr.normalize.max_gain"] == "10"
+
+    def test_segment_boundaries_are_recorded(self):
+        meta = build({"audio": {"energy_threshold": 100, "phrase_timeout": 2,
+                                 "same_output_threshold": 7, "stabilize_live_text": True,
+                                 "pending_buffer": {"enabled": True, "max_words": 30,
+                                                    "max_age_seconds": 10}}})
+        assert meta["asr.segment.energy_threshold"] == "100"
+        assert meta["asr.segment.phrase_timeout"] == "2"
+        assert meta["asr.segment.same_output_threshold"] == "7"
+        assert meta["asr.segment.stabilize_live_text"] == "true"
+        assert meta["asr.segment.pending_buffer.enabled"] == "true"
+        assert meta["asr.segment.pending_buffer.max_words"] == "30"
+        assert meta["asr.segment.pending_buffer.max_age_seconds"] == "10"
+
+    def test_gpu_intent_is_recorded(self):
+        assert build({"performance": {"use_gpu": True}})["asr.use_gpu"] == "true"
+
+    def test_custom_model_type_only_for_a_custom_model(self):
+        custom = build({"model": {"type": "custom", "custom": {"model_path": "/m",
+                                                                "model_type": "whisper"}}})
+        assert custom["asr.custom.model_type"] == "whisper"
+        assert "asr.custom.model_type" not in build({"model": {"type": "whisper"}})
+
+
+class TestTtsAndFileTranslation:
+    def test_tts_voice_is_recorded_per_backend(self):
+        edge = build({"live_translation": {"tts": {"enabled": True, "backend": "edge",
+                                                    "edge_voice": "en-US-AriaNeural",
+                                                    "piper_model": "en_US-lessac-medium",
+                                                    "speed": 1.0}}})
+        assert edge["mt.tts.voice"] == "en-US-AriaNeural"
+        piper = build({"live_translation": {"tts": {"enabled": True, "backend": "piper",
+                                                     "edge_voice": "en-US-AriaNeural",
+                                                     "piper_model": "en_US-lessac-medium"}}})
+        assert piper["mt.tts.voice"] == "en_US-lessac-medium"
+
+    def test_disabled_tts_names_no_voice(self):
+        meta = build({"live_translation": {"tts": {"enabled": False,
+                                                    "edge_voice": "en-US-AriaNeural"}}})
+        assert meta["mt.tts.enabled"] == "false"
+        assert "mt.tts.voice" not in meta
+
+    def test_file_translation_stage_is_recorded(self):
+        """asr.file.* covered how a file was transcribed, not how it was translated."""
+        meta = build({"file_transcription": {"translate_enabled": True, "translate_to": "en",
+                                              "translation_model": "facebook/nllb-200-distilled-600M"}})
+        assert meta["mt.file.enabled"] == "true"
+        assert meta["mt.file.target_language"] == "en"
+        assert meta["mt.file.model"] == "facebook/nllb-200-distilled-600M"
+
+    def test_offload_cache_settings_are_recorded(self):
+        # A cache hit can return text translated under an earlier prompt or glossary.
+        meta = build({"live_translation": {"remote": {"enabled": True, "endpoint": "h:8080",
+                                                       "server_cache_enabled": True,
+                                                       "server_cache_size": 512,
+                                                       "sync_dictionary_on_edit": True}}})
+        assert meta["mt.remote.server_cache_enabled"] == "true"
+        assert meta["mt.remote.server_cache_size"] == "512"
+        assert meta["mt.remote.sync_dictionary_on_edit"] == "true"
+
+    def test_output_artifact_toggles_are_recorded(self):
+        meta = build({"live_translation": {"warmup": True, "srt_enabled": True,
+                                            "html_enabled": False, "max_entries_to_send": 100}})
+        assert meta["mt.warmup"] == "true"
+        assert meta["mt.srt_enabled"] == "true"
+        assert meta["mt.html_enabled"] == "false"
+        assert meta["mt.max_entries_to_send"] == "100"
+
+
 class TestLlmSettings:
     """mt.llm.* - what an LLM session needs in order to be reproducible.
 
@@ -391,6 +476,28 @@ class TestLlmSettings:
         assert meta["mt.model"] == ""
         assert meta["mt.llm.gguf_file"] == "m.gguf"  # configured locally, still readable
 
+    def test_nmt_engine_settings_are_not_claimed_for_a_local_llm_session(self):
+        """Nothing loads a torch or CT2 model, so recording fp16/beams asserts a
+        model that never ran - the same reason the status route nulls them."""
+        meta = build(self.llm(provider="local", gguf_file="m.gguf"))
+        for key in ("mt.use_fp16", "mt.use_ctranslate2", "mt.ct2_compute_type",
+                    "mt.ct2_inter_threads", "mt.ct2_intra_threads"):
+            assert key not in meta
+        assert not [k for k in meta if k.startswith("mt.gen.")]
+
+    def test_offloaded_llm_keeps_the_nmt_settings_the_fallback_would_use(self):
+        cfg = self.llm(model="m")
+        cfg["live_translation"].update(use_fp16=True, use_ctranslate2=True,
+                                       remote={"enabled": True, "endpoint": "h:8080"})
+        assert build(cfg)["mt.use_fp16"] == "true"
+
+    def test_nmt_session_is_unaffected(self):
+        cfg = {"live_translation": {"translation_method": "nllb", "use_fp16": True,
+                                    "generation_params": {"num_beams": 2}}}
+        meta = build(cfg)
+        assert meta["mt.use_fp16"] == "true"
+        assert meta["mt.gen.num_beams"] == "2"
+
     def test_a_prompt_edit_mid_session_is_a_recordable_change(self):
         before = build(self.llm(model="m", system_prompt=""))
         after = build(self.llm(model="m", system_prompt="Render вечеря as communion."))
@@ -490,6 +597,151 @@ class TestFilters:
         meta = build(config)
         assert meta["glossary.enabled"] == "true"
         assert meta["glossary.file"] == "custom_dictionary.json"
+
+    def test_phrase_digest_distinguishes_equal_length_lists(self):
+        """Equal counts are not equal filters; only the digest says so."""
+        one = build({"hallucination_filter": {"phrases": ["a", "b"]}})
+        two = build({"hallucination_filter": {"phrases": ["a", "c"]}})
+        assert one["filter.hallucination_phrase_count"] == two["filter.hallucination_phrase_count"]
+        assert one["filter.hallucination_phrase_digest"] != two["filter.hallucination_phrase_digest"]
+
+    def test_phrase_digest_is_empty_when_there_are_no_phrases(self):
+        assert build({})["filter.hallucination_phrase_digest"] == ""
+
+    def test_word_count_filters_are_recorded(self):
+        """A caption below min_words is never saved, leaving no trace in the rows."""
+        meta = build({"audio": {"min_words": 3, "fuzzy_duplicate_threshold": 0.85}})
+        assert meta["filter.min_words"] == "3"
+        assert meta["filter.fuzzy_duplicate_threshold"] == "0.85"
+
+    def test_profanity_filter_is_recorded_without_the_word_list(self):
+        meta = build({"profanity_filter": {"enabled": True, "replacement": "****",
+                                            "words": ["a", "b", "c"]}})
+        assert meta["filter.profanity_enabled"] == "true"
+        assert meta["filter.profanity_replacement"] == "****"
+        assert meta["filter.profanity_word_count"] == "3"
+
+    def test_music_drop_is_recorded_as_its_consequence(self):
+        detecting = {"speech_type_detection": {"enabled": True,
+                                                "transcribe_detected_music": False}}
+        assert build(detecting)["filter.music_dropped"] == "true"
+
+    def test_music_is_not_dropped_when_transcribed_or_undetected(self):
+        transcribed = {"speech_type_detection": {"enabled": True,
+                                                  "transcribe_detected_music": True}}
+        assert build(transcribed)["filter.music_dropped"] == "false"
+        off = {"speech_type_detection": {"enabled": False}}
+        assert build(off)["filter.music_dropped"] == "false"
+
+
+class TestContentDigest:
+    def test_empty_content_has_no_digest(self):
+        for value in (None, [], {}, ""):
+            assert content_digest(value) == ""
+
+    def test_stable_across_ordering_but_not_across_content(self):
+        assert content_digest({"a": 1, "b": 2}) == content_digest({"b": 2, "a": 1})
+        assert content_digest(["a", "b"]) != content_digest(["a", "c"])
+
+    def test_unserialisable_content_still_digests(self):
+        # A digest is provenance, not a feature: it must not be able to fail a start.
+        assert content_digest([object()])
+
+
+class TestAudioTypeDetection:
+    STD = {"speech_type_detection": {
+        "enabled": True, "method": "panns", "device": "cpu",
+        "music_threshold": 0.5, "music_prob_threshold": 0.5,
+        "quiet_db_threshold": -40, "smoothing_window": 4,
+        "transcribe_detected_music": False}}
+
+    def test_classifier_settings_are_recorded(self):
+        """The per-segment Speaking/Music/Quiet tag is in the transcript; its thresholds were not."""
+        meta = build(self.STD)
+        assert meta["audio_type.enabled"] == "true"
+        assert meta["audio_type.method"] == "panns"
+        assert meta["audio_type.device"] == "cpu"
+        assert meta["audio_type.music_threshold"] == "0.5"
+        assert meta["audio_type.music_prob_threshold"] == "0.5"
+        assert meta["audio_type.quiet_db_threshold"] == "-40"
+        assert meta["audio_type.smoothing_window"] == "4"
+        assert meta["audio_type.transcribe_music"] == "false"
+
+    def test_omitted_entirely_when_unconfigured(self):
+        assert not [k for k in build({}) if k.startswith("audio_type.")]
+
+
+class TestCorrections:
+    def test_review_and_delay_settings_are_recorded(self):
+        """With auto_publish off, a caption never approved never reached the screen."""
+        meta = build({"corrections": {"enabled": True, "confidence_threshold": 0.7,
+                                       "output_delay": {"enabled": True, "delay_seconds": 7,
+                                                        "auto_publish": False}}})
+        assert meta["corrections.enabled"] == "true"
+        assert meta["corrections.confidence_threshold"] == "0.7"
+        assert meta["corrections.output_delay.enabled"] == "true"
+        assert meta["corrections.output_delay.seconds"] == "7"
+        assert meta["corrections.output_delay.auto_publish"] == "false"
+
+    def test_omitted_entirely_when_unconfigured(self):
+        assert not [k for k in build({}) if k.startswith("corrections.")]
+
+
+class TestGlossaryProvenance:
+    DICT = {"glossary": {"uk_to_en": {"вечеря": "communion", "громада": "congregation"},
+                         "en_to_es": {"grace": "gracia"}}}
+
+    def test_terms_are_counted_and_digested(self):
+        """config records the file name; the terms that rewrite captions live in it."""
+        meta = glossary_provenance(self.DICT)
+        assert meta["glossary.term_count"] == "3"
+        assert meta["glossary.pairs"] == "en_to_es,uk_to_en"
+        assert meta["glossary.digest"]
+        assert meta["glossary.source"] == "local"
+
+    def test_an_edit_changes_the_digest(self):
+        edited = {"glossary": {"uk_to_en": {"вечеря": "the Lord's supper",
+                                             "громада": "congregation"},
+                               "en_to_es": {"grace": "gracia"}}}
+        before, after = glossary_provenance(self.DICT), glossary_provenance(edited)
+        assert before["glossary.term_count"] == after["glossary.term_count"]
+        assert before["glossary.digest"] != after["glossary.digest"]
+
+    def test_key_order_does_not_change_the_digest(self):
+        reordered = {"glossary": {"en_to_es": {"grace": "gracia"},
+                                  "uk_to_en": {"громада": "congregation",
+                                               "вечеря": "communion"}}}
+        assert glossary_provenance(reordered)["glossary.digest"] == \
+            glossary_provenance(self.DICT)["glossary.digest"]
+
+    def test_a_pushed_client_glossary_says_so(self):
+        # On an offloaded session the client's table applies, and naming this
+        # machine's file would point at terms that never ran.
+        meta = glossary_provenance(self.DICT, source="paired-client")
+        assert meta["glossary.source"] == "paired-client"
+
+    @pytest.mark.parametrize("dictionary", [None, {}, {"glossary": None},
+                                            {"glossary": "not-a-dict"}, {"other": {}}])
+    def test_unusable_dictionary_leaves_no_claim(self, dictionary):
+        assert glossary_provenance(dictionary) == {}
+
+    def test_non_mapping_pairs_are_ignored_not_counted(self):
+        meta = glossary_provenance({"glossary": {"uk_to_en": {"a": "b"}, "junk": "oops"}})
+        assert meta["glossary.pairs"] == "uk_to_en"
+        assert meta["glossary.term_count"] == "1"
+
+    def test_llm_session_records_no_glossary(self):
+        """apply_glossary() runs only in the NMT decode paths."""
+        cfg = {"live_translation": {"translation_method": "llm", "llm": {"model": "m"}},
+               "custom_dictionary": {"nllb_glossary_enabled": True, "file": "d.json"}}
+        assert not [k for k in build(cfg) if k.startswith("glossary.")]
+
+    def test_offloaded_llm_still_records_it(self):
+        # Machine B may translate with NMT and apply the glossary this box syncs to it.
+        cfg = {"live_translation": {"translation_method": "llm", "llm": {"model": "m"},
+                                    "remote": {"enabled": True, "endpoint": "h:8080"}},
+               "custom_dictionary": {"nllb_glossary_enabled": True, "file": "d.json"}}
+        assert build(cfg)["glossary.enabled"] == "true"
 
 
 class TestBestEffort:

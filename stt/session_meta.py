@@ -30,6 +30,7 @@ Two invariants the rest of the system depends on:
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import sqlite3
@@ -109,6 +110,22 @@ def _put(meta: Dict[str, str], key: str, value: Any) -> None:
     meta[key] = _stringify(value)
 
 
+def content_digest(value: Any) -> str:
+    """Short stable digest of a list or mapping, or "" when there is nothing.
+
+    For content that decides the output but is far too large to store: filter
+    phrase lists, glossary term tables. Two sessions with the same digest ran the
+    same content; a different digest is proof they did not, which is what "the
+    captions changed and nobody remembers editing anything" needs. Twelve hex
+    characters — this identifies an edit, it does not defend against one.
+    """
+    if not value:
+        return ""
+    canonical = json.dumps(value, ensure_ascii=False, sort_keys=True,
+                           separators=(",", ":"), default=str)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:12]
+
+
 def _section(config: Optional[Mapping[str, Any]], *path: str) -> Dict[str, Any]:
     """Fetch a nested config dict, returning {} for any missing or non-dict hop.
 
@@ -167,7 +184,11 @@ def _add_transcription(meta: Dict[str, str], config: Mapping[str, Any]) -> None:
     _put(meta, "asr.model", resolve_asr_model(model_cfg))
     _put(meta, "asr.use_flash_attention",
          _section(model_cfg, "huggingface").get("use_flash_attention"))
-    _put(meta, "asr.language", _section(config, "audio").get("language"))
+    if (model_cfg.get("type") or "whisper") == "custom":
+        _put(meta, "asr.custom.model_type", _section(model_cfg, "custom").get("model_type"))
+    audio = _section(config, "audio")
+    _put(meta, "asr.language", audio.get("language"))
+    _put(meta, "asr.use_gpu", _section(config, "performance").get("use_gpu"))
 
     decode = _section(config, "whisper_decoding", "live_transcription")
     for key in _DECODE_KEYS:
@@ -178,7 +199,45 @@ def _add_transcription(meta: Dict[str, str], config: Mapping[str, Any]) -> None:
     _put(meta, "asr.vad.enabled", vad.get("enabled"))
     _put(meta, "asr.vad.threshold", vad.get("threshold"))
 
+    _add_audio_shaping(meta, audio)
+    _add_segmentation(meta, audio)
     _add_file_transcription(meta, config, model_cfg)
+
+
+def _add_audio_shaping(meta: Dict[str, str], audio: Mapping[str, Any]) -> None:
+    """What reached the model besides the microphone signal itself.
+
+    ``context_prompt`` is decode-affecting in the same way beam_size is — the
+    previous captions are passed to Whisper as initial_prompt, so the same audio
+    decodes differently depending on what preceded it. ``loudness_normalization``
+    changes the samples before the model ever sees them.
+    """
+    ctx = _section(audio, "context_prompt")
+    _put(meta, "asr.context_prompt.enabled", ctx.get("enabled"))
+    _put(meta, "asr.context_prompt.max_chars", ctx.get("max_chars"))
+
+    norm = _section(audio, "loudness_normalization")
+    _put(meta, "asr.normalize.enabled", norm.get("enabled"))
+    _put(meta, "asr.normalize.target_rms_dbfs", norm.get("target_rms_dbfs"))
+    _put(meta, "asr.normalize.max_gain", norm.get("max_gain"))
+
+
+def _add_segmentation(meta: Dict[str, str], audio: Mapping[str, Any]) -> None:
+    """Where one caption ends and the next begins.
+
+    These do not change the words, they change how the words are cut into rows —
+    which is what a reader comparing two transcripts of the same service is
+    actually looking at when the line breaks fall in different places.
+    """
+    _put(meta, "asr.segment.energy_threshold", audio.get("energy_threshold"))
+    _put(meta, "asr.segment.phrase_timeout", audio.get("phrase_timeout"))
+    _put(meta, "asr.segment.same_output_threshold", audio.get("same_output_threshold"))
+    _put(meta, "asr.segment.stabilize_live_text", audio.get("stabilize_live_text"))
+
+    pending = _section(audio, "pending_buffer")
+    _put(meta, "asr.segment.pending_buffer.enabled", pending.get("enabled"))
+    _put(meta, "asr.segment.pending_buffer.max_words", pending.get("max_words"))
+    _put(meta, "asr.segment.pending_buffer.max_age_seconds", pending.get("max_age_seconds"))
 
 
 def _add_file_transcription(meta: Dict[str, str], config: Mapping[str, Any],
@@ -342,19 +401,30 @@ def _add_translation(meta: Dict[str, str], config: Mapping[str, Any],
     _put(meta, "mt.context_window", lt.get("context_window"))
     _put(meta, "mt.translate_in_progress", lt.get("translate_in_progress"))
     _put(meta, "mt.display_mode", lt.get("display_mode"))
-    _put(meta, "mt.use_ctranslate2", lt.get("use_ctranslate2"))
-    _put(meta, "mt.ct2_compute_type", lt.get("ct2_compute_type"))
-    _put(meta, "mt.ct2_inter_threads", lt.get("ct2_inter_threads"))
-    _put(meta, "mt.ct2_intra_threads", lt.get("ct2_intra_threads"))
-    _put(meta, "mt.use_gpu", lt.get("use_gpu"))
-    _put(meta, "mt.use_fp16", lt.get("use_fp16"))
+    _put(meta, "mt.warmup", lt.get("warmup"))
+    _put(meta, "mt.srt_enabled", lt.get("srt_enabled"))
+    _put(meta, "mt.html_enabled", lt.get("html_enabled"))
+    _put(meta, "mt.max_entries_to_send", lt.get("max_entries_to_send"))
 
-    gen = _section(lt, "generation_params")
-    for key in _GEN_KEYS:
-        if key in gen:
-            _put(meta, f"mt.gen.{key}", gen[key])
+    # NMT engine settings. Skipped for a local LLM session, where nothing loads a
+    # torch/CT2 model and these describe a model that never ran — the same reason
+    # /api/translation/status reports them as null for an LLM session.
+    if not (uses_llm(lt) and not is_offloaded(lt)):
+        _put(meta, "mt.use_ctranslate2", lt.get("use_ctranslate2"))
+        _put(meta, "mt.ct2_compute_type", lt.get("ct2_compute_type"))
+        _put(meta, "mt.ct2_inter_threads", lt.get("ct2_inter_threads"))
+        _put(meta, "mt.ct2_intra_threads", lt.get("ct2_intra_threads"))
+        _put(meta, "mt.use_gpu", lt.get("use_gpu"))
+        _put(meta, "mt.use_fp16", lt.get("use_fp16"))
+
+        gen = _section(lt, "generation_params")
+        for key in _GEN_KEYS:
+            if key in gen:
+                _put(meta, f"mt.gen.{key}", gen[key])
 
     _add_llm(meta, lt)
+    _add_tts(meta, lt)
+    _add_file_translation(meta, config)
 
     remote = _section(lt, "remote")
     if remote:
@@ -362,16 +432,168 @@ def _add_translation(meta: Dict[str, str], config: Mapping[str, Any],
         _put(meta, "mt.remote.endpoint", remote.get("endpoint"))
         _put(meta, "mt.remote.model", remote.get("model"))
         _put(meta, "mt.remote.fallback", remote.get("fallback"))
+        # A cache hit returns text translated under whatever prompt, model or
+        # glossary was live when it was first stored — so a session can contain
+        # captions this table's other keys do not explain.
+        _put(meta, "mt.remote.server_cache_enabled", remote.get("server_cache_enabled"))
+        _put(meta, "mt.remote.server_cache_size", remote.get("server_cache_size"))
+        _put(meta, "mt.remote.sync_dictionary_on_edit", remote.get("sync_dictionary_on_edit"))
+
+
+def _add_tts(meta: Dict[str, str], lt: Mapping[str, Any]) -> None:
+    """mt.tts.* — the voice the translation was spoken in, when it was spoken.
+
+    Only for an enabled TTS session: on a caption-only service these name a voice
+    nobody heard.
+    """
+    tts = _section(lt, "tts")
+    if not tts.get("enabled"):
+        _put(meta, "mt.tts.enabled", bool(tts.get("enabled")))
+        return
+    backend = tts.get("backend") or "edge"
+    _put(meta, "mt.tts.enabled", True)
+    _put(meta, "mt.tts.backend", backend)
+    _put(meta, "mt.tts.voice",
+         tts.get("piper_model") if backend == "piper" else tts.get("edge_voice"))
+    _put(meta, "mt.tts.speed", tts.get("speed"))
+
+
+def _add_file_translation(meta: Dict[str, str], config: Mapping[str, Any]) -> None:
+    """mt.file.* — the translation half of the file-transcription pipeline.
+
+    asr.file.* records how a dropped-in file was transcribed but said nothing
+    about how it was then translated, which for a batch-produced transcript is
+    half the provenance missing.
+    """
+    ft = _section(config, "file_transcription")
+    if not ft:
+        return
+    _put(meta, "mt.file.enabled", ft.get("translate_enabled"))
+    _put(meta, "mt.file.target_language", ft.get("translate_to"))
+    _put(meta, "mt.file.model", ft.get("translation_model"))
 
 
 def _add_filters(meta: Dict[str, str], config: Mapping[str, Any]) -> None:
+    """filter.* — everything that can remove or rewrite a caption after decoding.
+
+    This is the group a reader needs most and had least of. A caption dropped by
+    min_words, by the fuzzy-duplicate check, by the Music verdict or by a
+    hallucination phrase leaves nothing behind in the transcript: the row is
+    simply absent, and absence reads as "the model did not hear it". Recording
+    the thresholds makes the difference recoverable.
+    """
     hf = _section(config, "hallucination_filter")
     _put(meta, "filter.hallucination_enabled", hf.get("enabled"))
     phrases = hf.get("phrases")
     _put(meta, "filter.hallucination_phrase_count",
          len(phrases) if isinstance(phrases, (list, tuple)) else 0)
+    # The count says how many filters ran; only the digest says which. Phrases are
+    # edited between services, so two sessions with equal counts are not
+    # necessarily comparable — and the list is far too long to store in full.
+    _put(meta, "filter.hallucination_phrase_digest", content_digest(phrases))
     _put(meta, "filter.cjk_enabled", hf.get("cjk_filter_enabled"))
 
+    audio = _section(config, "audio")
+    _put(meta, "filter.min_words", audio.get("min_words"))
+    _put(meta, "filter.fuzzy_duplicate_threshold", audio.get("fuzzy_duplicate_threshold"))
+
+    pf = _section(config, "profanity_filter")
+    _put(meta, "filter.profanity_enabled", pf.get("enabled"))
+    _put(meta, "filter.profanity_replacement", pf.get("replacement"))
+    words = pf.get("words")
+    _put(meta, "filter.profanity_word_count",
+         len(words) if isinstance(words, (list, tuple)) else 0)
+
+    # A Music segment is discarded outright unless transcribe_detected_music is
+    # set, so this is the one audio-type setting that decides whether a row exists
+    # at all. Stated as the consequence rather than the toggle, because that is
+    # the question being asked of it.
+    std = _section(config, "speech_type_detection")
+    _put(meta, "filter.music_dropped",
+         bool(std.get("enabled")) and not bool(std.get("transcribe_detected_music")))
+
+
+def glossary_provenance(dictionary: Optional[Mapping[str, Any]],
+                        source: str = "local") -> Dict[str, str]:
+    """glossary.* facts that live in the dictionary file, not in config.
+
+    The terms are what rewrite the captions, and config records only the file
+    name — so a glossary edited between two services leaves the two transcripts
+    looking identically configured. Recorded as a digest plus counts rather than
+    the table itself, which can run to hundreds of entries.
+
+    ``source`` distinguishes this machine's own custom_dictionary.json from a
+    glossary pushed by a paired Machine A for the session: on an offloaded
+    session the client's table is the one that applies, and naming the local file
+    would point a reader at terms that were never used.
+
+    Called by the monolith at session start (the file read belongs there);
+    returns {} for a missing or malformed dictionary so a session still starts.
+    """
+    glossary = (dictionary or {}).get("glossary")
+    if not isinstance(glossary, Mapping):
+        return {}
+    pairs = {k: v for k, v in glossary.items() if isinstance(v, Mapping)}
+    meta: Dict[str, str] = {}
+    _put(meta, "glossary.source", source)
+    _put(meta, "glossary.pairs", ",".join(sorted(pairs)))
+    _put(meta, "glossary.term_count", sum(len(v) for v in pairs.values()))
+    _put(meta, "glossary.digest", content_digest(glossary))
+    return meta
+
+
+def _add_audio_type(meta: Dict[str, str], config: Mapping[str, Any]) -> None:
+    """audio_type.* — the Speaking/Music/Quiet classifier behind that drop.
+
+    Recorded whether or not it drops anything: the verdict is stored per segment
+    in the transcript, and a reader comparing those tags across sessions needs
+    the thresholds that produced them.
+    """
+    std = _section(config, "speech_type_detection")
+    if not std:
+        return
+    _put(meta, "audio_type.enabled", std.get("enabled"))
+    _put(meta, "audio_type.method", std.get("method"))
+    _put(meta, "audio_type.device", std.get("device"))
+    _put(meta, "audio_type.music_threshold", std.get("music_threshold"))
+    _put(meta, "audio_type.music_prob_threshold", std.get("music_prob_threshold"))
+    _put(meta, "audio_type.quiet_db_threshold", std.get("quiet_db_threshold"))
+    _put(meta, "audio_type.smoothing_window", std.get("smoothing_window"))
+    _put(meta, "audio_type.transcribe_music", std.get("transcribe_detected_music"))
+
+
+def _add_corrections(meta: Dict[str, str], config: Mapping[str, Any]) -> None:
+    """corrections.* — whether a caption could be edited before it was published.
+
+    output_delay holds a caption back for review; with auto_publish off a caption
+    that was never approved never reached the screen, which is another way for a
+    transcript row and what the congregation saw to disagree.
+    """
+    corr = _section(config, "corrections")
+    if not corr:
+        return
+    _put(meta, "corrections.enabled", corr.get("enabled"))
+    _put(meta, "corrections.confidence_threshold", corr.get("confidence_threshold"))
+    delay = _section(corr, "output_delay")
+    _put(meta, "corrections.output_delay.enabled", delay.get("enabled"))
+    _put(meta, "corrections.output_delay.seconds", delay.get("delay_seconds"))
+    _put(meta, "corrections.output_delay.auto_publish", delay.get("auto_publish"))
+
+
+def _add_glossary(meta: Dict[str, str], config: Mapping[str, Any]) -> None:
+    """glossary.* — the dictionary that rewrites translated text.
+
+    Omitted for a local LLM session: apply_glossary() is called only from the NMT
+    decode paths (_translate_text_ct2 and translate_text), so on an LLM session
+    these settings had no effect and recording them invites a reader to explain a
+    caption with a substitution that never ran.
+
+    Only the file name is knowable from config; the terms themselves live in that
+    file and are added by glossary_provenance() at session start.
+    """
+    lt = _section(config, "live_translation")
+    if uses_llm(lt) and not is_offloaded(lt):
+        return
     cd = _section(config, "custom_dictionary")
     _put(meta, "glossary.enabled", cd.get("nllb_glossary_enabled"))
     _put(meta, "glossary.file", cd.get("file"))
@@ -397,6 +619,9 @@ def build_session_meta(config: Optional[Mapping[str, Any]], version: str, commit
         _add_transcription(meta, config or {})
         _add_translation(meta, config or {}, madlad_default)
         _add_filters(meta, config or {})
+        _add_audio_type(meta, config or {})
+        _add_corrections(meta, config or {})
+        _add_glossary(meta, config or {})
     except Exception as e:  # pragma: no cover - defensive; sections already guard
         print(f"[SESSION-META] WARNING: could not build full provenance: {e}")
     return meta

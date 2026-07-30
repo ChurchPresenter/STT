@@ -813,6 +813,7 @@ from stt.session_meta import (
     append_changes as _session_meta_append,
     build_session_meta as _build_session_meta,
     changed_keys as _session_meta_changed_keys,
+    glossary_provenance as _glossary_provenance,
     is_offloaded as _translation_is_offloaded,
     latest_values as _session_meta_latest,
     load_session_meta as _load_session_meta,
@@ -1064,6 +1065,19 @@ def _current_session_meta(session_config=None):
                 meta["asr.effective.device"] = str(device)
     except Exception:
         pass  # provenance is best-effort; a missing state proxy is not an error
+    try:
+        # The glossary terms rewrite translated captions and live in a file, not in
+        # config, so build_session_meta() cannot see them. Absent glossary.file
+        # means this session applies no glossary at all (a local LLM session), and
+        # there is nothing to describe. An override is a paired client's own table,
+        # pushed for this session: the local file is then not what ran.
+        if "glossary.file" in meta:
+            override = _session_glossary_override
+            meta.update(_glossary_provenance(
+                override if override is not None else load_custom_dictionary(),
+                "paired-client" if override is not None else "local"))
+    except Exception as e:
+        print(f"[SESSION-META] WARNING: could not read glossary provenance: {e}")
     return meta
 
 
