@@ -11,6 +11,7 @@ so it is imported under an alias.
 """
 
 import os
+import sys
 
 import pytest
 
@@ -43,8 +44,10 @@ class TestLocalPaths:
         blocker.write_text("x", encoding="utf-8")
         assert check_destination(str(blocker / "sub")) is False
 
-    @pytest.mark.skipif(os.geteuid() == 0 if hasattr(os, "geteuid") else False,
-                        reason="root ignores the write bit")
+    @pytest.mark.skipif(
+        sys.platform == "win32" or (hasattr(os, "geteuid") and os.geteuid() == 0),
+        reason="Windows ignores the POSIX write bit on directories (ACLs govern), "
+               "and root ignores it everywhere")
     def test_a_read_only_directory_is_refused(self, tmp_path):
         target = tmp_path / "readonly"
         target.mkdir()

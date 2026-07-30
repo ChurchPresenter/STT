@@ -13,6 +13,7 @@ code in that module.
 
 import os
 import subprocess
+import sys
 
 import pytest
 
@@ -128,7 +129,12 @@ class TestLinux:
         assert "username=operator" in body
         assert "password=hunter2" in body
         assert "domain=CORP" in body
-        assert mode == 0o600, f"credentials file must not be readable by others (was {mode:o})"
+        if sys.platform != "win32":
+            # POSIX permission bits only mean something on POSIX; on Windows
+            # st_mode always reports 0o666 because NTFS uses ACLs. This branch
+            # is the Linux one anyway — /proc/<pid>/cmdline is what it protects.
+            assert mode == 0o600, (
+                f"credentials file must not be readable by others (was {mode:o})")
 
     def test_the_credentials_file_is_deleted_afterwards(self, mount):
         mount_smb_share("//nas/share", "u", "p")
