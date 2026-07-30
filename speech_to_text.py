@@ -751,6 +751,7 @@ from stt.session_meta import (
     build_session_meta as _build_session_meta,
     changed_keys as _session_meta_changed_keys,
     is_offloaded as _translation_is_offloaded,
+    load_session_meta as _load_session_meta,
     read_session_meta as _read_session_meta,
     remote_provenance as _remote_provenance,
     write_missing as _session_meta_write_missing,
@@ -8854,7 +8855,9 @@ def session_meta_for_db():
     Opens read-only, so this is safe against a session that is still recording.
     Sessions recorded before provenance existed simply have no such table — that
     is normal and returns an empty mapping, not an error, so the UI can render an
-    empty state instead of a failure."""
+    empty state instead of a failure. A database that could not be READ is
+    reported separately: collapsing the two would make a healthy session look
+    like an unrecorded one and send the reader after the wrong problem."""
     if not check_ip_whitelist():
         return jsonify({"success": False, "error": "Access denied"}), 403
 
@@ -8868,8 +8871,13 @@ def session_meta_for_db():
     if not os.path.isfile(abs_path):
         return jsonify({"success": False, "error": "File not found"}), 404
 
-    meta = _read_session_meta(abs_path)
-    return jsonify({"success": True, "meta": meta, "recorded": bool(meta)})
+    meta, read_error = _load_session_meta(abs_path)
+    return jsonify({
+        "success": True,
+        "meta": meta,
+        "recorded": bool(meta),
+        "read_error": read_error,
+    })
 
 
 # File Mover Endpoints

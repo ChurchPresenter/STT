@@ -31,7 +31,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from datetime import datetime
-from typing import Any, Dict, Iterable, Mapping, Optional
+from typing import Any, Dict, Iterable, Mapping, Optional, Tuple
 
 from stt.nllb_catalog import resolve_translation_model_id
 
@@ -411,22 +411,63 @@ def append_changes(db_path: str, changes: Mapping[str, str],
         return False
 
 
-def read_session_meta(db_path: str) -> Dict[str, str]:
-    """Read the whole table. Returns {} for a pre-provenance or unreadable db.
+def _read_all(uri: str) -> Tuple[Dict[str, str], Optional[str]]:
+    """Read the table through one read-only URI. Raises on an unusable database."""
+    with sqlite3.connect(uri, uri=True, timeout=30) as conn:
+        present = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='session_meta'"
+        ).fetchone()
+        if not present:
+            return {}, None  # pre-provenance session: absence is the answer
+        rows: Iterable[Any] = conn.execute(
+            "SELECT key, value FROM session_meta ORDER BY key"
+        ).fetchall()
+    return {str(key): "" if value is None else str(value) for key, value in rows}, None
 
-    A session recorded before this feature existed has no such table; that is
-    normal and must read as empty rather than as an error.
+
+def load_session_meta(db_path: str) -> Tuple[Dict[str, str], Optional[str]]:
+    """Read the whole table as (meta, error).
+
+    Always read-only, so reading provenance can never lock or mutate a session
+    that is still recording, nor leave sidecar files beside an archived one.
+
+    A session recorded before this feature existed has no such table, which is
+    normal and yields ({}, None). A database that could not be read yields
+    ({}, "<reason>") — the two must stay distinguishable, because collapsing them
+    into a bare {} makes a healthy session that merely failed to open look like
+    one that was never recorded, and sends the reader after the wrong problem.
     """
     try:
-        # Read-only URI so reading provenance can never lock or mutate a session
-        # that is still recording (and never creates a WAL beside it).
-        with sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=30) as conn:
-            rows: Iterable[Any] = conn.execute(
-                "SELECT key, value FROM session_meta ORDER BY key"
-            ).fetchall()
-        return {str(key): "" if value is None else str(value) for key, value in rows}
-    except Exception:
-        return {}
+        return _read_all(f"file:{db_path}?mode=ro")
+    except sqlite3.Error as first_error:
+        # A WAL-mode database detached from its -shm sidecar — delivered to a NAS,
+        # archived, or downloaded as a lone .db — cannot be read through a plain
+        # read-only URI, because SQLite wants to create that sidecar and
+        # read-only forbids it. Reading such a file is the whole point of an
+        # archive, so retry with immutable=1, which needs no sidecar.
+        #
+        # The ordering is what makes this safe: a database still being written
+        # has its sidecars present, so the attempt above succeeds and this branch
+        # is never reached. immutable is only ever asserted about a file already
+        # detached from its writer. (sqlite3.connect is lazy, so the failure
+        # surfaces on the first query, not at connect — hence retrying the whole
+        # read rather than just the open.)
+        try:
+            return _read_all(f"file:{db_path}?mode=ro&immutable=1")
+        except Exception:
+            return {}, f"{type(first_error).__name__}: {first_error}"
+    except Exception as e:
+        return {}, f"{type(e).__name__}: {e}"
+
+
+def read_session_meta(db_path: str) -> Dict[str, str]:
+    """The mapping alone, {} if unreadable — for callers that diff it.
+
+    Use load_session_meta() when the distinction between "nothing recorded" and
+    "could not read" matters, which is anywhere a human sees the result.
+    """
+    meta, _ = load_session_meta(db_path)
+    return meta
 
 
 def read_history(meta: Mapping[str, str], key: str) -> list:

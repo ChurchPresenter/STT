@@ -1281,6 +1281,13 @@
         ];
 
         function renderSessionMeta(payload) {
+            // "Couldn't read it" must never be shown as "nothing was recorded" —
+            // that sends you looking for a missing feature instead of a broken read.
+            if (payload && payload.success && payload.read_error) {
+                return `<div style="margin-bottom:10px;padding:8px 12px;border:1px solid var(--warning);border-radius:var(--radius-sm);color:var(--warning);font-size:0.85em;">
+                    Recorded settings could not be read from this file: <code>${escapeHtml(payload.read_error)}</code>
+                </div>`;
+            }
             if (!payload || !payload.success || !payload.recorded) {
                 // Sessions recorded before provenance existed have no such table.
                 return `<div style="margin-bottom:10px;padding:8px 12px;border:1px dashed var(--border);border-radius:var(--radius-sm);color:var(--text-secondary);font-size:0.85em;">

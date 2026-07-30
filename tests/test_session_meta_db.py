@@ -1,11 +1,14 @@
 """Session provenance sqlite storage (stt/session_meta.py write/append/read)."""
 
+import os
+import shutil
 import sqlite3
 
 from stt.session_meta import (
     append_changes,
     build_session_meta,
     changed_keys,
+    load_session_meta,
     read_history,
     read_session_meta,
     remote_provenance,
@@ -284,6 +287,79 @@ class TestOffloadedSessionEndToEnd:
         stored = read_session_meta(db)
         assert stored["mt.model"] == ""
         assert not any(k.startswith("mt.remote.effective.") for k in stored)
+
+
+class TestReadDetachedFromSidecars:
+    """A WAL database copied without its -wal/-shm sidecars must still be readable.
+
+    This is the normal state of any delivered or archived session: file_mover
+    sends the .db to a NAS, and a download hands over the .db alone. Plain
+    read-only cannot open such a file because SQLite wants to create the -shm.
+    """
+
+    def wal_db_without_sidecars(self, tmp_path):
+        source = str(tmp_path / "source.db")
+        conn = sqlite3.connect(source)
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("CREATE TABLE transcriptions (id INTEGER PRIMARY KEY, text TEXT)")
+        conn.commit()
+        write_session_meta(source, meta_for(config_at()))
+        # Close first: a finished session checkpoints its WAL into the .db and
+        # removes the sidecars, while the file header still says WAL mode. That
+        # combination is what a delivered/archived session actually looks like.
+        conn.close()
+        detached = str(tmp_path / "delivered.db")
+        shutil.copyfile(source, detached)
+        assert not os.path.exists(detached + "-shm")
+        assert not os.path.exists(detached + "-wal")
+        return detached
+
+    def test_reads_a_detached_wal_database(self, tmp_path):
+        db = self.wal_db_without_sidecars(tmp_path)
+        meta, error = load_session_meta(db)
+        assert error is None, f"detached WAL db should read cleanly, got {error}"
+        assert meta["asr.model"] == "small"
+        assert meta["mt.model"] == MADLAD_DEFAULT
+
+    def test_reading_creates_no_sidecars(self, tmp_path):
+        db = self.wal_db_without_sidecars(tmp_path)
+        read_session_meta(db)
+        assert not os.path.exists(db + "-shm"), "read must not write beside the file"
+        assert not os.path.exists(db + "-wal")
+
+
+class TestReadErrorsAreDistinguishable:
+    """"Nothing recorded" and "couldn't read it" must never look the same."""
+
+    def test_pre_provenance_session_is_not_an_error(self, tmp_path):
+        meta, error = load_session_meta(session_db(tmp_path))
+        assert (meta, error) == ({}, None)
+
+    def test_missing_file_is_an_error_not_an_empty_session(self, tmp_path):
+        meta, error = load_session_meta(str(tmp_path / "absent.db"))
+        assert meta == {}
+        assert error, "a file that isn't there must not read as 'nothing recorded'"
+
+    def test_non_database_file_is_an_error(self, tmp_path):
+        junk = tmp_path / "notadb.db"
+        junk.write_text("this is not sqlite")
+        meta, error = load_session_meta(str(junk))
+        assert meta == {}
+        assert error
+
+    def test_unusable_path_is_reported_not_raised(self):
+        # A path sqlite can't even be handed (null byte) fails outside sqlite3's
+        # own error hierarchy; it must still be reported rather than propagate.
+        meta, error = load_session_meta("bad\x00path.db")
+        assert meta == {}
+        assert error
+
+    def test_recorded_session_has_no_error(self, tmp_path):
+        db = session_db(tmp_path)
+        write_session_meta(db, meta_for(config_at()))
+        meta, error = load_session_meta(db)
+        assert error is None
+        assert meta["asr.model"] == "small"
 
 
 class TestRead:
