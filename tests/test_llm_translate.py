@@ -138,8 +138,27 @@ class TestValidateRejects:
                             "a service to dismiss the congregation. " * 3)
         assert validate_translation(raw, SRC, "en") is None
 
-    def test_expansion_limit_ignores_very_short_sources(self):
-        # A 2-word source must not be rejected merely for tripling.
+    def test_short_source_still_has_a_bounded_budget(self):
+        """The regression that a full-service run exposed.
+
+        Asked to translate the reference "1 Фессалоникийцам 5 глава.", the model answered
+        with the reference *and then recited the passage*. An earlier version exempted
+        sources under three words from the expansion check, which let this through.
+        """
+        recitation = ("1 Corinthians 11:1-24\n\n1 Now, brothers and sisters, about the "
+                      "Lord's Supper, which I received from the Lord, I also passed on "
+                      "to you, that the Lord Jesus on the night he was betrayed took "
+                      "bread and gave thanks.")
+        assert validate_translation(recitation, "1 Фессалоникийцам 5 глава.", "en") is None
+
+    def test_multi_paragraph_output_is_a_document_not_a_caption(self):
+        assert validate_translation("A line.\n\nAnother paragraph.", "Одна строка.",
+                                    "en") is None
+
+    def test_short_source_legitimate_expansion_still_passes(self):
+        # 2 content words in, 4 out — inside the absolute floor, must survive.
+        assert validate_translation("The shield of faith.", "Щит веры.",
+                                    "en") == "The shield of faith."
         assert validate_translation("Let us pray together now.", "Помолимся вместе.",
                                     "en") is not None
 

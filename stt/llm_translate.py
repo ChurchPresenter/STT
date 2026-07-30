@@ -166,17 +166,23 @@ def _word_count(text: str) -> int:
 
 
 def validate_translation(raw: Optional[str], source: str, target_lang: str, *,
-                         max_expansion: float = 3.0) -> Optional[str]:
+                         max_expansion: float = 3.0, min_word_budget: int = 8) -> Optional[str]:
     """The cleaned caption, or None if the output is not a usable translation.
 
     None means "fall back to the NMT model" — never "show this". Rejects, in order:
     empty output; a refusal; a reasoning or narration opener; wrong-script output
-    (the source language leaking through); and output far longer than the source,
-    which is how commentary and repetition present.
+    (the source language leaking through); multi-paragraph output; and output far
+    longer than the source, which is how commentary and recitation present.
 
-    ``max_expansion`` is deliberately loose. Russian to English legitimately expands,
-    and short captions expand most (a two-word source can triple), so this is a
-    backstop against runaway generation rather than a style rule.
+    ``max_expansion`` is deliberately loose, because Russian to English legitimately
+    expands. But a pure ratio is not enough on its own: a short source has a tiny
+    budget, so an earlier version exempted sources under three words — and that hole
+    let through the worst failure seen over a full service. Asked to translate
+    "1 Фессалоникийцам 5 глава." (two words after digits are discounted), the model
+    replied "1 Corinthians 11:1-24" followed by the recited text of the passage.
+    ``min_word_budget`` closes it: short sources get a small absolute allowance
+    instead of an unlimited one, so "Щит веры." -> "The shield of faith."
+    still passes while a recitation does not.
     """
     if raw is None:
         return None
@@ -195,8 +201,14 @@ def validate_translation(raw: Optional[str], source: str, target_lang: str, *,
         # The model returned (some of) the source language instead of translating.
         return None
 
-    src_words = _word_count(source)
-    if src_words >= 3 and _word_count(text) > max_expansion * src_words:
+    # A caption is one utterance. Blank-line-separated output means the model produced
+    # a document — the scripture-recitation failure mode.
+    if "\n\n" in text.strip():
+        return None
+
+    # Absolute floor as well as a ratio, so a short source still has a bounded budget.
+    allowed = max(min_word_budget, int(max_expansion * _word_count(source)))
+    if _word_count(text) > allowed:
         return None
 
     return text
