@@ -16,15 +16,17 @@ concurrency:
 
 jobs:
   test:
-    # Both platforms the project is developed and deployed on. This is not
+    # Every platform the project ships to. This is not
     # belt-and-braces: a WAL-mode sqlite read that raises on macOS silently
     # succeeds on Linux and writes sidecar files, and the module it lived in was
-    # at 100% coverage. Only running the suite on both surfaces that class.
+    # at 100% coverage. Only running the suite on each surfaces that class,
+    # and Windows ships an installer and a signed build that nothing else here
+    # exercises.
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-22.04, macos-14]
+        os: [ubuntu-22.04, macos-14, windows-2022]
     steps:
       - uses: actions/checkout@v5
       - uses: astral-sh/setup-uv@v8.1.0
