@@ -44,10 +44,10 @@ jobs:
         run: uv run mypy
       - name: Test with coverage
         # Ratchet: fail only if stt/ coverage drops below the recorded
-        # watermark (61% measured 2026-05-21, minus slack for platform-specific
+        # watermark (65% measured 2026-05-21, minus slack for platform-specific
         # lines that only one runner executes). Raise it as coverage grows;
         # never lower it. The remaining gap to 100% is audio_capture, watchdog
         # and file_mover — ffmpeg, process management and SMB — where a unit
         # test would mostly assert its own mocks; the logic modules are at
         # 88-100%.
-        run: uv run pytest --cov --cov-report=term --cov-fail-under=57
+        run: uv run pytest --cov --cov-report=term --cov-fail-under=63
