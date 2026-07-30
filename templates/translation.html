@@ -1371,9 +1371,18 @@
                     if (trustedClients.length > 0) {
                         trustedRow.style.display = '';
                         const listEl = document.getElementById('trusted_clients_list');
-                        listEl.innerHTML = trustedClients.map(ip =>
-                            `${ip} <button onclick="unpairClient('${ip}')" style="margin-left:6px; padding:1px 6px; font-size:0.75em; background:var(--danger-bg); border:1px solid var(--danger); border-radius:3px; color:var(--danger); cursor:pointer;">Unpair</button>`
-                        ).join(' ');
+                        // Open sits here as well as on "Translating for", because
+                        // this row is the persistent one: a paired machine is
+                        // listed whether or not it is currently sending traffic,
+                        // and its port is now known durably from pairing.
+                        const trustedPorts = data.trusted_client_ports || {};
+                        listEl.innerHTML = trustedClients.map(ip => {
+                            const p = trustedPorts[ip];
+                            const url = 'http://' + ip + (p && p !== 80 ? ':' + p : '') + '/translation';
+                            return `${escapeHtml(ip)} ` +
+                                `<button type="button" onclick="window.open('${escapeHtml(url)}', '_blank', 'noopener')" title="Open ${escapeHtml(url)}" style="margin-left:6px; padding:1px 8px; font-size:0.75em; background:var(--bg-tertiary); border:1px solid var(--border); border-radius:3px; color:var(--text-primary); cursor:pointer;">Open</button> ` +
+                                `<button type="button" onclick="unpairClient('${escapeHtml(ip)}')" style="margin-left:2px; padding:1px 6px; font-size:0.75em; background:var(--danger-bg); border:1px solid var(--danger); border-radius:3px; color:var(--danger); cursor:pointer;">Unpair</button>`;
+                        }).join(' ');
                     } else {
                         trustedRow.style.display = 'none';
                     }

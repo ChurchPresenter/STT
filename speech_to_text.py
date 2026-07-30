@@ -6613,6 +6613,12 @@ def get_translation_status():
              "port": _translation_client_ports.get(ip)}
             for ip, ts in active.items()]
         result["trusted_clients"] = list(_trusted_translation_clients)
+        # Where each paired client's own UI lives, so this machine can link back
+        # to one that is paired but idle — the durable half of the port learned at
+        # pairing. Only the paired IPs, so an unpaired stale entry cannot leak.
+        result["trusted_client_ports"] = {
+            ip: _translation_client_ports[ip]
+            for ip in _trusted_translation_clients if ip in _translation_client_ports}
         result["pending_pairs"] = pending
     else:
         result["remote_clients"] = []
