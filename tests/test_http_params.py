@@ -51,6 +51,29 @@ class TestUnsentValues:
         assert merged == {"enabled": False, "count": 0}
 
 
+class TestKeepBlank:
+    """Settings endpoints clear a field by sending an empty string."""
+
+    def test_blank_is_kept_when_requested(self):
+        merged = merge_request_params({"endpoint": ""}, keep_blank=True)
+        assert merged == {"endpoint": ""}, "clearing a field must remain possible"
+
+    def test_blank_still_wins_precedence_when_kept(self):
+        # An explicit blank in the body is a real instruction: clear it.
+        merged = merge_request_params({"endpoint": ""}, None, {"endpoint": "old:8080"},
+                                      keep_blank=True)
+        assert merged["endpoint"] == ""
+
+    def test_none_is_kept_when_requested(self):
+        assert merge_request_params({"voice": None}, keep_blank=True) == {"voice": None}
+
+    def test_default_still_drops_blanks(self):
+        assert merge_request_params({"endpoint": ""}) == {}
+
+    def test_stripping_still_applies(self):
+        assert merge_request_params({"mode": " utc "}, keep_blank=True)["mode"] == "utc"
+
+
 class TestWhitespaceStripping:
     def test_language_code_with_trailing_space_is_usable(self):
         # The Companion button that prompted this carried a trailing space.

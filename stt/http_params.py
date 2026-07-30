@@ -50,16 +50,30 @@ def _clean(value: Any) -> Any:
 
 def merge_request_params(json_body: Optional[Mapping[str, Any]],
                          form: Optional[Mapping[str, Any]] = None,
-                         query: Optional[Mapping[str, Any]] = None) -> Dict[str, Any]:
+                         query: Optional[Mapping[str, Any]] = None,
+                         *, keep_blank: bool = False) -> Dict[str, Any]:
     """Merge the three ways a client can send parameters into one mapping.
 
-    Precedence is JSON > form > query. Values that carry no instruction (``None``,
-    blank strings) are dropped rather than overwriting a lower-precedence source,
-    and string values are whitespace-stripped.
+    Precedence is JSON > form > query. String values are whitespace-stripped.
+
+    ``keep_blank`` decides what a blank value means, and the right answer differs
+    by endpoint:
+
+    * ``False`` (default) — blank means "not sent". Correct for a control surface
+      that posts a fixed set of fields on every press: an empty one must not blank
+      a live setting.
+    * ``True`` — blank is a real value. Required by settings endpoints where an
+      empty string is how you *clear* a field (a remote endpoint, a voice
+      override). Dropping it there would make clearing impossible.
 
     A ``json_body`` that isn't a mapping (a client sent a JSON array or bare
     string) is ignored rather than raising — the other sources may still carry
     what was meant.
+
+    Note for callers: this unions the query string into the parameters, so it must
+    not be used by a route that merges the body wholesale into config. A URL can
+    carry ``?key=<access_token>``, which would then be persisted as a config key.
+    Only use it where the route reads named fields.
     """
     sources: Dict[str, Optional[Mapping[str, Any]]] = {
         "json": json_body, "form": form, "query": query,
@@ -70,6 +84,6 @@ def merge_request_params(json_body: Optional[Mapping[str, Any]],
         if not isinstance(source, Mapping):
             continue
         for key, value in source.items():
-            if _usable(value):
+            if keep_blank or _usable(value):
                 merged[str(key)] = _clean(value)
     return merged

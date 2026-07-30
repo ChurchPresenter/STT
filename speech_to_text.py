@@ -4014,16 +4014,26 @@ def page_not_found(e):
         return redirect("/")
 
 
-def _control_params():
-    """Request parameters for a control-surface endpoint, from wherever they came.
+def _control_params(keep_blank=False):
+    """Request parameters for an endpoint, from wherever the client sent them.
 
     Thin wrapper over stt.http_params.merge_request_params: a show-control system
     may send a JSON body, a form body, or a query string, and rejecting two of the
     three looks to the operator like a button that did nothing. Precedence is
-    JSON > form > query; blank values are treated as "not sent" so a surface that
-    posts every field on every press can't blank a setting.
+    JSON > form > query.
+
+    ``keep_blank=False`` (switch endpoints) treats a blank value as "not sent", so
+    a surface posting a fixed field set on every press can't blank a live setting.
+    ``keep_blank=True`` (settings endpoints) keeps blanks, because an empty string
+    is how those clear a field.
+
+    Do NOT use this on a route that merges the body wholesale into config — it
+    unions the query string in, and a URL can carry ?key=<access_token>, which
+    would be persisted as a config key. /api/config reads its JSON directly for
+    exactly that reason.
     """
-    return merge_request_params(request.get_json(silent=True), request.form, request.args)
+    return merge_request_params(request.get_json(silent=True), request.form, request.args,
+                                keep_blank=keep_blank)
 
 
 def check_ip_whitelist():
@@ -4933,7 +4943,7 @@ def add_highlighted_word():
     if not check_ip_whitelist():
         return jsonify({"success": False, "error": "Access Denied"}), 403
 
-    req_data = request.get_json(silent=True) or {}
+    req_data = _control_params(keep_blank=True)
     word = req_data.get("word", "").strip()
     color = req_data.get("color", "#ffff00")  # Default yellow
     case_sensitive = req_data.get("case_sensitive", False)
@@ -5005,7 +5015,7 @@ def update_highlighted_word(index):
     if not check_ip_whitelist():
         return jsonify({"success": False, "error": "Access Denied"}), 403
 
-    req_data = request.get_json(silent=True) or {}
+    req_data = _control_params(keep_blank=True)
     wh_data = load_word_highlighting()
     words = wh_data.get("words", [])
 
@@ -5067,7 +5077,7 @@ def toggle_color_group():
     if not check_ip_whitelist():
         return jsonify({"success": False, "error": "Access Denied"}), 403
 
-    req_data = request.get_json(silent=True) or {}
+    req_data = _control_params(keep_blank=True)
     color = req_data.get("color", "").strip().lower()
 
     if not color:
@@ -5393,7 +5403,7 @@ def save_file_transcription_settings():
         return jsonify({"success": False, "error": "Access Denied"}), 403
 
     global config
-    data = request.get_json(silent=True) or {}
+    data = _control_params(keep_blank=True)
 
     if "file_transcription" not in config:
         config["file_transcription"] = {}
@@ -5477,7 +5487,7 @@ def save_timezone_settings():
         return jsonify({"success": False, "error": "Access Denied"}), 403
 
     global config
-    data = request.get_json(silent=True) or {}
+    data = _control_params(keep_blank=True)
 
     if "timezone" not in config:
         config["timezone"] = {}
@@ -5882,7 +5892,7 @@ def save_translation_settings():
         return jsonify({"success": False, "error": "Access Denied"}), 403
 
     global config
-    data = request.get_json(silent=True) or {}
+    data = _control_params(keep_blank=True)
 
     if "live_translation" not in config:
         config["live_translation"] = {}
@@ -6916,7 +6926,7 @@ def save_tts_settings():
         return jsonify({"success": False, "error": "Access Denied"}), 403
 
     global config
-    data = request.get_json(silent=True) or {}
+    data = _control_params(keep_blank=True)
 
     if "live_translation" not in config:
         config["live_translation"] = {}
@@ -7650,7 +7660,7 @@ def file_transcription_settings_endpoint():
     elif request.method == "POST":
         # Update file transcription settings
         try:
-            new_settings = request.get_json(silent=True) or {}
+            new_settings = _control_params(keep_blank=True)
 
             # Update config
             if "file_transcription" not in config:
@@ -8757,7 +8767,7 @@ def hide_item():
 
     try:
         global config
-        data = request.get_json(silent=True) or {}
+        data = _control_params(keep_blank=True)
         path = data.get("path")
 
         if not path:
@@ -8805,7 +8815,7 @@ def unhide_item():
 
     try:
         global config
-        data = request.get_json(silent=True) or {}
+        data = _control_params(keep_blank=True)
         path = data.get("path")
 
         if not path:
