@@ -579,6 +579,10 @@
                     <p><strong><span id="model_loaded_label">Model Loaded</span>:</strong> <span id="model_loaded">No</span></p>
                     <p><strong>Cache Size:</strong> <span id="cache_size">0</span> segments</p>
                     <p><strong>Transcription:</strong> <span id="transcription_status">-</span></p>
+                    <p id="remote_open_row" style="display:none;">
+                        <strong>Remote:</strong> <span id="remote_endpoint_text" style="color: var(--text-secondary);"></span>
+                        <button type="button" onclick="openRemoteUI()" class="btn-save" style="margin: 0 0 0 8px; padding: 3px 12px; font-size: 0.8em;">Open</button>
+                    </p>
                     <p id="remote_clients_row" style="display:none;"><strong>Translating for:</strong> <span id="remote_clients_list" style="color: var(--success);"></span></p>
                     <p id="trusted_clients_row" style="display:none;"><strong>Paired with:</strong> <span id="trusted_clients_list" style="color: var(--text-secondary);"></span></p>
                 </div>
@@ -1247,9 +1251,26 @@
                     document.getElementById('current_language').textContent = data.target_language_name || '-';
                     const modelId = data.translation_model || '-';
                     document.getElementById('current_model').textContent = modelId.split('/').pop() || modelId;
-                    const isWhisperMethod = data.translation_method && data.translation_method !== 'nllb';
-                    document.getElementById('model_label').textContent = isWhisperMethod ? 'Whisper Model' : (data.remote_active ? 'Local Model' : 'Model');
+                    // Label the engine that is actually running. This read
+                    // "anything that isn't NLLB is Whisper", so MADLAD sessions
+                    // have been labelled "Whisper Model", and an LLM session
+                    // would inherit the same wrong name.
+                    document.getElementById('model_label').textContent =
+                        modelLabelForMethod(data.translation_method, data.remote_active);
                     document.getElementById('model_loaded_label').textContent = data.remote_active ? 'Remote Model' : 'Model Loaded';
+
+                    // Offering a way through to the machine that is doing the work:
+                    // when translation is offloaded, its settings, model and logs
+                    // all live over there, and the endpoint was previously only
+                    // readable as text.
+                    const remoteRow = document.getElementById('remote_open_row');
+                    if (data.remote_active && data.remote_endpoint) {
+                        remoteEndpointUrl = normaliseRemoteUrl(data.remote_endpoint);
+                        document.getElementById('remote_endpoint_text').textContent = data.remote_endpoint;
+                        remoteRow.style.display = '';
+                    } else {
+                        remoteRow.style.display = 'none';
+                    }
                     if (data.remote_active && data.remote_reachable === false) {
                         // Known unreachable — skip the proxied round-trips, which would just
                         // time out and misleadingly report "not paired".
@@ -1405,6 +1426,37 @@
                     showAlert('Whisper Translate only supports English. Target language set to English.', 'warning');
                 }
             }
+        }
+
+        // ---- Translation status card ----------------------------------------
+
+        let remoteEndpointUrl = '';
+
+        // Which engine is named in the status card. Whisper only when a Whisper
+        // method is actually selected — the previous test was "not NLLB", which
+        // labelled every MADLAD session "Whisper Model".
+        function modelLabelForMethod(method, remoteActive) {
+            if (method === 'whisper_translate' || method === 'whisper_forced_lang') return 'Whisper Model';
+            if (method === 'llm') return remoteActive ? 'Local LLM' : 'LLM Model';
+            if (method === 'madlad') return remoteActive ? 'Local Model' : 'MADLAD Model';
+            if (method === 'nllb') return remoteActive ? 'Local Model' : 'NLLB Model';
+            return remoteActive ? 'Local Model' : 'Model';
+        }
+
+        // The endpoint is stored host:port ("192.168.2.52:8080"); a bare host:port
+        // is treated as a path by the browser, so it needs a scheme.
+        function normaliseRemoteUrl(endpoint) {
+            const ep = String(endpoint || '').trim();
+            if (!ep) return '';
+            return /^https?:\/\//i.test(ep) ? ep : 'http://' + ep;
+        }
+
+        function openRemoteUI() {
+            if (!remoteEndpointUrl) {
+                showAlert('No remote translation endpoint is configured.', 'warning');
+                return;
+            }
+            window.open(remoteEndpointUrl, '_blank', 'noopener');
         }
 
         // ---- LLM translation -------------------------------------------------
