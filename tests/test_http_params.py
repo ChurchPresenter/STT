@@ -2,7 +2,7 @@
 
 import pytest
 
-from stt.http_params import merge_request_params
+from stt.http_params import merge_request_params, parse_json_body
 
 
 class TestPrecedence:
@@ -108,6 +108,34 @@ class TestMalformedInput:
 
     def test_non_string_keys_are_stringified(self):
         assert merge_request_params({1: "a"}) == {"1": "a"}
+
+
+class TestParseJsonBody:
+    """A body can be valid JSON and still invisible to Flask under a wrong type."""
+
+    def test_parses_a_json_object(self):
+        assert parse_json_body('{"transcription": "ru"}') == {"transcription": "ru"}
+
+    def test_tolerates_surrounding_whitespace(self):
+        assert parse_json_body('  {"a": 1}\n') == {"a": 1}
+
+    @pytest.mark.parametrize("raw", [None, "", "   ", "not json", "{oops}", "{'single': 1}"])
+    def test_unparseable_is_none(self, raw):
+        assert parse_json_body(raw) is None
+
+    @pytest.mark.parametrize("raw", ["[1,2,3]", '"a string"', "42", "true", "null"])
+    def test_non_object_json_is_none(self, raw):
+        # An array or scalar carries no named parameters.
+        assert parse_json_body(raw) is None
+
+    def test_unicode_survives(self):
+        assert parse_json_body('{"word": "Тихик"}') == {"word": "Тихик"}
+
+    def test_feeds_straight_into_the_merge(self):
+        # The exact Companion body, as it would arrive under text/plain.
+        raw = '{"transcription": "ru",   "translation": "en" }'
+        assert merge_request_params(parse_json_body(raw)) == {
+            "transcription": "ru", "translation": "en"}
 
 
 class TestRealPayloads:

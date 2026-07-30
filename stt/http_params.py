@@ -15,6 +15,7 @@ speech_to_text.py pass ``request.get_json(silent=True)``, ``request.form`` and
 
 from __future__ import annotations
 
+import json
 from typing import Any, Dict, Mapping, Optional
 
 # Lowest precedence first: later sources overwrite earlier ones, so an explicit
@@ -46,6 +47,27 @@ def _clean(value: Any) -> Any:
     language code of ``"ru "`` should switch to Russian, not fail validation.
     """
     return value.strip() if isinstance(value, str) else value
+
+
+def parse_json_body(raw: Optional[str]) -> Optional[Dict[str, Any]]:
+    """Parse a raw request body as a JSON object, or None if it isn't one.
+
+    Needed because a client can send perfectly good JSON under the wrong
+    Content-Type (``text/plain``, ``application/x-www-form-urlencoded``, none at
+    all). Flask then gives ``get_json(silent=True) is None`` *and* an empty
+    ``request.form`` — the body is well-formed and completely invisible, and the
+    route answers 400 as though nothing was sent. Callers use this as a last
+    resort on the raw bytes.
+
+    Only a JSON *object* counts: an array or scalar carries no named parameters.
+    """
+    if not raw or not raw.strip():
+        return None
+    try:
+        parsed = json.loads(raw)
+    except (ValueError, TypeError):
+        return None
+    return parsed if isinstance(parsed, dict) else None
 
 
 def merge_request_params(json_body: Optional[Mapping[str, Any]],

@@ -58,7 +58,7 @@ for _mig_name in ("config.json", "custom_dictionary.json", "word_highlighting.js
 from stt import paths as _paths
 from stt.paths import safe_model_path  # noqa: F401
 from stt.coercion import coerce_float, coerce_int
-from stt.http_params import merge_request_params
+from stt.http_params import merge_request_params, parse_json_body as _parse_json_body
 from stt.model_disk import dir_has_weights, dir_is_writable, has_weight_file, is_weight_file  # noqa: F401
 
 
@@ -4032,8 +4032,17 @@ def _control_params(keep_blank=False):
     would be persisted as a config key. /api/config reads its JSON directly for
     exactly that reason.
     """
-    return merge_request_params(request.get_json(silent=True), request.form, request.args,
-                                keep_blank=keep_blank)
+    body = request.get_json(silent=True)
+    if body is None and not request.form:
+        # Well-formed JSON under the wrong Content-Type: Flask's get_json returns
+        # None and request.form stays empty (it only parses form content types),
+        # so the body is invisible and the route would 400 as though nothing was
+        # sent. Read it off the raw bytes as a last resort.
+        try:
+            body = _parse_json_body(request.get_data(as_text=True))
+        except Exception:
+            body = None
+    return merge_request_params(body, request.form, request.args, keep_blank=keep_blank)
 
 
 def check_ip_whitelist():
