@@ -359,9 +359,12 @@ class TestReadDetachedFromSidecars:
         conn.execute("CREATE TABLE transcriptions (id INTEGER PRIMARY KEY, text TEXT)")
         conn.commit()
         write_session_meta(source, meta_for(config_at()))
-        # Close first: a finished session checkpoints its WAL into the .db and
-        # removes the sidecars, while the file header still says WAL mode. That
-        # combination is what a delivered/archived session actually looks like.
+        # Checkpoint explicitly, exactly as ending a session does
+        # (speech_to_text.py runs PRAGMA wal_checkpoint(TRUNCATE) before closing).
+        # Relying on close() to checkpoint is not portable: macOS does, Linux
+        # leaves the -wal in place, so a copy of the .db alone would silently
+        # carry no rows and this fixture would model nothing.
+        conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
         conn.close()
         detached = str(tmp_path / "delivered.db")
         shutil.copyfile(source, detached)

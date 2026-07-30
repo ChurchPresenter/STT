@@ -29,6 +29,7 @@ Two invariants the rest of the system depends on:
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 from datetime import datetime
 from typing import Any, Dict, Iterable, Mapping, Optional, Tuple
@@ -457,27 +458,35 @@ def load_session_meta(db_path: str) -> Tuple[Dict[str, str], Optional[str]]:
     into a bare {} makes a healthy session that merely failed to open look like
     one that was never recorded, and sends the reader after the wrong problem.
     """
-    try:
-        return _read_all(f"file:{db_path}?mode=ro")
-    except sqlite3.Error as first_error:
-        # A WAL-mode database detached from its -shm sidecar — delivered to a NAS,
-        # archived, or downloaded as a lone .db — cannot be read through a plain
-        # read-only URI, because SQLite wants to create that sidecar and
-        # read-only forbids it. Reading such a file is the whole point of an
-        # archive, so retry with immutable=1, which needs no sidecar.
-        #
-        # The ordering is what makes this safe: a database still being written
-        # has its sidecars present, so the attempt above succeeds and this branch
-        # is never reached. immutable is only ever asserted about a file already
-        # detached from its writer. (sqlite3.connect is lazy, so the failure
-        # surfaces on the first query, not at connect — hence retrying the whole
-        # read rather than just the open.)
+    # Which URI to try first is decided by the -wal sidecar, not by catching an
+    # error, because the two platforms fail differently and only one of them
+    # fails at all:
+    #
+    #   macOS  plain read-only on a detached WAL database raises, because SQLite
+    #          wants to create the -shm and read-only forbids it.
+    #   Linux  the same open SUCCEEDS and creates -shm and -wal beside the file.
+    #
+    # So an error-driven fallback silently wrote two files into whatever
+    # directory a session was delivered to — a NAS share we were asked only to
+    # read. Choosing by the sidecar makes both platforms take the same path:
+    # a database still being written has its -wal present and is read normally,
+    # while a detached one (delivered, archived, downloaded as a lone .db) is
+    # read with immutable=1, which needs no sidecar and creates none.
+    attached = os.path.exists(db_path + "-wal")
+    uris = ([f"file:{db_path}?mode=ro", f"file:{db_path}?mode=ro&immutable=1"] if attached
+            else [f"file:{db_path}?mode=ro&immutable=1", f"file:{db_path}?mode=ro"])
+    first_error = None
+    for uri in uris:
         try:
-            return _read_all(f"file:{db_path}?mode=ro&immutable=1")
-        except Exception:
-            return {}, f"{type(first_error).__name__}: {first_error}"
-    except Exception as e:
-        return {}, f"{type(e).__name__}: {e}"
+            return _read_all(uri)
+        except sqlite3.Error as e:
+            if first_error is None:
+                first_error = e
+        except Exception as e:
+            return {}, f"{type(e).__name__}: {e}"
+    return {}, f"{type(first_error).__name__}: {first_error}"
+
+
 
 
 def read_session_meta(db_path: str) -> Dict[str, str]:
