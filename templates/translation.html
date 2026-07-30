@@ -1374,7 +1374,7 @@
 
         function onTranslationMethodChange() {
             const method = document.getElementById('translation_method').value;
-            // Show the engine's own language set (NLLB ~200 vs MADLAD ~400).
+            // Show the engine's own language set (NLLB ~200, MADLAD ~400, LLM ~28).
             switchLanguageSet(method);
             const whisperTransWarn = document.getElementById('whisper_translate_warning');
             const whisperForcedWarn = document.getElementById('whisper_forced_warning');
@@ -1625,7 +1625,9 @@
                     return;
                 }
                 const model = (d.translation_model || '').split('/').pop() || '(unknown)';
-                const engine = d.translation_method === 'madlad' ? 'MADLAD' : (d.translation_method === 'nllb' ? 'NLLB' : (d.translation_method || ''));
+                const engine = { madlad: 'MADLAD', nllb: 'NLLB', llm: 'LLM',
+                                 whisper_translate: 'Whisper', whisper_forced_lang: 'Whisper'
+                               }[d.translation_method] || (d.translation_method || '');
                 // Precision/backend (the "8/16" question). When B's model is
                 // loaded, show what it ACTUALLY loaded (is_ctranslate2/model_dtype);
                 // when it isn't loaded yet, show B's CONFIGURED intent (use_ctranslate2/

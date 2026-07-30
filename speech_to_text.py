@@ -1222,7 +1222,8 @@ def _translate_text_ct2(text, source_lang, target_lang, translator, tokenizer,
     return {"text": best, "confidence": confidence, "alternatives": alternatives}
 
 
-def translate_text(text, source_lang, target_lang, model, tokenizer, return_confidence=False, num_alternatives=0, generation_params=None):
+def translate_text(text, source_lang, target_lang, model, tokenizer, return_confidence=False,
+                   num_alternatives=0, generation_params=None, model_id=None, is_ct2=None):
     """
     Translate text using NLLB-200
 
@@ -1244,16 +1245,25 @@ def translate_text(text, source_lang, target_lang, model, tokenizer, return_conf
             return {"text": text, "confidence": None, "alternatives": []}
         return text
 
+    # Which engine this call is for. model/tokenizer are parameters, but these two
+    # facts were read from the globals describing the LIVE model — so a caller that
+    # loaded its own model (batch file transcription does) got the live model's
+    # engine applied to a different model: a MADLAD file model tokenized as NLLB
+    # receives no target-language prefix at all, and a transformers model would be
+    # sent down the CTranslate2 path. Callers with their own model pass these.
+    _ct2 = _live_translation_is_ct2 if is_ct2 is None else is_ct2
+    _model_id = _live_translation_model_id if model_id is None else model_id
+
     # CTranslate2 backend uses a different (token-string) API — route to it and
     # leave the transformers path below untouched.
-    if _live_translation_is_ct2:
+    if _ct2:
         return _translate_text_ct2(text, source_lang, target_lang, model, tokenizer,
                                    return_confidence, num_alternatives, generation_params)
 
     # MADLAD encodes the target as a "<2xx>" prefix on the input (no source
     # language, no forced_bos); NLLB sets tokenizer.src_lang + a forced target
     # token. Everything after tokenization is shared.
-    _is_madlad = is_madlad_model(_live_translation_model_id or "")
+    _is_madlad = is_madlad_model(_model_id or "")
     if _is_madlad:
         inputs = tokenizer(build_madlad_input(text, target_lang),
                            return_tensors="pt", padding=True, truncation=True, max_length=1024)
@@ -1336,7 +1346,7 @@ def translate_text(text, source_lang, target_lang, model, tokenizer, return_conf
     return _apply_glossary(result_text, source_lang, target_lang)
 
 
-def translate_segments(segments, source_lang, target_lang, model, tokenizer, progress_callback=None, generation_params=None, context_window=1):
+def translate_segments(segments, source_lang, target_lang, model, tokenizer, progress_callback=None, generation_params=None, context_window=1, model_id=None, is_ct2=None):
     """
     Translate a list of transcription segments
 
@@ -1368,11 +1378,11 @@ def translate_segments(segments, source_lang, target_lang, model, tokenizer, pro
                 num_ctx_sentences = count_sentence_units(context_text)
                 combined_source = context_text + " " + seg["text"]
                 ctx_char_ratio = (len(context_text) + 1) / max(1, len(combined_source))
-                combined_translated = translate_text(combined_source, source_lang, target_lang, model, tokenizer, generation_params=generation_params)
+                combined_translated = translate_text(combined_source, source_lang, target_lang, model, tokenizer, generation_params=generation_params, model_id=model_id, is_ct2=is_ct2)
                 translated_text = extract_context_translation(combined_translated, num_ctx_sentences, ctx_char_ratio)
         if not translated_text:
             # No context, or alignment failed - translate the segment alone
-            translated_text = translate_text(seg["text"], source_lang, target_lang, model, tokenizer, generation_params=generation_params)
+            translated_text = translate_text(seg["text"], source_lang, target_lang, model, tokenizer, generation_params=generation_params, model_id=model_id, is_ct2=is_ct2)
         translated_segments.append({
             "text": translated_text,
             "start": seg["start"],
@@ -8211,6 +8221,66 @@ def process_file_transcription(file_path, output_format, session_id, filename, l
                     if total > 0:
                         pct = 65 + int(30 * (i + 1) / total)
                         socketio.emit("file_progress", {"session_id": session_id, "percent": pct, "status": f"Translating... {i+1}/{total}"})
+            elif ft_translation_method == "llm":
+                # The LLM translates the file too. Without this branch the method
+                # was silently ignored here: a box configured for LLM translation
+                # loaded the NMT model for every batch file and translated with
+                # that instead, which is the opposite of what the settings said.
+                socketio.emit(
+                    "file_progress",
+                    {"session_id": session_id, "percent": 60, "status": "Unloading transcription model..."},
+                )
+                if model:
+                    del model
+                    model = None
+                if processor:
+                    del processor
+                    processor = None
+                ModelFactory.cleanup_models()
+                gc.collect()
+                _empty_device_cache()
+
+                translated_segments = []
+                _declined = []
+                total = len(segments)
+                for i, seg in enumerate(segments):
+                    text = (seg.get("text") or "").strip()
+                    out = _translate_via_llm(text, source_lang, translate_to) if text else ""
+                    translated_seg = dict(seg)
+                    if out is None:
+                        # Remember it and fall back in one pass below, rather than
+                        # loading the NMT model for the first declined segment and
+                        # holding both models for the rest of the file.
+                        _declined.append(i)
+                        translated_seg["translated_text"] = text
+                    else:
+                        translated_seg["translated_text"] = out
+                    translated_segments.append(translated_seg)
+                    if total > 0:
+                        pct = 60 + int(30 * (i + 1) / total)
+                        socketio.emit("file_progress", {"session_id": session_id, "percent": pct,
+                                                        "status": f"Translating (LLM)... {i+1}/{total}"})
+
+                if _declined:
+                    # Same contract as a live caption: anything the LLM could not
+                    # translate usably goes to the NMT model rather than being left
+                    # in the source language without saying so.
+                    print(f"[FILE-TRANSLATE] LLM declined {len(_declined)}/{total} segments; "
+                          "using the NMT model for those")
+                    socketio.emit("file_progress", {"session_id": session_id, "percent": 92,
+                                                    "status": f"Retranslating {len(_declined)} segment(s) with the NMT model..."})
+                    try:
+                        _fb_id = ft_config.get("translation_model", "facebook/nllb-200-distilled-600M")
+                        _fb_model, _fb_tok = load_translation_model(ft_use_gpu, model_id=_fb_id)
+                        for i in _declined:
+                            _src = (segments[i].get("text") or "").strip()
+                            if _src:
+                                translated_segments[i]["translated_text"] = translate_text(
+                                    _src, source_lang, translate_to, _fb_model, _fb_tok,
+                                    model_id=_fb_id)
+                        cleanup_translation_model(_fb_model, _fb_tok)
+                    except Exception as e:
+                        print(f"[FILE-TRANSLATE] NMT fallback failed: {e}")
             else:
                 # Local path: unload transcription model to free VRAM, load NLLB locally
                 socketio.emit(
@@ -8257,7 +8327,11 @@ def process_file_transcription(file_path, output_format, session_id, filename, l
                     translation_model, translation_tokenizer,
                     progress_callback=translation_progress,
                     generation_params=ft_gen_params,
-                    context_window=ft_context_window
+                    context_window=ft_context_window,
+                    # This model was loaded here, not by the live pipeline — say so,
+                    # or it is tokenized as whatever the live model happens to be.
+                    model_id=translation_model_id,
+                    is_ct2=False,
                 )
 
                 # Cleanup translation model
