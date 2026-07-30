@@ -1,6 +1,7 @@
 """CTranslate2 translation-backend helpers (stt/ct2_translate.py)."""
 
 import math
+import os
 
 from stt.ct2_translate import (
     ct2_model_dir,
