@@ -6524,12 +6524,12 @@ def get_translation_status():
         # the offloaded-translation cache is saving on this box.
         "server_cache": get_server_text_cache().get_stats(),
         # Precision: intended (config flag) vs actually loaded (probed above).
-        "use_fp16": bool(trans_config.get("use_fp16", False)),
+        "use_fp16": None if _using_llm else bool(trans_config.get("use_fp16", False)),
         "model_dtype": _model_dtype,
         # Inference backend: intended (config) vs actually loaded. A paired
         # Machine A reads these to show what this offload box will run with.
-        "use_ctranslate2": bool(trans_config.get("use_ctranslate2", False)),
-        "ct2_compute_type": trans_config.get("ct2_compute_type", "auto"),
+        "use_ctranslate2": None if _using_llm else bool(trans_config.get("use_ctranslate2", False)),
+        "ct2_compute_type": None if _using_llm else trans_config.get("ct2_compute_type", "auto"),
         "is_ctranslate2": None if _using_llm else (
             bool(_live_translation_is_ct2) if not (remote_active or _using_whisper) else None),
         # What an LLM session is actually running, so a paired machine records the
@@ -14084,16 +14084,28 @@ def unload_local_llm():
 
 
 def _translate_via_local_llm(text, system_prompt, max_tokens, llm_cfg_override=None):
-    """One caption through the in-process GGUF model. Returns raw text or None."""
+    """One caption through the in-process GGUF model. Returns raw text or None.
+
+    Timed into the same EMA the NMT paths feed: this is inference on this box, so
+    the number means what it means for MADLAD, and the health dashboard would
+    otherwise read "no local translations" on a machine doing nothing else. The
+    endpoint provider is deliberately not folded in — its time is another
+    machine's, and mixing the two would make the figure undiagnosable.
+    """
     llm = get_local_llm(llm_cfg_override)
     if llm is None:
         return None
+    _t0 = time.perf_counter()
     try:
         out = llm.create_chat_completion(
             messages=_llm_chat_messages(text, system_prompt),
             temperature=0.0,
             max_tokens=max_tokens,
         )
+        try:
+            _record_local_translate_ms((time.perf_counter() - _t0) * 1000.0)
+        except Exception:
+            pass  # a metric must never break a caption
         return _llm_extract_text(out)
     except Exception as e:
         print(f"[LLM-LOCAL] generation failed ({type(e).__name__}: {e})")

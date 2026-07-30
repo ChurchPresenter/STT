@@ -1764,13 +1764,25 @@
                     document.getElementById('config_use_ctranslate2').checked = s.use_ctranslate2 === true;
                     syncCt2Fp16('config_use_ctranslate2', 'config_use_fp16');
 
-                    // Update summary — model + precision/backend (the 8/16 state)
-                    const modelName = model.split('/').pop() || model;
-                    let backend;
-                    if (s.use_ctranslate2) backend = 'CTranslate2 (' + (s.ct2_compute_type && s.ct2_compute_type !== 'auto' ? s.ct2_compute_type : 'int8') + ')';
-                    else backend = s.use_fp16 ? 'fp16' : 'fp32';
+                    // Update summary — model + precision/backend (the 8/16 state).
+                    // On an LLM session none of that applies: the engine is
+                    // llama.cpp and the model is a GGUF, so reporting the standby
+                    // NMT model's precision here would describe something that is
+                    // not running.
+                    let modelName, backend;
+                    if (s.translation_method === 'llm') {
+                        const llm = s.llm || {};
+                        modelName = llm.provider === 'local'
+                            ? (llm.gguf_file || llm.gguf_repo || 'no GGUF selected')
+                            : (llm.model || 'no model set');
+                        backend = llm.provider === 'local' ? 'llama.cpp (GGUF)' : 'remote endpoint';
+                    } else {
+                        modelName = model.split('/').pop() || model;
+                        if (s.use_ctranslate2) backend = 'CTranslate2 (' + (s.ct2_compute_type && s.ct2_compute_type !== 'auto' ? s.ct2_compute_type : 'int8') + ')';
+                        else backend = s.use_fp16 ? 'fp16' : 'fp32';
+                    }
                     document.getElementById('translation_model_summary').innerHTML =
-                        `<strong>Model:</strong> ${modelName}<br><strong>Precision:</strong> ${backend}`;
+                        `<strong>Model:</strong> ${escapeHtml(modelName)}<br><strong>Precision:</strong> ${escapeHtml(backend)}`;
                 }
             } catch (error) {
                 console.error('Error loading translation config:', error);
