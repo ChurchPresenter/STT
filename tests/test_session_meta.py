@@ -273,6 +273,132 @@ class TestOffloadedTranslation:
         assert is_offloaded({}) is False
 
 
+class TestLlmSettings:
+    """mt.llm.* - what an LLM session needs in order to be reproducible.
+
+    Everything that decides an LLM caption lives in live_translation.llm, and none
+    of it is visible in the transcript: the same service captioned by the same
+    GGUF reads differently after one prompt edit.
+    """
+
+    @staticmethod
+    def llm(**llm_cfg):
+        cfg = {"translation_method": "llm", "target_language": "es",
+               "translation_model": "facebook/nllb-200-distilled-600M",
+               "llm": llm_cfg}
+        return {"live_translation": cfg}
+
+    def test_local_provider_records_the_gguf_and_its_load_settings(self):
+        meta = build(self.llm(provider="local", gguf_repo="bartowski/Qwen2.5-7B-Instruct-GGUF",
+                              gguf_file="Qwen2.5-7B-Instruct-Q4_K_M.gguf",
+                              n_gpu_layers="auto", n_ctx=2048))
+        assert meta["mt.llm.provider"] == "local"
+        assert meta["mt.llm.gguf_repo"] == "bartowski/Qwen2.5-7B-Instruct-GGUF"
+        assert meta["mt.llm.gguf_file"] == "Qwen2.5-7B-Instruct-Q4_K_M.gguf"
+        assert meta["mt.llm.n_gpu_layers"] == "auto"
+        assert meta["mt.llm.n_ctx"] == "2048"
+
+    def test_an_explicit_path_names_the_file_that_actually_loads(self):
+        # get_local_llm() prefers gguf_path, so recording the repo pair would name
+        # a file the session never opened.
+        meta = build(self.llm(provider="local", gguf_path="/models/gemma-3-4b-it-Q4_K_M.gguf",
+                              gguf_repo="bartowski/Qwen2.5-7B-Instruct-GGUF",
+                              gguf_file="Qwen2.5-7B-Instruct-Q4_K_M.gguf"))
+        assert meta["mt.llm.model"] == "/models/gemma-3-4b-it-Q4_K_M.gguf"
+
+    def test_llm_session_records_the_llm_as_the_model_that_translated(self):
+        """The NMT id is the fallback on an LLM session, not what captioned it."""
+        meta = build(self.llm(provider="local", gguf_repo="r", gguf_file="m.gguf"))
+        assert meta["mt.model"] == "r/m.gguf"
+        assert meta["mt.model_configured"] == "facebook/nllb-200-distilled-600M"
+
+    def test_endpoint_provider_records_where_and_what(self):
+        meta = build(self.llm(provider="endpoint", endpoint="http://127.0.0.1:11434/api/chat",
+                              model="qwen2.5:7b-instruct"))
+        assert meta["mt.llm.endpoint"] == "http://127.0.0.1:11434/api/chat"
+        assert meta["mt.llm.model"] == "qwen2.5:7b-instruct"
+        assert meta["mt.model"] == "qwen2.5:7b-instruct"
+
+    def test_provider_specific_keys_do_not_cross_over(self):
+        local = build(self.llm(provider="local", gguf_file="m.gguf", endpoint="http://x/api/chat"))
+        assert "mt.llm.endpoint" not in local
+        endpoint = build(self.llm(provider="endpoint", model="m", n_ctx=2048))
+        assert "mt.llm.n_ctx" not in endpoint
+        assert "mt.llm.gguf_file" not in endpoint
+
+    def test_provider_defaults_to_endpoint_when_unset(self):
+        assert build(self.llm(model="m"))["mt.llm.provider"] == "endpoint"
+
+    def test_budget_and_timeout_settings_are_recorded(self):
+        # timeout_ms decides whether a caption came from the LLM at all: on timeout
+        # it falls back to NMT without a trace in the transcript.
+        meta = build(self.llm(model="m", max_tokens=160, keep_alive=-1,
+                              timeout_ms=8000, warmup_timeout_ms=180000))
+        assert meta["mt.llm.max_tokens"] == "160"
+        assert meta["mt.llm.keep_alive"] == "-1"
+        assert meta["mt.llm.timeout_ms"] == "8000"
+        assert meta["mt.llm.warmup_timeout_ms"] == "180000"
+
+    def test_api_key_is_never_recorded(self):
+        """Session databases are delivered to a NAS; a bearer token must not ride along."""
+        meta = build(self.llm(model="m", api_key="sk-secret-value"))
+        assert "sk-secret-value" not in "".join(meta.values())
+        assert not [k for k in meta if "api_key" in k and not k.endswith("_set")]
+        assert meta["mt.llm.api_key_set"] == "true"
+
+    def test_absent_api_key_is_recorded_as_unset(self):
+        assert build(self.llm(model="m"))["mt.llm.api_key_set"] == "false"
+
+    def test_blank_prompt_records_the_template_the_model_received(self):
+        """An empty override means the shipped template ran - with the language filled in.
+
+        Recording the configured "" would leave a reader unable to tell what the
+        model was told, which is the whole point of storing the prompt.
+        """
+        meta = build(self.llm(model="m", system_prompt=""))
+        assert meta["mt.llm.system_prompt_custom"] == "false"
+        prompt = meta["mt.llm.system_prompt"]
+        assert "{language}" not in prompt
+        assert "Spanish" in prompt
+        assert prompt.endswith("Translate into Spanish. Output only Spanish.")
+
+    def test_custom_prompt_is_recorded_with_the_target_directive_appended(self):
+        meta = build(self.llm(model="m", system_prompt="Render вечеря as communion."))
+        assert meta["mt.llm.system_prompt_custom"] == "true"
+        prompt = meta["mt.llm.system_prompt"]
+        assert prompt.startswith("Render вечеря as communion.")
+        assert "Translate into Spanish" in prompt
+
+    def test_prompt_follows_the_target_language(self):
+        cfg = self.llm(model="m")
+        cfg["live_translation"]["target_language"] = "uk"
+        assert "Ukrainian" in build(cfg)["mt.llm.system_prompt"]
+
+    def test_nmt_session_carries_no_llm_keys(self):
+        """Inert settings recorded as fact invite the wrong explanation for a caption."""
+        cfg = {"live_translation": {"translation_method": "nllb",
+                                    "translation_model": "facebook/nllb-200-distilled-600M",
+                                    "llm": {"provider": "local", "gguf_file": "m.gguf"}}}
+        assert not [k for k in build(cfg) if k.startswith("mt.llm.")]
+
+    def test_offloaded_llm_does_not_claim_the_local_gguf(self):
+        # Machine B translates; this box's GGUF is not what ran. The remote's model
+        # arrives separately under mt.remote.effective.* once it is probed.
+        cfg = self.llm(provider="local", gguf_file="m.gguf")
+        cfg["live_translation"]["remote"] = {"enabled": True, "endpoint": "192.168.2.52:8080",
+                                             "model": ""}
+        meta = build(cfg)
+        assert meta["mt.model"] == ""
+        assert meta["mt.llm.gguf_file"] == "m.gguf"  # configured locally, still readable
+
+    def test_a_prompt_edit_mid_session_is_a_recordable_change(self):
+        before = build(self.llm(model="m", system_prompt=""))
+        after = build(self.llm(model="m", system_prompt="Render вечеря as communion."))
+        changes = changed_keys(before, after)
+        assert "mt.llm.system_prompt" in changes
+        assert changes["mt.llm.system_prompt_custom"] == "true"
+
+
 class TestRemoteProvenance:
     STATUS = {
         "success": True,

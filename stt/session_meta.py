@@ -20,7 +20,9 @@ Two invariants the rest of the system depends on:
   actually ran. ``resolve_translation_model_id`` can substitute the MADLAD
   default for a stale NLLB id, and the ASR model id lives in a different config
   sub-block per model type; both are resolved here so a reader gets one
-  trustworthy key instead of three ambiguous ones.
+  trustworthy key instead of three ambiguous ones. For an LLM session that
+  extends to the prompt: what is recorded is the text the model received, not
+  the (usually empty) configured override.
 * **Never fatal.** Recording provenance must not be able to break a service
   that is about to start transcribing, nor a live language switch. Every
   public function here swallows and logs rather than raising.
@@ -34,7 +36,8 @@ import sqlite3
 from datetime import datetime
 from typing import Any, Dict, Iterable, Mapping, Optional, Tuple
 
-from stt.nllb_catalog import resolve_translation_model_id
+from stt.llm_translate import DEFAULT_SYSTEM_PROMPT_TEMPLATE, build_system_prompt
+from stt.nllb_catalog import TRANSLATION_LANGUAGES, resolve_translation_model_id
 
 # Keys whose value can change while a session is running are appended under
 # "<key>@<ISO timestamp>" rather than overwritten, so the base key always means
@@ -62,6 +65,22 @@ _GEN_KEYS = (
     "repetition_penalty",
     "length_penalty",
 )
+
+# live_translation.llm keys that apply to either provider, flattened to mt.llm.*.
+# timeout_ms earns its place: on timeout the caption falls back to the NMT model
+# silently, so a session captioned partly by a model this table would otherwise
+# name as the only one running.
+_LLM_KEYS = (
+    "max_tokens",
+    "keep_alive",
+    "timeout_ms",
+    "warmup_timeout_ms",
+)
+
+# Provider-specific keys: recording an endpoint for a local session (or GPU
+# offload for a hosted one) would assert a setting that had no effect.
+_LLM_LOCAL_KEYS = ("gguf_repo", "gguf_file", "gguf_path", "n_gpu_layers", "n_ctx")
+_LLM_ENDPOINT_KEYS = ("endpoint",)
 
 
 def _stringify(value: Any) -> str:
@@ -198,6 +217,33 @@ def is_offloaded(lt_cfg: Mapping[str, Any]) -> bool:
     return bool(remote.get("enabled") and remote.get("endpoint"))
 
 
+def uses_llm(lt_cfg: Mapping[str, Any]) -> bool:
+    """Whether captions are translated by an LLM rather than an NMT model."""
+    return lt_cfg.get("translation_method") == "llm"
+
+
+def llm_provider(llm_cfg: Mapping[str, Any]) -> str:
+    """'local' (in-process GGUF) or 'endpoint' (OpenAI-compatible server)."""
+    return str(llm_cfg.get("provider") or "endpoint").strip().lower()
+
+
+def llm_model_id(llm_cfg: Mapping[str, Any]) -> str:
+    """The LLM that translates, named the way its provider identifies it.
+
+    For provider=local that is the GGUF: an explicit gguf_path wins over
+    gguf_repo/gguf_file, mirroring the load order in get_local_llm() — recording
+    the repo when a path overrode it would name a file that never loaded.
+    """
+    if llm_provider(llm_cfg) == "local":
+        path = _stringify(llm_cfg.get("gguf_path")).strip()
+        if path:
+            return path
+        repo = _stringify(llm_cfg.get("gguf_repo")).strip()
+        file = _stringify(llm_cfg.get("gguf_file")).strip()
+        return f"{repo}/{file}" if repo and file else (file or repo)
+    return _stringify(llm_cfg.get("model")).strip()
+
+
 def _effective_local_model(lt: Mapping[str, Any], madlad_default: str) -> str:
     """The model that will actually translate, as far as this box can know.
 
@@ -206,10 +252,52 @@ def _effective_local_model(lt: Mapping[str, Any], madlad_default: str) -> str:
     the wrong model, which is the exact failure this table exists to prevent. It
     stays empty until the remote is probed (see remote_provenance); the local
     config value remains available as mt.model_configured.
+
+    An LLM session is the same failure in a second form: translation_model still
+    holds the NMT id, which on that session is only the fallback and is not what
+    captioned the service. The LLM is named instead, and the NMT id stays
+    readable as mt.model_configured.
     """
     if is_offloaded(lt) and not _section(lt, "remote").get("model"):
         return ""
+    if uses_llm(lt) and not is_offloaded(lt):
+        return llm_model_id(_section(lt, "llm"))
     return resolve_translation_model_id(lt, madlad_default)
+
+
+def _add_llm(meta: Dict[str, str], lt: Mapping[str, Any]) -> None:
+    """mt.llm.* — the settings that decide what an LLM session produces.
+
+    Only written for an LLM session: on an NMT one these values are inert, and a
+    table that records them anyway invites a reader to explain the captions with
+    a prompt that was never sent.
+
+    The prompt is recorded *effective* rather than as configured. A blank
+    system_prompt means the shipped template was used, and build_system_prompt()
+    then substitutes the target language and appends the target directive — so
+    the configured value alone (usually "") says nothing about what the model was
+    told, which is the one input an operator tunes captions with.
+
+    api_key is deliberately never recorded: session databases are delivered to a
+    NAS and handed around. Whether one was sent is recorded instead, which is
+    what a later "why did it 401" needs.
+    """
+    if not uses_llm(lt):
+        return
+    llm = _section(lt, "llm")
+    provider = llm_provider(llm)
+    _put(meta, "mt.llm.provider", provider)
+    _put(meta, "mt.llm.model", llm_model_id(llm))
+    for key in (_LLM_LOCAL_KEYS if provider == "local" else _LLM_ENDPOINT_KEYS):
+        _put(meta, f"mt.llm.{key}", llm.get(key))
+    for key in _LLM_KEYS:
+        _put(meta, f"mt.llm.{key}", llm.get(key))
+    custom = _stringify(llm.get("system_prompt")).strip()
+    _put(meta, "mt.llm.system_prompt_custom", bool(custom))
+    _put(meta, "mt.llm.system_prompt",
+         build_system_prompt(custom or DEFAULT_SYSTEM_PROMPT_TEMPLATE,
+                             lt.get("target_language"), TRANSLATION_LANGUAGES))
+    _put(meta, "mt.llm.api_key_set", bool(_stringify(llm.get("api_key")).strip()))
 
 
 def remote_provenance(status: Optional[Mapping[str, Any]]) -> Dict[str, str]:
@@ -265,6 +353,8 @@ def _add_translation(meta: Dict[str, str], config: Mapping[str, Any],
     for key in _GEN_KEYS:
         if key in gen:
             _put(meta, f"mt.gen.{key}", gen[key])
+
+    _add_llm(meta, lt)
 
     remote = _section(lt, "remote")
     if remote:
