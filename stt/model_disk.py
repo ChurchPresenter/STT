@@ -22,6 +22,7 @@ from typing import Iterable
 # Single-file weight layouts across the model families this app downloads:
 #   HF Transformers -> model.safetensors / pytorch_model.bin
 #   CTranslate2     -> model.bin              (faster-whisper)
+#   llama.cpp       -> *.gguf                 (LLM translation)
 _WEIGHT_FILENAMES = frozenset({"model.safetensors", "pytorch_model.bin", "model.bin"})
 
 
@@ -30,9 +31,15 @@ def is_weight_file(name: str) -> bool:
 
     Covers the single-file names above, the sharded HuggingFace layouts
     (``pytorch_model-00001-of-000NN.bin`` and ``model-00001-of-000NN.safetensors``),
-    and OpenAI Whisper checkpoints (``*.pt``). Deliberately narrow: a bare
-    ``*.bin`` is not enough (HF ships non-weight blobs like ``training_args.bin``),
-    so a config/tokenizer-only leftover is never mistaken for a downloaded model.
+    OpenAI Whisper checkpoints (``*.pt``), and llama.cpp ``*.gguf`` files.
+    Deliberately narrow: a bare ``*.bin`` is not enough (HF ships non-weight blobs
+    like ``training_args.bin``), so a config/tokenizer-only leftover is never
+    mistaken for a downloaded model.
+
+    A GGUF directory holds nothing else — no config.json, no tokenizer — so
+    without the ``.gguf`` case a downloaded LLM was invisible to every caller
+    here: absent from the downloaded-models list, and so impossible to delete
+    from the Model Manager despite being the largest file on disk.
     """
     if name in _WEIGHT_FILENAMES:
         return True
@@ -40,7 +47,7 @@ def is_weight_file(name: str) -> bool:
         return True
     if name.startswith("model-") and name.endswith(".safetensors"):
         return True
-    return name.endswith(".pt")
+    return name.endswith(".pt") or name.endswith(".gguf")
 
 
 def has_weight_file(filenames: Iterable[str]) -> bool:

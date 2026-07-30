@@ -21,6 +21,8 @@ class TestIsWeightFile:
         "model-00001-of-00002.safetensors",           # sharded safetensors
         "base.pt",                                     # whisper checkpoint
         "large-v3.pt",
+        "gemma-3-4b-it-Q4_K_M.gguf",                   # llama.cpp / LLM translation
+        "model-q2k.gguf",
     ])
     def test_recognizes_weight_files(self, name):
         assert is_weight_file(name)
@@ -38,6 +40,27 @@ class TestIsWeightFile:
     ])
     def test_rejects_non_weight_files(self, name):
         assert not is_weight_file(name)
+
+
+class TestGgufIsADownloadedModel:
+    """A GGUF directory holds nothing but the .gguf file.
+
+    Without recognising that extension a downloaded LLM was invisible to the
+    Model Manager — not listed, and so not deletable — despite typically being
+    the largest single file on disk.
+    """
+
+    def test_gguf_only_directory_counts_as_downloaded(self, tmp_path):
+        d = tmp_path / "ggml-org--gemma-3-4b-it-GGUF"
+        d.mkdir()
+        (d / "gemma-3-4b-it-Q4_K_M.gguf").write_bytes(b"x")
+        assert dir_has_weights(str(d))
+
+    def test_still_false_once_the_gguf_is_deleted(self, tmp_path):
+        d = tmp_path / "ggml-org--gemma-3-4b-it-GGUF"
+        d.mkdir()
+        (d / "README.md").write_text("leftover")
+        assert not dir_has_weights(str(d))
 
 
 class TestHasWeightFile:

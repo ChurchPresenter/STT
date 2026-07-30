@@ -1835,11 +1835,21 @@
 
         // Model Library Functions
         function switchModelTab(tabName) {
-            // Update tab buttons
+            // Update tab buttons. The clicked tab comes from the implicit event
+            // when a user clicks; when called programmatically there is none, so
+            // fall back to matching the tab whose handler names this pane.
             document.querySelectorAll('.model-tab').forEach(tab => {
                 tab.classList.remove('active');
             });
-            event.target.classList.add('active');
+            const clicked = (typeof event !== 'undefined' && event && event.target) ? event.target : null;
+            if (clicked && clicked.classList.contains('model-tab')) {
+                clicked.classList.add('active');
+            } else {
+                document.querySelectorAll('.model-tab').forEach(tab => {
+                    const handler = tab.getAttribute('onclick') || '';
+                    if (handler.includes("'" + tabName + "'")) tab.classList.add('active');
+                });
+            }
 
             // Show/hide model lists
             document.querySelectorAll('.model-list').forEach(list => {
@@ -1860,6 +1870,7 @@
             // Load translation models when switching to the translation tab
             if (tabName === 'translation') {
                 loadNLLBModels();
+                refreshGgufRuntimeNotice();
             }
 
             // Load Piper TTS models when switching to the TTS tab
@@ -2487,31 +2498,73 @@
             try {
                 const data = await fetch('/api/models/gguf-repo-files?repo_id=' + encodeURIComponent(repo)).then(r => r.json());
                 if (!data.success) {
-                    listEl.innerHTML = `<div class="model-item"><div class="model-info"><div class="model-name" style="color: var(--warning);">${escapeHtmlMM(data.error || 'Could not read that repo')}</div></div></div>`;
+                    listEl.innerHTML = `<div class="model-item"><div class="model-info"><div class="model-name" style="color: var(--warning);">${escapeHtml(data.error || 'Could not read that repo')}</div></div></div>`;
                     return;
                 }
                 if (!data.files.length) {
                     listEl.innerHTML = '<div class="model-item"><div class="model-info"><div class="model-name" style="color: var(--text-secondary);">No .gguf files in that repo.</div></div></div>';
                     return;
                 }
+                // Which GGUF is currently selected, so a downloaded model can be
+                // activated from here instead of leaving the operator to guess
+                // that the choice lives on another page.
+                let active = {};
+                try {
+                    active = (await fetch('/api/translation/settings').then(r => r.json())).settings || {};
+                } catch (e) { /* the "in use" marker is advisory */ }
+                const activeLlm = active.llm || {};
+                const isActive = f => activeLlm.gguf_repo === data.repo_id && activeLlm.gguf_file === f.name;
+
                 listEl.innerHTML = data.files.map(f => {
                     // Q4_K_M is the usual size/quality balance, so it is called out
                     // rather than leaving a dozen equally-weighted choices.
                     const recommended = /Q4_K_M/i.test(f.name);
+                    const inUse = isActive(f);
+                    let action;
+                    if (!f.downloaded) {
+                        action = `<button class="model-btn download" onclick="downloadGgufFile('${escapeHtml(data.repo_id)}', '${escapeHtml(f.name)}')">Download</button>`;
+                    } else if (inUse) {
+                        action = `<button class="model-btn" disabled>In use</button>`;
+                    } else {
+                        action = `<button class="model-btn" style="background: var(--accent);" onclick="useGgufForTranslation('${escapeHtml(data.repo_id)}', '${escapeHtml(f.name)}')">Use for Translation</button>`;
+                    }
                     return `
-                    <div class="model-item ${f.downloaded ? 'model-item--success' : ''}">
+                    <div class="model-item ${inUse ? 'model-item--success' : ''}">
                         <div class="model-info">
-                            <div class="model-name">${escapeHtmlMM(f.name)}${recommended ? ' <span style="color: var(--accent); font-size: 0.8em;">recommended</span>' : ''}</div>
-                            <div style="color: var(--text-secondary); font-size: 0.8em;">${formatGgufSize(f.size_bytes)}${f.downloaded ? ' — downloaded' : ''}</div>
+                            <div class="model-name">${escapeHtml(f.name)}${recommended ? ' <span style="color: var(--accent); font-size: 0.8em;">recommended</span>' : ''}</div>
+                            <div style="color: var(--text-secondary); font-size: 0.8em;">${formatGgufSize(f.size_bytes)}${f.downloaded ? ' — downloaded' : ''}${inUse ? ' — active LLM translation model' : ''}</div>
                         </div>
-                        <button class="model-btn" ${f.downloaded ? 'disabled' : ''}
-                                onclick="downloadGgufFile('${escapeHtmlMM(data.repo_id)}', '${escapeHtmlMM(f.name)}')">
-                            ${f.downloaded ? 'Downloaded' : 'Download'}
-                        </button>
+                        ${action}
                     </div>`;
                 }).join('');
             } catch (e) {
-                listEl.innerHTML = `<div class="model-item"><div class="model-info"><div class="model-name" style="color: var(--warning);">${escapeHtmlMM(e.message || String(e))}</div></div></div>`;
+                listEl.innerHTML = `<div class="model-item"><div class="model-info"><div class="model-name" style="color: var(--warning);">${escapeHtml(e.message || String(e))}</div></div></div>`;
+            }
+        }
+
+        async function useGgufForTranslation(repoId, fileName) {
+            try {
+                const data = await fetch('/api/translation/settings', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ llm: { provider: 'local', gguf_repo: repoId, gguf_file: fileName } })
+                }).then(r => r.json());
+                if (data.success === false) {
+                    showAlert('❌ Could not select that model: ' + (data.error || 'unknown error'), 'error');
+                    return;
+                }
+                // Selecting a model is not the same as switching engine — say so
+                // instead of quietly changing how a live service translates.
+                const settings = await fetch('/api/translation/settings').then(r => r.json()).catch(() => null);
+                const method = settings && settings.settings ? settings.settings.translation_method : null;
+                if (method === 'llm') {
+                    showAlert(`✅ ${fileName} is now the LLM translation model.`, 'success');
+                } else {
+                    showAlert(`✅ ${fileName} selected. Translation Method is still "${method || 'not set'}" — set it to LLM in Translation Settings to use it.`, 'warning');
+                }
+                loadGgufRepoFiles();
+            } catch (error) {
+                showAlert('❌ Could not select that model: ' + error.message, 'error');
             }
         }
 
@@ -2539,12 +2592,6 @@
             } finally {
                 stopDownloadProgress(repoId);
             }
-        }
-
-        function escapeHtmlMM(s) {
-            return String(s == null ? '' : s)
-                .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
-                .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
         }
 
         async function refreshGgufRuntimeNotice() {
@@ -2608,6 +2655,17 @@
             // Validate model ID format (should be organization/model-name)
             if (!modelId.includes('/')) {
                 showAlert('❌ Invalid model ID format. Use: organization/model-name', 'error');
+                return;
+            }
+
+            // A GGUF repo publishes a dozen quantisations of one model and this
+            // path downloads the whole repo — 40+ GB to obtain the ~2.5 GB file
+            // that will actually be used. Send the operator to the picker instead.
+            if (/-gguf$|_gguf$|\bgguf\b/i.test(modelId)) {
+                showAlert('That looks like a GGUF repo. Use "LLM Translation Models (GGUF)" on the Translation Models tab to pick a single quantisation — downloading the whole repo would fetch every variant.', 'warning');
+                document.getElementById('gguf_repo_input').value = modelId;
+                switchModelTab('translation');
+                loadGgufRepoFiles();
                 return;
             }
 
