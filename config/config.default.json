@@ -451,6 +451,22 @@
       "_piper_model_comment": "Piper model ID (e.g. 'en_US-lessac-medium'). Download from Model Manager.",
       "speed": 1.0,
       "_speed_comment": "Speech speed multiplier (0.5 = half speed, 2.0 = double speed)"
+    },
+    "llm": {
+      "endpoint": "",
+      "_endpoint_comment": "Full chat URL of an OpenAI-compatible server. Empty = LLM translation off. Works with any of them: Ollama 'http://127.0.0.1:11434/api/chat', llama-server / LM Studio / vLLM / hosted 'https://host/v1/chat/completions'. No Ollama dependency.",
+      "model": "",
+      "_model_comment": "Model name as the server knows it. Must NOT be a reasoning model: those emit their chain of thought into the reply (and some ignore every switch for disabling it), which consumes the token budget and is not separable from the translation.",
+      "api_key": "",
+      "_api_key_comment": "Optional bearer token for a hosted endpoint. Empty = no auth header.",
+      "system_prompt": "",
+      "_system_prompt_comment": "Overrides the built-in prompt. This is the tuning surface: naming a convention here fixes a whole class of term at once (e.g. stating that вечеря is communion fixed it everywhere), which is why this is config and not code.",
+      "max_tokens": 160,
+      "_max_tokens_comment": "Cap on generated tokens. Real captions measured p50 19 tokens, p90 41, max 80, so 160 is headroom; it also bounds a runaway generation.",
+      "keep_alive": -1,
+      "_keep_alive_comment": "How long the server keeps the model loaded; -1 = forever. Leave at -1: an unpinned model measured p90 4.89s against p50 0.29s purely because it was unloaded between captions. Ignored by servers that don't support it.",
+      "timeout_ms": 8000,
+      "_timeout_ms_comment": "Per-caption timeout. On timeout the caption falls back to the NMT model rather than being dropped."
     }
   },
   "corrections": {

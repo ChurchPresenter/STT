@@ -756,6 +756,11 @@ from stt.ct2_translate import (  # noqa: F401
     score_to_confidence as _ct2_score_to_confidence,
 )
 # Session provenance: which models/decode settings produced a given transcript.
+from stt.llm_translate import (
+    build_chat_payload as _llm_chat_payload,
+    extract_chat_text as _llm_extract_text,
+    validate_translation as _llm_validate,
+)
 from stt.session_meta import (
     append_changes as _session_meta_append,
     build_session_meta as _build_session_meta,
@@ -13691,6 +13696,63 @@ def _translate_via_remote(text, source_lang, target_lang, endpoint,
         return text
 
 
+_DEFAULT_LLM_SYSTEM_PROMPT = (
+    "You translate live captions for a church service. Output ONLY the translation — "
+    "no notes, no explanation, no reasoning, no quotation marks. Render biblical and "
+    "liturgical terminology the way English Bibles and church usage do, and use the "
+    "standard English spelling of biblical names. Keep the speaker's register: plain "
+    "spoken language, not archaic English, except inside direct scripture quotations. "
+    "Preserve meaning exactly — never add, omit, explain, or answer the text. If the "
+    "input is a fragment, translate it as a fragment. If the input is a scripture "
+    "reference, translate only the reference; do not quote the passage."
+)
+
+
+def _translate_via_llm(text, source_lang, target_lang):
+    """Translate one caption with an LLM. Returns the caption, or None to fall back.
+
+    None means "use the NMT model instead". An LLM can return its own reasoning, a
+    refusal, the source language untouched, or — measured over a real service — a
+    scripture reference followed by the recited passage. A wrong caption in front of a
+    congregation is worse than a slower one, so anything that fails validation is
+    declined here and the caller falls through to the NMT path.
+
+    ``endpoint`` is the full chat URL so one code path serves any OpenAI-compatible
+    server: Ollama (``/api/chat``), llama-server, LM Studio, vLLM or a hosted API
+    (``/v1/chat/completions``). Nothing here is Ollama-specific.
+    """
+    llm_cfg = config.get("live_translation", {}).get("llm") or {}
+    endpoint = (llm_cfg.get("endpoint") or "").strip()
+    model = (llm_cfg.get("model") or "").strip()
+    if not endpoint or not model:
+        return None
+
+    payload = _llm_chat_payload(
+        model, text,
+        llm_cfg.get("system_prompt") or _DEFAULT_LLM_SYSTEM_PROMPT,
+        max_tokens=coerce_int(llm_cfg.get("max_tokens"), 160, lo=16, hi=1024),
+        # keep_alive pins the model in the runtime. Not a nicety: an unpinned model
+        # measured p90 4.89s against p50 0.29s purely from being unloaded between
+        # captions. Servers that don't know the field ignore it.
+        keep_alive=llm_cfg.get("keep_alive", -1),
+    )
+    headers = {"Content-Type": "application/json"}
+    if (llm_cfg.get("api_key") or "").strip():
+        headers["Authorization"] = f"Bearer {llm_cfg['api_key'].strip()}"
+    timeout = coerce_float(llm_cfg.get("timeout_ms"), 8000, lo=500, hi=60000) / 1000.0
+
+    try:
+        import requests as _req
+        resp = _req.post(endpoint, json=payload, headers=headers, timeout=timeout)
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception as e:
+        print(f"[LLM-TRANSLATE] call failed ({type(e).__name__}: {e})")
+        return None
+
+    return _llm_validate(_llm_extract_text(data), text, target_lang)
+
+
 def translate_live_text(text, source_lang, target_lang, return_extras=False, num_alternatives=0, generation_params=None, local_only=False):
     """Translate text for live display using the singleton model.
 
@@ -13747,6 +13809,17 @@ def translate_live_text(text, source_lang, target_lang, return_extras=False, num
         if return_extras:
             return {"text": "", "confidence": None, "alternatives": []}
         return ""
+
+    # LLM path. Declining falls through to the NMT model below, so the fallback needs
+    # no plumbing of its own — which also means translation_model must stay pointed at
+    # a real NMT model even when translation_method is "llm".
+    if config.get("live_translation", {}).get("translation_method") == "llm":
+        _llm_text = _translate_via_llm(text, source_lang, target_lang)
+        if _llm_text is not None:
+            if return_extras:
+                return {"text": _llm_text, "confidence": None, "alternatives": []}
+            return _llm_text
+        print(f"[LLM-TRANSLATE] declined; using the NMT model for: '{text[:48]}'")
 
     try:
         trans_use_gpu = config.get("live_translation", {}).get("use_gpu", True)
