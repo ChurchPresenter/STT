@@ -1229,10 +1229,40 @@
        // Drip-feed state for transcription
        let _dripTimer = null;
        let _dripRevealedHTML = '';
+       let _dripPending = null;   // {element, fullHTML} while a reveal is in flight
 
        // Drip-feed state for translation
        let _transDripTimer = null;
        let _transDripRevealedHTML = '';
+       let _transDripPending = null;
+
+       // Finish any in-flight reveal at once, jumping to the full text.
+       //
+       // Browsers clamp setInterval to roughly one tick per second in a hidden
+       // tab, so a 30ms-per-character reveal crawls at ~1 char/s and each update
+       // leaves more unrevealed than the last. Bringing the tab back un-throttles
+       // the timer and the viewer watches that whole backlog type itself out
+       // instead of seeing the current text. Nobody is reading a hidden tab, so
+       // there is nothing to animate for: skip the animation while hidden (below,
+       // in dripFeedText) and flush what was pending the moment it returns.
+       function finishDripsImmediately() {
+         if (_transDripTimer) { clearInterval(_transDripTimer); _transDripTimer = null; }
+         if (_transDripPending) {
+           _transDripPending.element.innerHTML = _transDripPending.fullHTML;
+           _transDripRevealedHTML = _transDripPending.fullHTML;
+           _transDripPending = null;
+         }
+         if (_dripTimer) { clearInterval(_dripTimer); _dripTimer = null; }
+         if (_dripPending) {
+           _dripPending.element.innerHTML = _dripPending.fullHTML;
+           _dripRevealedHTML = _dripPending.fullHTML;
+           _dripPending = null;
+         }
+       }
+
+       document.addEventListener('visibilitychange', function () {
+         if (document.visibilityState === 'visible') { finishDripsImmediately(); }
+       });
 
        // Invalidate a stream's drip-feed baseline: cancels any in-flight reveal
        // and clears the "actually displayed" tracker. Must be called anywhere
@@ -1244,9 +1274,11 @@
          if (isTranslation) {
            if (_transDripTimer) { clearInterval(_transDripTimer); _transDripTimer = null; }
            _transDripRevealedHTML = '';
+           _transDripPending = null;
          } else {
            if (_dripTimer) { clearInterval(_dripTimer); _dripTimer = null; }
            _dripRevealedHTML = '';
+           _dripPending = null;
          }
        }
 
@@ -1263,7 +1295,12 @@
          // (and equals prevFullHTML whenever the previous drip did finish).
          const actualPrevHTML = (isTranslation ? _transDripRevealedHTML : _dripRevealedHTML) || prevFullHTML;
 
-         if (!dripSpeed || dripSpeed <= 0) {
+         // Reveal instantly when the animation is disabled, or when the tab is
+         // hidden — a throttled timer there would crawl at ~1 char/s and build a
+         // backlog that replays on return (see finishDripsImmediately).
+         if (!dripSpeed || dripSpeed <= 0 || document.hidden) {
+           if (isTranslation && _transDripTimer) { clearInterval(_transDripTimer); _transDripTimer = null; _transDripPending = null; }
+           else if (!isTranslation && _dripTimer) { clearInterval(_dripTimer); _dripTimer = null; _dripPending = null; }
            element.innerHTML = newFullHTML;
            if (isTranslation) { _transDripRevealedHTML = newFullHTML; }
            else { _dripRevealedHTML = newFullHTML; }
@@ -1299,8 +1336,8 @@
              // Same length or shrank: pure in-place correction, nothing to
              // drip. Stop any mid-flight drip first so its timer can't
              // overwrite the corrected text with stale partials.
-             if (isTranslation && _transDripTimer) { clearInterval(_transDripTimer); _transDripTimer = null; }
-             else if (!isTranslation && _dripTimer) { clearInterval(_dripTimer); _dripTimer = null; }
+             if (isTranslation && _transDripTimer) { clearInterval(_transDripTimer); _transDripTimer = null; _transDripPending = null; }
+             else if (!isTranslation && _dripTimer) { clearInterval(_dripTimer); _dripTimer = null; _dripPending = null; }
              element.innerHTML = newFullHTML;
              if (isTranslation) { _transDripRevealedHTML = newFullHTML; }
              else { _dripRevealedHTML = newFullHTML; }
@@ -1326,9 +1363,11 @@
          if (isTranslation && _transDripTimer) {
            clearInterval(_transDripTimer);
            _transDripTimer = null;
+           _transDripPending = null;
          } else if (!isTranslation && _dripTimer) {
            clearInterval(_dripTimer);
            _dripTimer = null;
+           _dripPending = null;
          }
 
          // Show base (retained revealed text) immediately
@@ -1340,8 +1379,8 @@
          const timer = setInterval(() => {
            if (charIndex >= newPortion.length) {
              clearInterval(timer);
-             if (isTranslation) { _transDripTimer = null; _transDripRevealedHTML = newFullHTML; }
-             else { _dripTimer = null; _dripRevealedHTML = newFullHTML; }
+             if (isTranslation) { _transDripTimer = null; _transDripPending = null; _transDripRevealedHTML = newFullHTML; }
+             else { _dripTimer = null; _dripPending = null; _dripRevealedHTML = newFullHTML; }
              element.innerHTML = newFullHTML;
              return;
            }
@@ -1354,8 +1393,10 @@
            else { _dripRevealedHTML = partialHTML; }
          }, dripSpeed);
 
-         if (isTranslation) { _transDripTimer = timer; }
-         else { _dripTimer = timer; }
+         // Remember the reveal target so finishDripsImmediately() can complete it
+         // if the tab is hidden and later returns mid-reveal.
+         if (isTranslation) { _transDripTimer = timer; _transDripPending = { element, fullHTML: newFullHTML }; }
+         else { _dripTimer = timer; _dripPending = { element, fullHTML: newFullHTML }; }
        }
 
        // Unified transcription display - uses Whisper-Live's temporal validation pattern
