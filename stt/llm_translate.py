@@ -174,6 +174,26 @@ def build_chat_payload(model: str, text: str, system_prompt: str, *,
     return payload
 
 
+def uses_local_llm(translation_config: Optional[Mapping[str, Any]]) -> bool:
+    """True when captions are translated by the in-process GGUF on this machine.
+
+    The two translation engines have separate weights and separate releasers, so
+    every caller that loads, unloads or describes "the model" has to know which one
+    is in play. Deriving that inline let the copies drift: the remote-unload route
+    tested the NMT flag while an LLM session was running, decided nothing was
+    loaded, and left the GGUF resident for the life of the process. One definition,
+    so there is nothing to drift.
+
+    "endpoint" is the default provider — an absent provider means the model belongs
+    to another machine, and unloading it is not this machine's business.
+    """
+    config = translation_config or {}
+    if (config.get("translation_method") or "nllb") != "llm":
+        return False
+    llm = config.get("llm") or {}
+    return str(llm.get("provider") or "endpoint").strip().lower() == "local"
+
+
 def local_model_path(models_dir: str, gguf_repo: str, gguf_file: str) -> str:
     """Where a downloaded GGUF lives, mirroring how other models are stored.
 

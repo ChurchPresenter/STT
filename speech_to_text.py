@@ -816,6 +816,7 @@ from stt.llm_translate import (
     resolve_gpu_layers as _llm_resolve_gpu_layers,
     scan_gguf_models as _scan_gguf_models,
     extract_chat_text as _llm_extract_text,
+    uses_local_llm as _uses_local_llm,
     validate_translation as _llm_validate,
 )
 from stt.db_maintenance import (
@@ -6563,7 +6564,7 @@ def get_translation_status():
     # transcript whose captions came from a GGUF on the GPU.
     _llm_cfg = trans_config.get("llm") or {}
     _using_llm = _method == "llm"
-    _llm_local = _using_llm and (_llm_cfg.get("provider") or "endpoint").strip().lower() == "local"
+    _llm_local = _uses_local_llm(trans_config)
     if _using_whisper:
         _status_model = "whisper/" + config.get("model", {}).get("whisper", {}).get("model", "whisper")
     elif _using_llm:
@@ -6778,12 +6779,24 @@ def translate_unload():
     if active_others:
         return jsonify({"success": False, "reason": "Other clients still active", "active": len(active_others)})
 
+    # Free whichever engine is actually resident. Checking only the NMT flag here
+    # meant an LLM session reported "Model not loaded" and kept its GGUF for the
+    # life of the process — Machine A logged that reply as a successful unload.
+    unloaded = []
     if is_live_translation_model_loaded():
-        import threading as _threading
-        _threading.Thread(target=unload_live_translation_model, daemon=True).start()
-        return jsonify({"success": True, "message": "Unloading translation model"})
+        unloaded.append(("translation model", unload_live_translation_model))
+    if _uses_local_llm(config.get("live_translation", {})) and is_local_llm_loaded():
+        unloaded.append(("LLM", unload_local_llm))
 
-    return jsonify({"success": True, "message": "Model not loaded"})
+    if not unloaded:
+        return jsonify({"success": True, "message": "Model not loaded"})
+
+    import threading as _threading
+    for _, _unload in unloaded:
+        _threading.Thread(target=_unload, daemon=True).start()
+    return jsonify({"success": True,
+                    "message": "Unloading " + " and ".join(name for name, _ in unloaded),
+                    "unloaded": [name for name, _ in unloaded]})
 
 
 @app.route("/api/models/gguf-list", methods=["GET"])
@@ -10005,6 +10018,13 @@ def stop_transcription():
             print("[STOP] Unloading Live Translation model...")
             unload_live_translation_model()
             print("[STOP] Live Translation model unloaded")
+
+        # The in-process GGUF is a separate engine with a separate releaser, and it
+        # holds as much memory as the NMT model does. Freeing only the NMT one left
+        # it resident until the process restarted.
+        if _uses_local_llm(config.get("live_translation", {})) and is_local_llm_loaded():
+            print("[STOP] Unloading local LLM translation model...")
+            unload_local_llm()
 
         # Tell remote Machine B to unload its translation model too
         remote_cfg = config.get("live_translation", {}).get("remote", {})
@@ -14334,6 +14354,16 @@ def unload_local_llm():
             import gc
             gc.collect()
             print("[LLM-LOCAL] model unloaded")
+
+
+def is_local_llm_loaded():
+    """Whether the in-process GGUF currently holds weights.
+
+    The counterpart to is_live_translation_model_loaded() for the other engine.
+    Callers that free memory must ask both — asking only the NMT one is what let
+    the GGUF survive every stop.
+    """
+    return _local_llm is not None
 
 
 def _translate_via_local_llm(text, system_prompt, max_tokens, llm_cfg_override=None):

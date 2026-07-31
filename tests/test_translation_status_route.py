@@ -17,6 +17,7 @@ import threading
 import pytest
 
 from conftest import extract_definitions
+from stt.llm_translate import uses_local_llm
 
 NLLB = "facebook/nllb-200-distilled-600M"
 MADLAD = "google/madlad400-3b-mt"
@@ -55,6 +56,7 @@ def call_status(live_translation, *, local_llm=None, device=None, is_ct2=False,
             "_local_translate_ms_ema": None,
             "_remote_translate_ms_ema": None,
             "_llm_device_label": lambda: "metal" if local_llm is not None else None,
+            "_uses_local_llm": uses_local_llm,
             "is_live_translation_model_loaded": lambda: model_loaded,
             "is_live_translation_model_loading": lambda: False,
             "get_translation_cache": lambda: _cache_stub(),

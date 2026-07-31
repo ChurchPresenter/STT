@@ -19,6 +19,7 @@ from stt.llm_translate import (
     looks_like_reasoning_model,
     resolve_gpu_layers,
     scan_gguf_models,
+    uses_local_llm,
     validate_translation,
 )
 
@@ -376,3 +377,34 @@ class TestLooksLikeReasoningModel:
     def test_unusable_shapes(self):
         assert not looks_like_reasoning_model({})
         assert not looks_like_reasoning_model("nope")
+
+
+class TestUsesLocalLlm:
+    """Decides whether this machine holds GGUF weights it is responsible for."""
+
+    def test_local_provider_under_the_llm_method(self):
+        assert uses_local_llm({"translation_method": "llm", "llm": {"provider": "local"}})
+
+    def test_provider_is_case_and_space_insensitive(self):
+        assert uses_local_llm({"translation_method": "llm", "llm": {"provider": " LOCAL "}})
+
+    def test_endpoint_provider_is_another_machines_model(self):
+        assert not uses_local_llm({"translation_method": "llm", "llm": {"provider": "endpoint"}})
+
+    def test_absent_provider_defaults_to_endpoint(self):
+        # Not "local": guessing local would unload weights this box never loaded.
+        assert not uses_local_llm({"translation_method": "llm", "llm": {}})
+        assert not uses_local_llm({"translation_method": "llm"})
+
+    def test_nmt_methods_never_use_the_llm(self):
+        # A configured local LLM is irrelevant while an NMT method is selected.
+        local = {"provider": "local"}
+        for method in ("nllb", "madlad", "whisper_translate", "whisper_forced_lang"):
+            assert not uses_local_llm({"translation_method": method, "llm": local})
+
+    def test_absent_method_defaults_to_nllb(self):
+        assert not uses_local_llm({"llm": {"provider": "local"}})
+
+    def test_unusable_shapes(self):
+        assert not uses_local_llm({})
+        assert not uses_local_llm(None)
