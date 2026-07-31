@@ -444,6 +444,7 @@
                     <button class="btn up-button" onclick="navigateUp()">⬆ Up</button>
                     <button class="btn btn-secondary" id="selectModeBtn" onclick="toggleSelectMode()">☑ Select</button>
                     <button class="btn btn-secondary" onclick="showCreateFolderModal()">+ New Folder</button>
+                    <button class="btn btn-secondary" onclick="cleanupSidecars()" title="Fold leftover -wal files into their databases and remove -shm files. Never deletes unmerged data, and skips a recording in progress.">🧹 Clean DB Sidecars</button>
                     <button class="btn btn-primary" onclick="refreshFiles()">🔄 Refresh</button>
                 </div>
             </div>
@@ -1200,6 +1201,32 @@
                 }
             } catch (error) {
                 showNotification('Error: ' + error.message, 'error');
+            }
+        }
+
+        // Retire -wal/-shm files left beside finished session databases. They
+        // survive when the process is stopped mid-session, and the startup sweep
+        // is the usual cure — this is for clearing them without a restart.
+        async function cleanupSidecars() {
+            try {
+                const r = await fetch('/api/file-manager/cleanup-sidecars', { method: 'POST' });
+                const data = await r.json();
+                if (!data.success) {
+                    showNotification(data.error || 'Cleanup failed', 'error');
+                    return;
+                }
+                if (!data.scanned) {
+                    showNotification('No leftover database files found');
+                } else {
+                    const parts = [`${data.cleaned} cleaned`];
+                    if (data.skipped_active) parts.push(`${data.skipped_active} in use`);
+                    if (data.skipped_recent) parts.push(`${data.skipped_recent} too recent`);
+                    if (data.failed) parts.push(`${data.failed} failed`);
+                    showNotification(parts.join(', '), data.failed ? 'error' : 'success');
+                }
+                refreshFiles();
+            } catch (e) {
+                showNotification('Cleanup failed: ' + e.message, 'error');
             }
         }
 

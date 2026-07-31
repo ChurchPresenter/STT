@@ -17638,29 +17638,21 @@ def thread1_function(ts, cq, cfq, cal_state, cal_data, cal_step1, asq):
                         except Exception as e:
                             print(f"[SRT-TRANSLATION] Error: {e}")
 
-                    # NOW delete WAL and SHM files after SRT conversion is complete
-                    # SRT conversion opens a new DB connection which recreates these files
-                    print("[WAL-CLEANUP] Deleting WAL/SHM files after SRT conversion...", flush=True)
-                    try:
-                        wal_file = session_db_name + "-wal"
-                        shm_file = session_db_name + "-shm"
-
-                        wal_exists = os.path.exists(wal_file)
-                        shm_exists = os.path.exists(shm_file)
-                        print(f"[WAL-CLEANUP] WAL exists: {wal_exists}, SHM exists: {shm_exists}", flush=True)
-
-                        if wal_exists:
-                            os.remove(wal_file)
-                            print("[WAL-CLEANUP] WAL file deleted", flush=True)
-
-                        if shm_exists:
-                            os.remove(shm_file)
-                            print("[WAL-CLEANUP] SHM file deleted", flush=True)
-
-                        if not wal_exists and not shm_exists:
-                            print("[WAL-CLEANUP] No WAL/SHM files to delete", flush=True)
-                    except Exception as e:
-                        print(f"[WAL-CLEANUP] Error deleting WAL/SHM files: {e}", flush=True)
+                    # NOW retire the WAL/SHM sidecars, after SRT conversion:
+                    # that opens its own connection, which recreates them.
+                    #
+                    # This used to unlink both files directly. It was safe here
+                    # because a TRUNCATE checkpoint had already run, but it is
+                    # the wrong pattern to have lying around — deleting a WAL
+                    # that has not been checkpointed discards committed rows.
+                    # The shared helper folds the WAL in first and lets SQLite
+                    # remove it, so no caller can copy the unsafe shape.
+                    print("[WAL-CLEANUP] Retiring WAL/SHM files after SRT conversion...", flush=True)
+                    if _db_checkpoint_and_release(session_db_name):
+                        print("[WAL-CLEANUP] Sidecars retired", flush=True)
+                    else:
+                        print("[WAL-CLEANUP] Sidecars still present; the startup "
+                              "sweep will retry", flush=True)
 
                 # File mover is THE VERY LAST operation after everything is fully stopped
                 # Wait 10 seconds to ensure all file handles are released
