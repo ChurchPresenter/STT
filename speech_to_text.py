@@ -17692,6 +17692,13 @@ def thread1_function(ts, cq, cfq, cal_state, cal_data, cal_step1, asq):
         os._exit(0)
 
 
+# How long the startup sweep waits before its one retry. Longer than the
+# min_age guard below it, so a session interrupted by this very restart is old
+# enough to retire by the time the second pass runs.
+SIDECAR_SWEEP_MIN_AGE_S = 120
+SIDECAR_SWEEP_RETRY_S = 300
+
+
 def _sidecar_sweep_dirs():
     """Directories a session database can live in: the backup tree and any
     configured custom database path."""
@@ -17726,7 +17733,7 @@ def sweep_db_sidecars():
             skip_paths=[p for p in (active,) if p],
             # A session that stopped moments ago may still be having its SRT
             # written by another thread; leave it for the next sweep.
-            min_age_s=120,
+            min_age_s=SIDECAR_SWEEP_MIN_AGE_S,
         )
         if result["scanned"]:
             print(f"[WAL-SWEEP] {result['cleaned']} cleaned, "
@@ -17737,6 +17744,20 @@ def sweep_db_sidecars():
         print(f"[WAL-SWEEP] Sweep failed: {e}", flush=True)
         return {"scanned": 0, "cleaned": 0, "skipped_active": 0,
                 "skipped_recent": 0, "failed": 0, "errors": [str(e)]}
+
+
+def _sweep_db_sidecars_startup():
+    """Sweep at startup, then once more after the age guard can have expired.
+
+    A restart that interrupts a session leaves that session's sidecars behind,
+    and the immediate sweep deliberately skips it as "too recent" — it may still
+    be having its SRT written. Without a second pass those files would wait for
+    the *next* restart, which on a machine that runs for days is no cure at all.
+    One delayed retry closes that without a scheduler.
+    """
+    sweep_db_sidecars()
+    sleep(SIDECAR_SWEEP_RETRY_S)
+    sweep_db_sidecars()
 
 
 def cleanup_old_partials():
@@ -17795,7 +17816,7 @@ def thread2_function():
 
         # Retire sidecars the previous run could not: a process stopped
         # mid-session never reaches the worker's end-of-session checkpoint.
-        threading.Thread(target=sweep_db_sidecars, daemon=True).start()
+        threading.Thread(target=_sweep_db_sidecars_startup, daemon=True).start()
 
         # Start the background task for emitting transcriptions
         socketio.start_background_task(emit_new_entries)
