@@ -2099,6 +2099,7 @@
         // Scroll to bottom on page load
         setTimeout(() => {
           container.scrollTop = container.scrollHeight;
+          probeLiveEdge();
         }, 100);
 
         // Reading back through what was said means scrolling up, which pauses the
@@ -2122,6 +2123,7 @@
             // way down, each of them "not at the bottom", which would flash the
             // pill back on for the length of the animation.
             container.scrollTop = container.scrollHeight;
+            probeLiveEdge();
             // Close any gesture window still open from the scroll that led here,
             // so the resumed auto-scroll's own movement cannot be mistaken for
             // the user scrolling away again.
@@ -2130,9 +2132,33 @@
           });
         }
 
+        // Where the live edge sits in scrollTop terms is not fixed. The default
+        // layout (verticalAlign=bottom) makes the container a column-reverse flex
+        // box, and browsers put the scroll origin of a reversed box at its flex
+        // start — the visual bottom — so scrollTop reads ~0 at the latest text and
+        // runs negative as the reader goes back. Measuring "bottom" as
+        // scrollTop + clientHeight >= scrollHeight was therefore never true there:
+        // the pill's jump still landed correctly (the browser clamps it), but the
+        // pill itself never went away.
+        //
+        // Rather than guess the convention per browser, learn it: any scroll we
+        // drove ourselves ends at the live edge by construction, so reading
+        // scrollTop back at that moment says which end it is.
         const BOTTOM_SLACK_PX = 10;
+        let liveEdgeAtOrigin = false;
+        function scrollable() {
+          return container.scrollHeight - container.clientHeight > BOTTOM_SLACK_PX;
+        }
+        function probeLiveEdge() {
+          if (!scrollable()) return;  // no overflow: scrollTop is 0 either way, tells us nothing
+          liveEdgeAtOrigin = container.scrollTop <= 0;
+        }
+        window.probeLiveEdge = probeLiveEdge;
         function atLiveEdge() {
-          return container.scrollTop + container.clientHeight >= container.scrollHeight - BOTTOM_SLACK_PX;
+          if (!scrollable()) return true;
+          return liveEdgeAtOrigin
+            ? container.scrollTop >= -BOTTOM_SLACK_PX
+            : container.scrollTop + container.clientHeight >= container.scrollHeight - BOTTOM_SLACK_PX;
         }
 
         // Scrolling back down to the bottom by hand resumes following — but the
@@ -2181,6 +2207,10 @@
            // flick is not cut off halfway by the timeout.
            markUserGesture();
 
+           // A negative scrollTop can only mean a reversed box scrolled back from
+           // its origin, which settles the question on its own.
+           if (container.scrollTop < -1) liveEdgeAtOrigin = true;
+
            // Scrolled up: stop following the live edge. Back at the bottom:
            // resume immediately, so returning by hand needs no click.
            autoScrollEnabled = atLiveEdge();
@@ -2190,6 +2220,9 @@
         // Expose programmaticScroll flag globally for typing animation
         window.setProgrammaticScroll = function(value) {
           programmaticScroll = value;
+          // Released once the auto-scroll has landed, i.e. sitting at the live
+          // edge — the one moment where reading scrollTop back is meaningful.
+          if (!value) probeLiveEdge();
           // A scroll we started ourselves ends the gesture window: whatever the
           // user did last is over, and the smooth animation that follows must not
           // inherit their intent.
