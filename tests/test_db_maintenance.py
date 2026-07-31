@@ -9,6 +9,7 @@ passes every other test in this file and fails that one.
 
 import os
 import sqlite3
+from pathlib import Path
 
 import pytest
 
@@ -64,23 +65,34 @@ def read_rows(path):
         conn.close()
 
 
-def killed_worker_state(tmp_path, rows=5):
+def killed_worker_state(directory, name="session.db", rows=5):
     """A .db + -wal pair whose rows are in the WAL and NOT in the main file.
 
-    Copying the files out from under a live connection reproduces what a killed
-    process leaves behind, which is the state that matters here. Closing the
-    connection instead would not: on macOS close() checkpoints, so the data
-    would already be in the main file and deleting the WAL would lose nothing —
-    an earlier version of this test made exactly that mistake and passed
-    against a naive os.remove implementation.
+    Copying the files out from under a live connection is the only way to build
+    this state that behaves the same everywhere. Closing the connection instead
+    is version-dependent: sqlite 3.50 removes both sidecars on close while 3.51
+    leaves them, so a fixture built that way is dirty on one machine and clean
+    on another — which is exactly how an earlier version of these tests passed
+    locally and did nothing at all on CI.
+
+    It is also the real scenario: a worker terminated mid-session leaves
+    precisely these bytes on disk.
     """
-    source = tmp_path / "live.db"
-    conn = make_session_db(source, rows=rows)
-    victim = tmp_path / "killed" / "session.db"
-    victim.parent.mkdir(parents=True, exist_ok=True)
-    victim.write_bytes(source.read_bytes())
-    (victim.parent / "session.db-wal").write_bytes((tmp_path / "live.db-wal").read_bytes())
-    conn.close()
+    directory = Path(directory)
+    directory.mkdir(parents=True, exist_ok=True)
+    scratch = directory / f".live-{name}"
+    conn = make_session_db(scratch, rows=rows)
+    try:
+        victim = directory / name
+        victim.write_bytes(scratch.read_bytes())
+        (directory / f"{name}-wal").write_bytes(
+            (directory / f".live-{name}-wal").read_bytes())
+    finally:
+        conn.close()
+    for suffix in ("", "-wal", "-shm"):
+        leftover = directory / f".live-{name}{suffix}"
+        if leftover.exists():
+            leftover.unlink()
     return victim
 
 
@@ -101,9 +113,7 @@ class TestDataIsNeverLost:
 
     def test_a_delivered_copy_is_complete_afterwards(self, tmp_path):
         """What the file mover sends is the .db; it must stand alone."""
-        db = tmp_path / "session.db"
-        conn = make_session_db(db, rows=4)
-        conn.close()
+        db = killed_worker_state(tmp_path, rows=4)
         checkpoint_and_release(str(db))
 
         delivered = tmp_path / "delivered.db"
@@ -113,9 +123,8 @@ class TestDataIsNeverLost:
 
 class TestCheckpointAndRelease:
     def test_sidecars_are_gone_afterwards(self, tmp_path):
-        db = tmp_path / "session.db"
-        conn = make_session_db(db)
-        conn.close()
+        db = killed_worker_state(tmp_path)
+        assert resolve_sidecars(str(db)), "premise: the sidecars are there to retire"
         assert checkpoint_and_release(str(db))
         assert resolve_sidecars(str(db)) == []
 
@@ -165,11 +174,7 @@ class TestResolveSidecars:
 
 class TestSweep:
     def _dirty(self, directory, name, rows=2):
-        directory.mkdir(parents=True, exist_ok=True)
-        db = directory / name
-        conn = make_session_db(db, rows=rows)
-        conn.close()
-        return db
+        return killed_worker_state(directory, name, rows=rows)
 
     def test_cleans_every_database_it_finds(self, tmp_path):
         a = self._dirty(tmp_path / "2026" / "07", "a.db")
@@ -218,7 +223,7 @@ class TestSweep:
 
     def test_a_swept_database_keeps_rows_that_were_only_in_its_wal(self, tmp_path):
         """The same guarantee, through the sweep the server actually runs."""
-        db = killed_worker_state(tmp_path, rows=7)
+        db = killed_worker_state(tmp_path / "killed", rows=7)
         assert read_rows(db) == 0
         result = sweep_orphaned_sidecars([str(db.parent)])
         assert result["cleaned"] == 1
