@@ -480,12 +480,25 @@
                             <small id="config_translation_not_nmt_text" style="color: var(--text-secondary);"></small>
                         </div>
 
+                        <!-- Which LLM is actually translating. Read-only: it is
+                             chosen in Translation Settings, which has the
+                             downloaded-GGUF dropdowns. Without this the panel
+                             showed only the NMT model, and an operator reading
+                             "Translation Model: madlad400-3b-mt" on an LLM
+                             session reasonably concluded MADLAD was running. -->
+                        <div id="config_llm_in_use" style="display:none; background: var(--info-bg, var(--bg-tertiary)); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 8px 12px; margin-bottom: 10px;">
+                            <small style="color: var(--text-secondary);">
+                                <strong>LLM in use:</strong> <span id="config_llm_in_use_model">—</span><br>
+                                Change it in <a href="/translation" style="color: var(--accent);">Translation Settings</a>.
+                            </small>
+                        </div>
+
                         <div class="form-group">
-                            <label for="config_translation_model">Translation Model</label>
+                            <label for="config_translation_model" id="config_translation_model_label">Translation Model</label>
                             <select id="config_translation_model">
                                 <option value="">Loading downloaded models...</option>
                             </select>
-                            <small>Select from downloaded NLLB &amp; MADLAD models</small>
+                            <small id="config_translation_model_hint">Select from downloaded NLLB &amp; MADLAD models</small>
                         </div>
                         <div class="form-group">
                             <label style="display: flex; align-items: center; gap: 8px; cursor: pointer;">
@@ -1736,6 +1749,26 @@
         // that isn't told which model is configured can still show the truth.
         let _configuredTranslationModel = '';
 
+        // The LLM as last read from config, for the "LLM in use" row and the
+        // summary card — which must agree, being two views of one fact.
+        let _activeLlm = { name: 'no GGUF selected', backend: 'llama.cpp (GGUF)' };
+
+        // How to name the configured LLM. A local provider runs a GGUF file, so
+        // the file (not the repo) is what identifies it; an endpoint provider is
+        // named by whatever the server calls the model.
+        function describeLlm(llm) {
+            const local = (llm.provider || 'endpoint') === 'local';
+            return {
+                name: local ? (llm.gguf_file || llm.gguf_repo || 'no GGUF selected')
+                            : (llm.model || 'no model set'),
+                // For the summary card's Precision line, which names the runtime...
+                backend: local ? 'llama.cpp (GGUF)' : 'remote endpoint',
+                // ...and a short form for the in-use row, where the model name is
+                // already a .gguf and "(llama.cpp (GGUF))" nests parentheses.
+                where: local ? 'local' : 'remote endpoint',
+            };
+        }
+
         async function populateTranslationModelDropdown(selectedModel) {
             // updateConfigUI() rebuilds this list on every switch to the
             // Translation context and passes nothing. Without a default, the
@@ -1809,6 +1842,10 @@
                     _configuredTranslationModel = model;
                     await populateTranslationModelDropdown(model);
                     const s = settings.settings || {};
+                    // Derived before the handler runs: it renders the "LLM in use"
+                    // row from this, and it must not re-fetch to do so when the
+                    // operator merely flips the method select.
+                    _activeLlm = describeLlm(s.llm || {});
                     document.getElementById('config_translation_method').value = s.translation_method || 'nllb';
                     document.getElementById('config_translation_use_gpu').checked = s.use_gpu !== false;
                     document.getElementById('config_use_fp16').checked = s.use_fp16 === true;
@@ -1823,11 +1860,8 @@
                     // not running.
                     let modelName, backend;
                     if (s.translation_method === 'llm') {
-                        const llm = s.llm || {};
-                        modelName = llm.provider === 'local'
-                            ? (llm.gguf_file || llm.gguf_repo || 'no GGUF selected')
-                            : (llm.model || 'no model set');
-                        backend = llm.provider === 'local' ? 'llama.cpp (GGUF)' : 'remote endpoint';
+                        modelName = _activeLlm.name;
+                        backend = _activeLlm.backend;
                     } else {
                         modelName = model.split('/').pop() || model;
                         if (s.use_ctranslate2) backend = 'CTranslate2 (' + (s.ct2_compute_type && s.ct2_compute_type !== 'auto' ? s.ct2_compute_type : 'int8') + ')';
@@ -1867,14 +1901,43 @@
             });
             if (loadsNmt) syncCt2Fp16('config_use_ctranslate2', 'config_use_fp16');
 
+            // Name the control for what it is on this engine. Left as
+            // "Translation Model" on an LLM session, it read as the model doing
+            // the translating, so a box captioning through a GGUF appeared to be
+            // running MADLAD.
+            const label = document.getElementById('config_translation_model_label');
+            const hint = document.getElementById('config_translation_model_hint');
+            if (method === 'llm') {
+                label.textContent = 'Fallback model (NLLB/MADLAD)';
+                hint.textContent = 'Runs only when the LLM times out or returns a caption that fails validation.';
+            } else {
+                label.textContent = 'Translation Model';
+                hint.textContent = isNmt
+                    ? 'Select from downloaded NLLB & MADLAD models'
+                    : 'Not used — Whisper reuses the transcription model.';
+            }
+
+            // The engine that is actually translating, beside the control it is
+            // easily confused with.
+            const inUse = document.getElementById('config_llm_in_use');
+            if (method === 'llm') {
+                document.getElementById('config_llm_in_use_model').innerHTML =
+                    `${escapeHtml(_activeLlm.name)} <span style="opacity:0.75;">(${escapeHtml(_activeLlm.where)})</span>`;
+                inUse.style.display = '';
+            } else {
+                inUse.style.display = 'none';
+            }
+
             const notice = document.getElementById('config_translation_not_nmt');
             const text = document.getElementById('config_translation_not_nmt_text');
             if (isNmt) {
                 notice.style.display = 'none';
             } else {
                 notice.style.display = '';
+                // The hint under the dropdown now explains the fallback, so this
+                // says only what it alone can: where the LLM is configured.
                 text.innerHTML = method === 'llm'
-                    ? 'Translating with an <strong>LLM</strong>. Its model, provider and system prompt are set in <a href="/translation" style="color: var(--accent);">Translation Settings</a>, and the GGUF is downloaded under Translation Models below. The settings here choose the NLLB/MADLAD model that takes over when the LLM times out or returns a caption that fails validation — so they are worth setting.'
+                    ? 'Translating with an <strong>LLM</strong>. Its provider, system prompt and model are set in <a href="/translation" style="color: var(--accent);">Translation Settings</a>; GGUFs are downloaded under Translation Models below.'
                     : 'Translating with <strong>Whisper</strong>, which reuses the transcription model — no separate translation model is loaded, so the settings here are not in use.';
             }
         }
