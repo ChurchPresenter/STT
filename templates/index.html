@@ -85,6 +85,11 @@
          const maxWidth = urlParams.get('maxWidth') || '100';
          const verticalAlign = urlParams.get('verticalAlign') || 'top';  // top, middle, bottom
          const showMenu = urlParams.get('showMenu') !== 'false';
+         // "both" mode builds its panes with showMenu=false, but those panes are
+         // the only scrollable surfaces on the page, so the pill has to be allowed
+         // through to them. The parent sets jumpPill only when it has chrome of
+         // its own — a bare projected/OBS parent stays bare all the way down.
+         const allowJumpPill = showMenu || urlParams.get('jumpPill') === 'true';
          const uppercase = urlParams.get('uppercase') === 'true';
          const inProgressStyle = urlParams.get('inProgressStyle') || 'italic';
          const inProgressOpacity = numParam(urlParams, 'inProgressOpacity', 0.7);
@@ -121,6 +126,7 @@
            translationMode,
            translationLayout,
            showMenu,
+           allowJumpPill,
            hideInProgress,
            hideTranslateInProgress,
            hideMusicSegments,
@@ -228,6 +234,9 @@
           baseParams.delete('layout');
           baseParams.delete('inverse');
           baseParams.set('showMenu', 'false'); // Hide menu in iframes
+          // Each pane scrolls on its own, so each pane carries its own pill.
+          baseParams.delete('jumpPill');
+          if (showMenu) baseParams.set('jumpPill', 'true');
           baseParams.delete('audioStream');  // Parent handles audio — don't duplicate in iframes
           baseParams.delete('ttsAudio');
 
@@ -2081,6 +2090,7 @@
       $(document).ready(function() {
         const container = $('#table-container')[0];
         let programmaticScroll = false; // Flag to ignore programmatic scrolls
+        let userGestureUntil = 0;       // scroll events only count while an input gesture is live
 
         // Scroll to bottom on page load
         setTimeout(() => {
@@ -2091,12 +2101,12 @@
         // auto-scroll — otherwise the next caption yanks the view to the bottom
         // mid-sentence. The pill is the way back: while it is showing, the display
         // is deliberately not following the live edge, and one click resumes.
-        // Never offered on a bare output surface (showMenu=false), where there is
-        // nobody to click it and it would be captured into the projection.
+        // Never offered on a bare output surface, where there is nobody to click
+        // it and it would be captured into the projection.
         const jumpBtn = document.getElementById('jump-latest-btn');
         function updateJumpButton() {
           if (!jumpBtn) return;
-          const offer = !autoScrollEnabled && window.displayConfig?.showMenu !== false;
+          const offer = !autoScrollEnabled && window.displayConfig?.allowJumpPill !== false;
           jumpBtn.classList.toggle('visible', offer);
         }
         window.updateJumpButton = updateJumpButton;
@@ -2108,15 +2118,45 @@
             // way down, each of them "not at the bottom", which would flash the
             // pill back on for the length of the animation.
             container.scrollTop = container.scrollHeight;
+            // Close any gesture window still open from the scroll that led here,
+            // so the resumed auto-scroll's own movement cannot be mistaken for
+            // the user scrolling away again.
+            userGestureUntil = 0;
             updateJumpButton();
           });
         }
+
+        // Only a real input gesture may pause the auto-scroll. Inferring intent
+        // from scroll events alone made one click on the pill insufficient: the
+        // click resumes following, the next caption starts a *smooth* programmatic
+        // scroll, and that animation outlives its 300ms guard on any real scroll
+        // distance — its trailing events then read as "the user scrolled up" and
+        // the pill came straight back, so it took a second click to stick.
+        const GESTURE_WINDOW_MS = 700;  // covers momentum/rubber-band after the input ends
+        function markUserGesture() {
+          userGestureUntil = performance.now() + GESTURE_WINDOW_MS;
+        }
+        const SCROLL_KEYS = new Set(['ArrowUp', 'ArrowDown', 'PageUp', 'PageDown', 'Home', 'End', ' ', 'Spacebar']);
+        container.addEventListener('wheel', markUserGesture, { passive: true });
+        container.addEventListener('touchmove', markUserGesture, { passive: true });
+        // Scrollbar drags and arrow clicks land on the container itself.
+        container.addEventListener('pointerdown', markUserGesture);
+        document.addEventListener('keydown', function(e) {
+          if (SCROLL_KEYS.has(e.key)) markUserGesture();
+        });
 
         $(container).on('scroll', function() {
            // Ignore scroll events triggered by our own code
            if (programmaticScroll) {
              return;
            }
+           // ...and any scroll that no input gesture asked for.
+           if (performance.now() > userGestureUntil) {
+             return;
+           }
+           // A gesture that is still moving keeps the window open, so a long
+           // flick is not cut off halfway by the timeout.
+           markUserGesture();
 
            // Check if user is at bottom
            const scrollTop = container.scrollTop;
@@ -2133,6 +2173,10 @@
         // Expose programmaticScroll flag globally for typing animation
         window.setProgrammaticScroll = function(value) {
           programmaticScroll = value;
+          // A scroll we started ourselves ends the gesture window: whatever the
+          // user did last is over, and the smooth animation that follows must not
+          // inherit their intent.
+          if (value) userGestureUntil = 0;
         };
 
         // Hidden click zones for font size control
