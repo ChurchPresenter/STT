@@ -480,16 +480,51 @@
                             <small id="config_translation_not_nmt_text" style="color: var(--text-secondary);"></small>
                         </div>
 
-                        <!-- Which LLM is actually translating. Read-only: it is
-                             chosen in Translation Settings, which has the
-                             downloaded-GGUF dropdowns. Without this the panel
-                             showed only the NMT model, and an operator reading
-                             "Translation Model: madlad400-3b-mt" on an LLM
-                             session reasonably concluded MADLAD was running. -->
-                        <div id="config_llm_in_use" style="display:none; background: var(--info-bg, var(--bg-tertiary)); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 8px 12px; margin-bottom: 10px;">
-                            <small style="color: var(--text-secondary);">
-                                <strong>LLM in use:</strong> <span id="config_llm_in_use_model">—</span><br>
-                                Change it in <a href="/translation" style="color: var(--accent);">Translation Settings</a>.
+                        <!-- The LLM that actually translates. This is a model
+                             manager, so the model belongs here: sending the
+                             operator to another page to answer "which model is
+                             running" was the reason the panel read as though
+                             MADLAD were doing the work. Prompt, token budget and
+                             timeouts stay on the Translation Settings page —
+                             they are tuning, not model selection. -->
+                        <div id="config_llm_group" style="display:none;">
+                            <div class="form-group">
+                                <label for="config_llm_provider">LLM provider</label>
+                                <select id="config_llm_provider" onchange="onConfigLlmProviderChange()">
+                                    <option value="local">Local GGUF (in-process, llama.cpp)</option>
+                                    <option value="endpoint">OpenAI-compatible endpoint</option>
+                                </select>
+                                <small>Local runs a downloaded GGUF here with no server or extra port.</small>
+                            </div>
+
+                            <div id="config_llm_local_group">
+                                <div class="form-group">
+                                    <label for="config_llm_gguf_repo">GGUF model</label>
+                                    <select id="config_llm_gguf_repo" onchange="onConfigLlmRepoChange()">
+                                        <option value="">Loading downloaded GGUFs...</option>
+                                    </select>
+                                    <small id="config_llm_gguf_hint">Downloaded on this machine. Get more under 🧠 LLM Translation Models (GGUF) below.</small>
+                                </div>
+                                <div class="form-group">
+                                    <label for="config_llm_gguf_file">Quantisation</label>
+                                    <select id="config_llm_gguf_file"></select>
+                                    <small>Q4_K_M is the usual choice — smallest that still translates well.</small>
+                                </div>
+                            </div>
+
+                            <div id="config_llm_endpoint_group" style="display:none;">
+                                <div id="config_llm_endpoint_summary" style="background: var(--info-bg, var(--bg-tertiary)); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 8px 12px; margin-bottom: 10px;">
+                                    <small style="color: var(--text-secondary);">
+                                        <strong>Endpoint:</strong> <span id="config_llm_endpoint_text">—</span><br>
+                                        <strong>Model:</strong> <span id="config_llm_endpoint_model">—</span><br>
+                                        Set the URL, model name and any API key in <a href="/translation" style="color: var(--accent);">Translation Settings</a>.
+                                    </small>
+                                </div>
+                            </div>
+
+                            <small style="display:block; margin: -4px 0 12px; color: var(--text-secondary);">
+                                System prompt, token budget and timeouts live in
+                                <a href="/translation" style="color: var(--accent);">Translation Settings</a>.
                             </small>
                         </div>
 
@@ -1753,6 +1788,67 @@
         // summary card — which must agree, being two views of one fact.
         let _activeLlm = { name: 'no GGUF selected', backend: 'llama.cpp (GGUF)' };
 
+        // {repo: [{name, size_bytes}]} from /api/models/gguf-list — the GGUFs
+        // downloaded on THIS machine. Same source as the Translation Settings
+        // page, so the two panels can never offer different models.
+        let _ggufModels = {};
+
+        async function loadConfigGgufModels(selectRepo, selectFile) {
+            const repoSel = document.getElementById('config_llm_gguf_repo');
+            const hint = document.getElementById('config_llm_gguf_hint');
+            if (!repoSel) return;
+            try {
+                const data = await (await fetch('/api/models/gguf-list')).json();
+                _ggufModels = {};
+                (data.models || []).forEach(m => { _ggufModels[m.repo] = m.files || []; });
+                const repos = Object.keys(_ggufModels);
+                repoSel.innerHTML = repos.length
+                    ? repos.map(r => `<option value="${escapeHtml(r)}">${escapeHtml(r)}</option>`).join('')
+                    : '<option value="">No GGUF models downloaded</option>';
+                // A configured model that isn't on disk still has to show, or the
+                // panel would claim a different model than the one in config.
+                if (selectRepo && !repos.includes(selectRepo)) {
+                    const missing = document.createElement('option');
+                    missing.value = selectRepo;
+                    missing.textContent = selectRepo + ' (not downloaded)';
+                    repoSel.insertBefore(missing, repoSel.firstChild);
+                }
+                if (selectRepo) repoSel.value = selectRepo;
+                if (hint) {
+                    hint.textContent = repos.length
+                        ? 'Downloaded on this machine. Get more under 🧠 LLM Translation Models (GGUF) below.'
+                        : 'None downloaded yet — get one under 🧠 LLM Translation Models (GGUF) below.';
+                    hint.style.color = repos.length ? '' : 'var(--warning)';
+                }
+                onConfigLlmRepoChange(selectFile);
+            } catch (e) {
+                console.error('Failed to load GGUF models:', e);
+            }
+        }
+
+        function onConfigLlmRepoChange(selectFile) {
+            const repo = document.getElementById('config_llm_gguf_repo').value;
+            const fileSel = document.getElementById('config_llm_gguf_file');
+            const files = _ggufModels[repo] || [];
+            fileSel.innerHTML = files.length
+                ? files.map(f => `<option value="${escapeHtml(f.name)}">${escapeHtml(f.name)}` +
+                    (f.size_bytes ? ` — ${(f.size_bytes / 1e9).toFixed(1)} GB` : '') + '</option>').join('')
+                : '<option value="">—</option>';
+            if (selectFile && !files.some(f => f.name === selectFile)) {
+                const missing = document.createElement('option');
+                missing.value = selectFile;
+                missing.textContent = selectFile + ' (not downloaded)';
+                fileSel.insertBefore(missing, fileSel.firstChild);
+            }
+            if (selectFile) fileSel.value = selectFile;
+        }
+
+        function onConfigLlmProviderChange() {
+            const local = document.getElementById('config_llm_provider').value === 'local';
+            document.getElementById('config_llm_local_group').style.display = local ? '' : 'none';
+            document.getElementById('config_llm_endpoint_group').style.display = local ? 'none' : '';
+        }
+
         // How to name the configured LLM. A local provider runs a GGUF file, so
         // the file (not the repo) is what identifies it; an endpoint provider is
         // named by whatever the server calls the model.
@@ -1842,10 +1938,16 @@
                     _configuredTranslationModel = model;
                     await populateTranslationModelDropdown(model);
                     const s = settings.settings || {};
-                    // Derived before the handler runs: it renders the "LLM in use"
-                    // row from this, and it must not re-fetch to do so when the
-                    // operator merely flips the method select.
-                    _activeLlm = describeLlm(s.llm || {});
+                    // Derived before the handler runs: it renders the LLM block
+                    // from this, and must not re-fetch to do so when the operator
+                    // merely flips the method select.
+                    const llmCfg = s.llm || {};
+                    _activeLlm = describeLlm(llmCfg);
+                    document.getElementById('config_llm_provider').value = llmCfg.provider || 'endpoint';
+                    document.getElementById('config_llm_endpoint_text').textContent = llmCfg.endpoint || 'not set';
+                    document.getElementById('config_llm_endpoint_model').textContent = llmCfg.model || 'not set';
+                    onConfigLlmProviderChange();
+                    loadConfigGgufModels(llmCfg.gguf_repo || '', llmCfg.gguf_file || '');
                     document.getElementById('config_translation_method').value = s.translation_method || 'nllb';
                     document.getElementById('config_translation_use_gpu').checked = s.use_gpu !== false;
                     document.getElementById('config_use_fp16').checked = s.use_fp16 === true;
@@ -1917,49 +2019,64 @@
                     : 'Not used — Whisper reuses the transcription model.';
             }
 
-            // The engine that is actually translating, beside the control it is
-            // easily confused with.
-            const inUse = document.getElementById('config_llm_in_use');
-            if (method === 'llm') {
-                document.getElementById('config_llm_in_use_model').innerHTML =
-                    `${escapeHtml(_activeLlm.name)} <span style="opacity:0.75;">(${escapeHtml(_activeLlm.where)})</span>`;
-                inUse.style.display = '';
-            } else {
-                inUse.style.display = 'none';
-            }
+            // The LLM's own model selection, shown only on an LLM session.
+            document.getElementById('config_llm_group').style.display =
+                method === 'llm' ? '' : 'none';
 
+            // Nothing left to say for an LLM session: the model is chosen right
+            // below, its hint points at the GGUF downloads, the fallback control
+            // is labelled as the fallback, and the note names what is still on
+            // the Translation Settings page. Whisper still needs explaining —
+            // it is the one engine that loads no translation model at all.
             const notice = document.getElementById('config_translation_not_nmt');
             const text = document.getElementById('config_translation_not_nmt_text');
-            if (isNmt) {
+            if (isNmt || method === 'llm') {
                 notice.style.display = 'none';
             } else {
                 notice.style.display = '';
-                // The hint under the dropdown now explains the fallback, so this
-                // says only what it alone can: where the LLM is configured.
-                text.innerHTML = method === 'llm'
-                    ? 'Translating with an <strong>LLM</strong>. Its provider, system prompt and model are set in <a href="/translation" style="color: var(--accent);">Translation Settings</a>; GGUFs are downloaded under Translation Models below.'
-                    : 'Translating with <strong>Whisper</strong>, which reuses the transcription model — no separate translation model is loaded, so the settings here are not in use.';
+                text.innerHTML = 'Translating with <strong>Whisper</strong>, which reuses the transcription model — no separate translation model is loaded, so the settings here are not in use.';
             }
+        }
+
+        // What this panel would POST. Split out from the save so it can be read
+        // (and tested) without writing to a live server's config.
+        function buildTranslationConfigPayload(method, model) {
+            // Only the NMT engines need a model chosen here. Requiring one
+            // unconditionally made this panel unsavable on a box that translates
+            // with an LLM or Whisper and has no NMT model downloaded at all.
+            if (!model && (method === 'nllb' || method === 'madlad')) {
+                return { error: 'No translation model selected. Download one from the Model Library below.' };
+            }
+            const payload = {
+                translation_method: method,
+                use_gpu: document.getElementById('config_translation_use_gpu').checked,
+                use_fp16: document.getElementById('config_use_fp16').checked,
+                use_ctranslate2: document.getElementById('config_use_ctranslate2').checked
+            };
+            if (model) payload.translation_model = model;
+            if (method === 'llm') {
+                // Only the model selection. The server merges the llm block, so
+                // the prompt, token budget, timeouts and API key set on the
+                // Translation Settings page survive a save from here.
+                const provider = document.getElementById('config_llm_provider').value;
+                payload.llm = { provider };
+                if (provider === 'local') {
+                    payload.llm.gguf_repo = document.getElementById('config_llm_gguf_repo').value;
+                    payload.llm.gguf_file = document.getElementById('config_llm_gguf_file').value;
+                }
+            }
+            return payload;
         }
 
         async function saveTranslationConfig() {
             const method = document.getElementById('config_translation_method').value;
             const model = document.getElementById('config_translation_model').value;
-            // Only the NMT engines need a model chosen here. Requiring one
-            // unconditionally made this panel unsavable on a box that translates
-            // with an LLM or Whisper and has no NMT model downloaded at all.
-            if (!model && (method === 'nllb' || method === 'madlad')) {
-                showAlert('No translation model selected. Download one from the Model Library below.', 'error');
+            const payload = buildTranslationConfigPayload(method, model);
+            if (payload.error) {
+                showAlert(payload.error, 'error');
                 return;
             }
             try {
-                const payload = {
-                    translation_method: method,
-                    use_gpu: document.getElementById('config_translation_use_gpu').checked,
-                    use_fp16: document.getElementById('config_use_fp16').checked,
-                    use_ctranslate2: document.getElementById('config_use_ctranslate2').checked
-                };
-                if (model) payload.translation_model = model;
                 const response = await fetch('/api/translation/settings', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
