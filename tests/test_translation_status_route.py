@@ -31,7 +31,7 @@ def _cache_stub(size=0):
 
 
 def call_status(live_translation, *, local_llm=None, device=None, is_ct2=False,
-                model_loaded=True, whisper_model="large-v3"):
+                model_loaded=True, whisper_model="large-v3", trusted=(), a_pushed=None):
     """Run the route and return its JSON body as a plain dict."""
     ns = extract_definitions(
         "speech_to_text.py", ["get_translation_status"],
@@ -44,7 +44,9 @@ def call_status(live_translation, *, local_llm=None, device=None, is_ct2=False,
             "_is_trusted_translation_client": lambda ip: False,
             "_translation_clients": {},
             "_translation_clients_lock": threading.Lock(),
-            "_trusted_translation_clients": set(),
+            "_trusted_translation_clients": set(trusted),
+            "_a_pushed": dict(a_pushed or {"model": False, "language": False, "glossary": False}),
+            "_translation_client_ports": {},
             "_pending_pair_requests": {},
             "_live_translation_model": None,
             "_live_translation_device": device,
@@ -145,6 +147,35 @@ class TestNmtSessionUnchanged:
     @pytest.mark.parametrize("field", ["llm_provider", "llm_model", "llm_endpoint"])
     def test_carries_no_llm_claims(self, field):
         assert call_status(NMT, device="cuda")[field] is None
+
+
+class TestWhatMachineAControls:
+    """a_pushed — which settings a paired Machine A has actually taken over.
+
+    Machine B's settings page locks controls from this. It used to lock every
+    tagged control the moment any client paired, which shut B's operator out of
+    the LLM settings A never sends — on the box that is the only one running the
+    LLM. Being paired and being controlled are different things.
+    """
+
+    def test_a_pairing_alone_controls_nothing(self):
+        body = call_status(NMT, trusted=["192.168.2.62"])
+        assert body["trusted_clients"] == ["192.168.2.62"]
+        assert body["a_pushed"] == []
+
+    def test_reports_only_what_was_pushed(self):
+        body = call_status(NMT, trusted=["192.168.2.62"],
+                           a_pushed={"model": True, "language": False, "glossary": False})
+        assert body["a_pushed"] == ["model"]
+
+    def test_reports_several_and_stays_sorted(self):
+        body = call_status(NMT, trusted=["192.168.2.62"],
+                           a_pushed={"model": True, "language": True, "glossary": True})
+        assert body["a_pushed"] == ["glossary", "language", "model"]
+
+    def test_unpaired_machine_reports_nothing_controlled(self):
+        # No caller is paired, so the field must not leak a stale claim.
+        assert call_status(NMT)["a_pushed"] == []
 
 
 class TestWhisperSessionUnchanged:

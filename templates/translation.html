@@ -165,7 +165,7 @@
 
                 <!-- Enable/Disable Translation -->
                 <div class="checkbox-group">
-                    <input type="checkbox" id="trans_enabled" data-a-controlled onchange="toggleTranslation()">
+                    <input type="checkbox" id="trans_enabled" onchange="toggleTranslation()">
                     <label for="trans_enabled">Enable Live Translation</label>
                 </div>
 
@@ -186,7 +186,7 @@
 
                 <div class="form-group">
                     <label for="source_language">Source Language</label>
-                    <select id="source_language" data-a-controlled>
+                    <select id="source_language" data-a-controlled="language">
                         <option value="auto">Auto (use audio language setting)</option>
                         <!-- Additional languages populated dynamically -->
                     </select>
@@ -196,7 +196,7 @@
                 <hr class="divider">
 
                 <div class="checkbox-group">
-                    <input type="checkbox" id="translate_in_progress" data-a-controlled>
+                    <input type="checkbox" id="translate_in_progress">
                     <label for="translate_in_progress">Translate In-Progress Text</label>
                 </div>
                 <small style="color: var(--text-secondary); font-size: 0.75em; margin-left: 22px; display: block; margin-top: -5px; margin-bottom: 10px;">
@@ -291,7 +291,7 @@
 
                 <div class="form-group">
                     <label for="translation_method">Translation Method</label>
-                    <select id="translation_method" data-a-controlled onchange="onTranslationMethodChange()">
+                    <select id="translation_method" data-a-controlled="model" onchange="onTranslationMethodChange()">
                         <option value="nllb">NLLB Model (any language)</option>
                         <option value="madlad">MADLAD-400 (Google, any language)</option>
                         <option value="llm">LLM (instruction model, best terminology)</option>
@@ -323,7 +323,7 @@
 
                     <div class="form-group">
                         <label for="llm_provider">Provider</label>
-                        <select id="llm_provider" data-a-controlled onchange="onLlmProviderChange()">
+                        <select id="llm_provider" onchange="onLlmProviderChange()">
                             <option value="local">Local (in-process GGUF — no server needed)</option>
                             <option value="endpoint">Endpoint (any OpenAI-compatible server)</option>
                         </select>
@@ -333,26 +333,26 @@
                     <div id="llm_local_fields">
                         <div class="form-group">
                             <label for="llm_gguf_repo">GGUF Model</label>
-                            <select id="llm_gguf_repo" data-a-controlled onchange="onLlmGgufRepoChange()">
+                            <select id="llm_gguf_repo" onchange="onLlmGgufRepoChange()">
                                 <!-- Populated from downloaded GGUF models -->
                             </select>
                             <small style="color: var(--text-secondary); font-size: 0.75em;">Downloaded GGUF models. Add more from the <a href="/model-manager">Model Manager</a>.</small>
                         </div>
                         <div class="form-group">
                             <label for="llm_gguf_file">Quantisation</label>
-                            <select id="llm_gguf_file" data-a-controlled>
+                            <select id="llm_gguf_file">
                                 <!-- Populated from the files in the selected repo -->
                             </select>
                             <small style="color: var(--text-secondary); font-size: 0.75em;">Q4_K_M is the usual balance of size and quality.</small>
                         </div>
                         <div class="form-group">
                             <label for="llm_n_gpu_layers">GPU Layers</label>
-                            <input type="text" id="llm_n_gpu_layers" data-a-controlled placeholder="auto" style="width:100%;">
+                            <input type="text" id="llm_n_gpu_layers" placeholder="auto" style="width:100%;">
                             <small style="color: var(--text-secondary); font-size: 0.75em;">"auto" = all layers when an accelerator is present, none otherwise. 0 = CPU only (works everywhere; a caption is short). On an NVIDIA box already running Whisper, offloading all layers has been seen to crash the process — prefer the Endpoint provider there.</small>
                         </div>
                         <div class="form-group">
                             <label for="llm_n_ctx">Context Size: <span id="llmNCtxValue">2048</span></label>
-                            <input type="range" id="llm_n_ctx" data-a-controlled min="512" max="8192" value="2048" step="512"
+                            <input type="range" id="llm_n_ctx" min="512" max="8192" value="2048" step="512"
                                    oninput="document.getElementById('llmNCtxValue').textContent = this.value"
                                    style="width:100%;">
                         </div>
@@ -361,16 +361,16 @@
                     <div id="llm_endpoint_fields" style="display:none;">
                         <div class="form-group">
                             <label for="llm_endpoint">Endpoint URL</label>
-                            <input type="text" id="llm_endpoint" data-a-controlled placeholder="http://192.168.1.50:11434/api/chat" style="width:100%;">
+                            <input type="text" id="llm_endpoint" placeholder="http://192.168.1.50:11434/api/chat" style="width:100%;">
                             <small style="color: var(--text-secondary); font-size: 0.75em;">The full chat URL: Ollama <code>/api/chat</code>, OpenAI-compatible <code>/v1/chat/completions</code>.</small>
                         </div>
                         <div class="form-group">
                             <label for="llm_model">Model Name</label>
-                            <input type="text" id="llm_model" data-a-controlled placeholder="qwen2.5:7b-instruct" style="width:100%;">
+                            <input type="text" id="llm_model" placeholder="qwen2.5:7b-instruct" style="width:100%;">
                         </div>
                         <div class="form-group">
                             <label for="llm_api_key">API Key <span style="color: var(--text-secondary); font-weight: normal;">(optional)</span></label>
-                            <input type="password" id="llm_api_key" data-a-controlled autocomplete="off" style="width:100%;">
+                            <input type="password" id="llm_api_key" autocomplete="off" style="width:100%;">
                             <small style="color: var(--text-secondary); font-size: 0.75em;">Sent as a bearer token. Leave empty for a local server.</small>
                         </div>
                     </div>
@@ -385,7 +385,7 @@
                          reason an LLM beats an NMT model on this material. -->
                     <div class="form-group">
                         <label for="llm_system_prompt">System Prompt</label>
-                        <textarea id="llm_system_prompt" data-a-controlled rows="10" style="width:100%; font-family: inherit; font-size: 0.85em;" placeholder="Loading the prompt..."></textarea>
+                        <textarea id="llm_system_prompt" rows="10" style="width:100%; font-family: inherit; font-size: 0.85em;" placeholder="Loading the prompt..."></textarea>
                         <small style="color: var(--text-secondary); font-size: 0.75em;">
                             The exact text sent to the model — the tuning surface for terminology
                             (e.g. "вечеря = communion", "render biblical names as English Bibles do").
@@ -402,7 +402,7 @@
 
                     <div class="form-group">
                         <label for="llm_max_tokens">Max Tokens: <span id="llmMaxTokensValue">160</span></label>
-                        <input type="range" id="llm_max_tokens" data-a-controlled min="16" max="512" value="160" step="16"
+                        <input type="range" id="llm_max_tokens" min="16" max="512" value="160" step="16"
                                oninput="document.getElementById('llmMaxTokensValue').textContent = this.value"
                                style="width:100%;">
                         <small style="color: var(--text-secondary); font-size: 0.75em;">A caption is short — measured p50 19 tokens, p90 41. Headroom is for long sentences, not for commentary.</small>
@@ -410,7 +410,7 @@
 
                     <div class="form-group">
                         <label for="llm_timeout_ms">Caption Timeout: <span id="llmTimeoutValue">8000</span> ms</label>
-                        <input type="range" id="llm_timeout_ms" data-a-controlled min="500" max="30000" value="8000" step="500"
+                        <input type="range" id="llm_timeout_ms" min="500" max="30000" value="8000" step="500"
                                oninput="document.getElementById('llmTimeoutValue').textContent = this.value"
                                style="width:100%;">
                         <small style="color: var(--text-secondary); font-size: 0.75em;">Past this the caption falls back to the NMT model rather than arriving late.</small>
@@ -420,7 +420,7 @@
                 <div id="nllb_settings_group">
                 <div class="form-group" id="local_model_settings">
                     <label for="translation_model">Translation Model</label>
-                    <select id="translation_model" data-a-controlled>
+                    <select id="translation_model" data-a-controlled="model">
                         <!-- Populated dynamically from downloaded NLLB models -->
                     </select>
                     <small id="model_hint">Select from downloaded translation models</small>
@@ -436,7 +436,7 @@
 
                 <div class="form-group">
                     <label for="context_window">Context Window: <span id="contextWindowValue">1</span> segment(s)</label>
-                    <input type="range" id="context_window" data-a-controlled min="1" max="5" value="1" step="1"
+                    <input type="range" id="context_window" min="1" max="5" value="1" step="1"
                            oninput="document.getElementById('contextWindowValue').textContent = this.value"
                            style="width:100%;">
                     <small style="color: var(--text-secondary); font-size: 0.75em;">Combine adjacent segments for better context. 1 = no batching, 2-5 = more context but slower</small>
@@ -444,7 +444,7 @@
 
                 <div class="form-group">
                     <label for="num_beams">Beam Search Width: <span id="numBeamsValue">2</span></label>
-                    <input type="range" id="num_beams" data-a-controlled min="1" max="20" value="2" step="1"
+                    <input type="range" id="num_beams" min="1" max="20" value="2" step="1"
                            oninput="document.getElementById('numBeamsValue').textContent = this.value"
                            style="width:100%;">
                     <small style="color: var(--text-secondary); font-size: 0.75em;">Higher = better quality but slower. 1 = greedy (fastest), 5 = default, 10+ = high quality</small>
@@ -452,7 +452,7 @@
 
                 <div class="form-group">
                     <label for="length_penalty">Length Penalty: <span id="lengthPenaltyValue">1.0</span></label>
-                    <input type="range" id="length_penalty" data-a-controlled min="0.1" max="3.0" value="1.0" step="0.1"
+                    <input type="range" id="length_penalty" min="0.1" max="3.0" value="1.0" step="0.1"
                            oninput="document.getElementById('lengthPenaltyValue').textContent = parseFloat(this.value).toFixed(1)"
                            style="width:100%;">
                     <small style="color: var(--text-secondary); font-size: 0.75em;">&lt;1.0 = shorter translations, 1.0 = neutral, &gt;1.0 = longer translations</small>
@@ -460,7 +460,7 @@
 
                 <div class="form-group">
                     <label for="no_repeat_ngram_size">No Repeat N-gram Size: <span id="noRepeatValue">0</span></label>
-                    <input type="range" id="no_repeat_ngram_size" data-a-controlled min="0" max="10" value="0" step="1"
+                    <input type="range" id="no_repeat_ngram_size" min="0" max="10" value="0" step="1"
                            oninput="document.getElementById('noRepeatValue').textContent = this.value"
                            style="width:100%;">
                     <small style="color: var(--text-secondary); font-size: 0.75em;">Prevents repeating phrases. 0 = disabled, 3 = recommended for reducing repetition</small>
@@ -468,7 +468,7 @@
 
                 <div class="form-group">
                     <label for="repetition_penalty">Repetition Penalty: <span id="repPenaltyValue">1.0</span></label>
-                    <input type="range" id="repetition_penalty" data-a-controlled min="0.5" max="3.0" value="1.0" step="0.1"
+                    <input type="range" id="repetition_penalty" min="0.5" max="3.0" value="1.0" step="0.1"
                            oninput="document.getElementById('repPenaltyValue').textContent = parseFloat(this.value).toFixed(1)"
                            style="width:100%;">
                     <small style="color: var(--text-secondary); font-size: 0.75em;">1.0 = disabled. 1.1-1.5 = recommended to reduce repeated tokens</small>
@@ -479,7 +479,7 @@
 
                 <div class="form-group">
                     <label for="translation_alternatives">Translation Alternatives: <span id="translationAltsValue">3</span></label>
-                    <input type="range" id="translation_alternatives" data-a-controlled min="0" max="5" value="3" step="1"
+                    <input type="range" id="translation_alternatives" min="0" max="5" value="3" step="1"
                            oninput="document.getElementById('translationAltsValue').textContent = this.value"
                            style="width:100%;">
                     <small style="color: var(--text-secondary); font-size: 0.75em;">0 = disabled. Higher = more alternatives but slower translation</small>
@@ -512,7 +512,7 @@
                 <div id="tts_edge_options">
                     <div class="form-group">
                         <label for="tts_edge_voice">Voice</label>
-                        <select id="tts_edge_voice" data-a-controlled>
+                        <select id="tts_edge_voice">
                             <option value="en-US-AriaNeural">Loading voices...</option>
                         </select>
                         <small>Filter by translation target language. <button type="button" onclick="_edgeVoicesLoaded=false; loadEdgeVoices()" style="background: none; border: none; color: var(--accent); cursor: pointer; padding: 0; font-size: inherit;">Refresh voices</button></small>
@@ -527,7 +527,7 @@
                 <div id="tts_piper_options" style="display: none;">
                     <div class="form-group">
                         <label for="tts_piper_model">Piper Model</label>
-                        <select id="tts_piper_model" data-a-controlled>
+                        <select id="tts_piper_model">
                             <option value="">No models downloaded</option>
                         </select>
                         <small>Download models from <a href="/model-manager" style="color: var(--accent);">Model Manager</a></small>
@@ -632,7 +632,7 @@
                                oninput="filterLanguageGrid()">
                         <span id="language_count" class="language-count" aria-live="polite"></span>
                     </div>
-                    <div class="language-grid" id="language_grid" data-a-controlled aria-live="polite">
+                    <div class="language-grid" id="language_grid" data-a-controlled="language" aria-live="polite">
                         <!-- Populated dynamically -->
                     </div>
                     <div id="language_grid_empty" class="language-grid-empty" style="display:none;">No languages match your search.</div>

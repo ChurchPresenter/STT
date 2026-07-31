@@ -670,6 +670,15 @@ _trusted_translation_clients = set(
 )
 _session_glossary_override = None  # {"glossary": {...}} pushed by a paired Machine A for this session; None = use custom_dictionary.json
 
+# What a paired Machine A has actually taken over on this machine, as opposed to
+# what it could take over. A pairing on its own dictates nothing: A pushes a
+# model only when its picker names one — "(use Machine B's own model)" pushes
+# nothing — and pushes a language only when it switches one. Reported by
+# /api/translation/status so B's settings page locks the controls A really owns
+# instead of every control it might: locking on the mere existence of a pairing
+# shut the operator out of the LLM settings, which A never sends at all.
+_a_pushed = {"model": False, "language": False, "glossary": False}
+
 
 def _is_trusted_translation_client(ip):
     return ip in _trusted_translation_clients
@@ -6634,6 +6643,11 @@ def get_translation_status():
              "port": _translation_client_ports.get(ip)}
             for ip, ts in active.items()]
         result["trusted_clients"] = list(_trusted_translation_clients)
+        # Which settings a paired Machine A has actually taken over. Being paired
+        # is not the same as being controlled — A pushes a model only when its
+        # picker names one, and a language only when it switches one — so B's
+        # settings page locks these and leaves everything else editable.
+        result["a_pushed"] = sorted(k for k, v in _a_pushed.items() if v)
         # Where each paired client's own UI lives, so this machine can link back
         # to one that is paired but idle — the durable half of the port learned at
         # pairing. Only the paired IPs, so an unpaired stale entry cannot leak.
@@ -6645,6 +6659,7 @@ def get_translation_status():
         result["remote_clients"] = []
         result["remote_clients_detail"] = []
         result["trusted_clients"] = []
+        result["a_pushed"] = []
         result["pending_pairs"] = []
 
     return jsonify(result)
@@ -6959,6 +6974,7 @@ def translate_sync_dictionary():
         return jsonify({"error": "Not paired"}), 403
     global _session_glossary_override
     data = request.get_json() or {}
+    _a_pushed["glossary"] = True
     _session_glossary_override = {
         "glossary": data.get("dictionary", {}).get("glossary", {}),
         # Client's glossary-enabled flag (None from an older client → fall back
@@ -7062,6 +7078,8 @@ def translation_unpair():
     if not _trusted_translation_clients:
         global _session_glossary_override
         _session_glossary_override = None
+        # Nobody is paired, so nothing here is A's any more.
+        _a_pushed.update(model=False, language=False, glossary=False)
     socketio.emit("translation_pair_denied", {"ip": ip})
     return jsonify({"success": True})
 
@@ -7103,6 +7121,10 @@ def translate_remote_model_settings():
     global config
     data = request.get_json() or {}
     lt = config.setdefault("live_translation", {})
+    # A named a model, so from here on the model and engine are A's to set —
+    # recorded even when the value matches what is already configured, because
+    # what this flag reports is who owns the setting, not whether it changed.
+    _a_pushed["model"] = True
 
     # A only tells us WHICH model + engine to run. Precision/backend (fp16,
     # CTranslate2, GPU) are this machine's own hardware-local settings and are
@@ -7180,6 +7202,9 @@ def translate_remote_language():
     if "live_translation" not in config:
         config["live_translation"] = {}
     config["live_translation"]["target_language"] = new_language
+    # The target language is A's from here: it switches languages mid-service,
+    # and B's own setting would be overwritten again on the next switch.
+    _a_pushed["language"] = True
 
     # Auto-switch TTS voice/model on Machine B to match the new language
     new_tts_voice = None
@@ -7234,6 +7259,7 @@ def translation_unpair_me():
     if not _trusted_translation_clients:
         global _session_glossary_override
         _session_glossary_override = None
+        _a_pushed.update(model=False, language=False, glossary=False)
         if is_live_translation_model_loaded():
             import threading
             threading.Thread(target=unload_live_translation_model, daemon=True).start()

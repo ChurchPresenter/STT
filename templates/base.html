@@ -1034,29 +1034,51 @@
         // of those controls are made read-only. Only runs on pages that actually
         // have lockable controls (tagged data-a-controlled) — so display/index
         // pages add no polling.
+        //
+        // The tag carries WHICH setting A would own ("model", "language",
+        // "glossary"), and only the groups A has actually pushed are locked —
+        // reported as a_pushed by /api/translation/status. Locking everything the
+        // moment a client paired was wrong twice over: A pushes no model at all
+        // while its picker says "(use Machine B's own model)", and it never
+        // pushes the LLM settings, which left B's operator unable to choose the
+        // GGUF that B alone runs. An untagged group (bare attribute) stays locked
+        // whenever serving, so nothing silently unlocks by omission.
         (function () {
             var controlled = document.querySelectorAll('[data-a-controlled]');
             if (!controlled.length) return;
             var banner = document.getElementById('server-lock-banner');
             var FORMISH = /^(INPUT|SELECT|TEXTAREA|BUTTON)$/;
 
-            function setLocked(locked, ips, active) {
+            function setLocked(locked, ips, active, pushed) {
                 document.body.classList.toggle('serving-mode', locked);
                 document.body.classList.toggle('serving-active', locked && active);
+                var NAMES = { model: 'the model', language: 'the language', glossary: 'the glossary' };
+                var owned = (pushed || []).map(function (k) { return NAMES[k] || k; });
                 if (banner) {
-                    if (locked) {
+                    if (locked && owned.length) {
                         var who = 'Machine A (' + ips.join(', ') + ')';
-                        var tail = ' — these settings are controlled by Machine A while paired; unpair on the Translation page to edit.';
+                        var tail = ' — it is setting ' + owned.join(' and ') +
+                                   ' here; everything else stays yours. Unpair on the Translation page to take it back.';
                         banner.textContent = active
                             ? '🟢 ' + who + ' is live (transcribing)' + tail
                             : '⚪ ' + who + ' paired · idle' + tail;
+                    } else if (locked) {
+                        // Paired but dictating nothing — worth saying, since the
+                        // pairing is still why translations leave this machine.
+                        banner.textContent = (active ? '🟢' : '⚪') + ' Machine A (' + ips.join(', ') +
+                            ') is paired' + (active ? ' and live' : ' · idle') +
+                            ' — it is not setting anything here, so these settings are yours.';
                     } else {
                         banner.textContent = '';
                     }
                 }
                 controlled.forEach(function (el) {
                     var formish = FORMISH.test(el.tagName);
-                    if (locked) {
+                    // A bare data-a-controlled (no group) is locked whenever
+                    // serving; a grouped one only when A has pushed that group.
+                    var group = el.getAttribute('data-a-controlled') || '';
+                    var lockThis = locked && (!group || (pushed || []).indexOf(group) !== -1);
+                    if (lockThis) {
                         // Only disable what we disabled, so we never fight a page's
                         // own disable logic when we later unlock.
                         if (formish && !el.disabled) {
@@ -1080,7 +1102,7 @@
                     .then(function (d) {
                         var t = (d && d.trusted_clients) || [];
                         var active = ((d && d.remote_clients) || []).length > 0;
-                        setLocked(t.length > 0, t, active);
+                        setLocked(t.length > 0, t, active, (d && d.a_pushed) || []);
                     })
                     .catch(function () {});
             }
