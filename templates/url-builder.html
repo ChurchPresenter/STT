@@ -395,7 +395,7 @@
 
                 <div class="form-group">
                     <label for="url_inProgressOpacity">In-Progress Text Opacity</label>
-                    <input type="range" id="url_inProgressOpacity" min="0.5" max="1.0" step="0.1" value="0.7" oninput="updateCustomURL(); updateOpacityLabel()">
+                    <input type="range" id="url_inProgressOpacity" min="0.1" max="1.0" step="0.1" value="0.7" oninput="updateCustomURL(); updateOpacityLabel()">
                     <small id="opacityLabel" aria-live="polite">70% (slightly faded)</small>
                 </div>
 
@@ -487,6 +487,7 @@
                         <!-- Sample text shown when transcription is not running -->
                         <div id="preview-placeholder" class="preview-text">
                             Sample transcription text will appear here with your custom styling. This is how your text will look when you use the generated URL.
+                            <span id="preview-in-progress">And this is speech still being transcribed.</span>
                         </div>
                     </div>
                 </div>
@@ -642,10 +643,12 @@
             let description = '';
             if (percent === 100) {
                 description = '100% (matches normal text)';
-            } else if (percent === 70) {
-                description = '70% (slightly faded)';
+            } else if (percent >= 70) {
+                description = percent + '% (slightly faded)';
+            } else if (percent >= 40) {
+                description = percent + '% (clearly faded)';
             } else {
-                description = percent + '%';
+                description = percent + '% (very faint)';
             }
             document.getElementById('opacityLabel').textContent = description;
         }
@@ -800,6 +803,15 @@
             placeholder.style.paddingRight = paddingRight + 'px';
             placeholder.style.textAlign = alignment;
             placeholder.style.textTransform = uppercase ? 'uppercase' : 'none';
+
+            // The in-progress sample is the only way to judge opacity and style
+            // without a live session running behind the preview.
+            const inProgressSample = document.getElementById('preview-in-progress');
+            inProgressSample.style.opacity = document.getElementById('url_inProgressOpacity').value;
+            inProgressSample.style.fontStyle =
+                document.getElementById('url_inProgressStyle').value === 'normal' ? 'normal' : 'italic';
+            inProgressSample.style.display =
+                document.getElementById('url_hideInProgress').checked ? 'none' : 'inline';
 
             // Add a border to show preview bounds when transparent
             if (transparentBg) {
