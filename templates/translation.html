@@ -1698,16 +1698,29 @@
                 // when it isn't loaded yet, show B's CONFIGURED intent (use_ctranslate2/
                 // use_fp16) — otherwise an idle B looks like fp32 even with int8 set.
                 const isLoaded = d.model_loaded === true;
-                const usingCt2 = isLoaded ? (d.is_ctranslate2 === true) : (d.use_ctranslate2 === true);
-                let backend;
-                if (usingCt2) {
-                    const ct = (d.ct2_compute_type && d.ct2_compute_type !== 'auto') ? d.ct2_compute_type : 'int8';
-                    backend = 'CTranslate2 (' + ct + ')';
-                } else if (isLoaded && d.model_dtype) {
-                    let dt = d.model_dtype;                 // float16 / float32
-                    backend = (dt === 'float16') ? 'fp16' : (dt === 'float32') ? 'fp32' : dt;
+                const isLlm = d.translation_method === 'llm';
+                // An LLM session loads no torch or CTranslate2 model, so fp16 and
+                // int8 describe nothing that is running. B's status reports them
+                // as null for exactly that reason, and this fell through to its
+                // "fp32" default — announcing a precision for a GGUF.
+                let backendLabel = 'Precision/backend', backend;
+                if (isLlm) {
+                    backendLabel = 'Runtime';
+                    const host = String(d.llm_endpoint || '').replace(/^https?:\/\//i, '').split('/')[0];
+                    backend = d.llm_provider === 'local'
+                        ? 'llama.cpp (GGUF)'
+                        : ('OpenAI-compatible endpoint' + (host ? ' — ' + host : ''));
                 } else {
-                    backend = d.use_fp16 ? 'fp16' : 'fp32';
+                    const usingCt2 = isLoaded ? (d.is_ctranslate2 === true) : (d.use_ctranslate2 === true);
+                    if (usingCt2) {
+                        const ct = (d.ct2_compute_type && d.ct2_compute_type !== 'auto') ? d.ct2_compute_type : 'int8';
+                        backend = 'CTranslate2 (' + ct + ')';
+                    } else if (isLoaded && d.model_dtype) {
+                        let dt = d.model_dtype;                 // float16 / float32
+                        backend = (dt === 'float16') ? 'fp16' : (dt === 'float32') ? 'fp32' : dt;
+                    } else {
+                        backend = d.use_fp16 ? 'fp16' : 'fp32';
+                    }
                 }
                 const device = d.model_device ? String(d.model_device).toUpperCase() : '—';
                 const state = isLoaded ? '' : ' (configured — not loaded yet)';
@@ -1718,7 +1731,7 @@
                     ? '<div style="margin-bottom:2px;">ℹ️ A is not selecting B’s model — B uses its own (below):</div>' : '';
                 el.innerHTML = ownModel + '🖥️ Machine B ' + (isLoaded ? 'is running' : 'will run') + ': <strong>' + escapeHtml(model) + '</strong>' +
                     '<br>Engine: ' + escapeHtml(engine) +
-                    ' · Precision/backend: <strong>' + escapeHtml(backend) + '</strong>' +
+                    ' · ' + backendLabel + ': <strong>' + escapeHtml(backend) + '</strong>' +
                     ' · Device: ' + escapeHtml(device) + escapeHtml(state);
             } catch (e) {
                 el.innerHTML = '⚠️ Machine B unreachable — ' + escapeHtml(e.message || String(e));
