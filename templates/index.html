@@ -1410,6 +1410,8 @@
 
        function updateTranscriptionDisplay(data) {
          checkSessionChanged(data.session_id);
+         // Measured against what is on screen now, before this render adds to it.
+         if (window.refreshAutoScrollFromPosition) window.refreshAutoScrollFromPosition();
          const tableBody = $("#transcription-table-body");
          const table = document.getElementById('transcription-table');
          const emptyState = document.getElementById('empty-state');
@@ -1591,6 +1593,8 @@
 
        function updateTranslationDisplay(data) {
          checkSessionChanged(data.session_id);
+         // Measured against what is on screen now, before this render adds to it.
+         if (window.refreshAutoScrollFromPosition) window.refreshAutoScrollFromPosition();
          const mode = window.displayConfig?.translationMode || 'transcribe';
          const layout = window.displayConfig?.translationLayout || 'stacked';
 
@@ -2126,6 +2130,25 @@
           });
         }
 
+        const BOTTOM_SLACK_PX = 10;
+        function atLiveEdge() {
+          return container.scrollTop + container.clientHeight >= container.scrollHeight - BOTTOM_SLACK_PX;
+        }
+
+        // Scrolling back down to the bottom by hand resumes following — but the
+        // scroll handler alone could miss it: the last scroll event of the gesture
+        // may land in the same frame as a render that has just appended a line, so
+        // the reader is measured against content that arrived after they got there
+        // and stays pinned as "scrolled up" with nobody left to fire another
+        // event. Renders therefore re-check the position they inherited, before
+        // touching the DOM.
+        window.refreshAutoScrollFromPosition = function() {
+          if (autoScrollEnabled) return;
+          if (!atLiveEdge()) return;
+          autoScrollEnabled = true;
+          updateJumpButton();
+        };
+
         // Only a real input gesture may pause the auto-scroll. Inferring intent
         // from scroll events alone made one click on the pill insufficient: the
         // click resumes following, the next caption starts a *smooth* programmatic
@@ -2158,15 +2181,9 @@
            // flick is not cut off halfway by the timeout.
            markUserGesture();
 
-           // Check if user is at bottom
-           const scrollTop = container.scrollTop;
-           const scrollHeight = container.scrollHeight;
-           const clientHeight = container.clientHeight;
-           const isAtBottom = scrollTop + clientHeight >= scrollHeight - 10; // 10px threshold (more sensitive)
-
            // Scrolled up: stop following the live edge. Back at the bottom:
            // resume immediately, so returning by hand needs no click.
-           autoScrollEnabled = isAtBottom;
+           autoScrollEnabled = atLiveEdge();
            updateJumpButton();
         });
 
