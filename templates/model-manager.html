@@ -1019,9 +1019,13 @@
                         fileSelect.appendChild(noModelOption);
                     }
 
-                    // Restore selections after populating options
-                    if (liveValue) liveSelect.value = liveValue;
-                    if (fileValue) fileSelect.value = fileValue;
+                    // Restore selections after populating options. Via the
+                    // remembered configuration, so a configured model that is
+                    // not downloaded is shown as such instead of vanishing.
+                    rememberSelection('config_live_whisper_model', liveValue);
+                    rememberSelection('config_file_whisper_model', fileValue);
+                    applyConfiguredSelection('config_live_whisper_model');
+                    applyConfiguredSelection('config_file_whisper_model');
                 }
             } catch (error) {
                 console.error('Error loading Whisper models:', error);
@@ -1447,6 +1451,36 @@
             }
         }
 
+        // What each per-context model dropdown is configured to, from
+        // /api/models/manager. Remembered because these dropdowns are rebuilt
+        // from "what is downloaded" by three async loaders that finish after the
+        // configuration has been applied, and a rebuild drops the selection
+        // silently. That is why the panel opened blank on a machine whose
+        // configured model is not downloaded — it showed no setting at all
+        // instead of the setting it has.
+        const _configuredSelection = {};
+
+        function rememberSelection(id, value) {
+            if (value) _configuredSelection[id] = value;
+        }
+
+        // Re-apply after a rebuild. A configured model that is not downloaded is
+        // added to the list rather than dropped: the panel must show what this
+        // machine is set to, and Save must not quietly replace it with whatever
+        // happens to be on disk.
+        function applyConfiguredSelection(id) {
+            const sel = document.getElementById(id);
+            const want = _configuredSelection[id];
+            if (!sel || !want) return;
+            if (![...sel.options].some(o => o.value === want)) {
+                const opt = document.createElement('option');
+                opt.value = want;
+                opt.textContent = want + ' (not downloaded)';
+                sel.insertBefore(opt, sel.firstChild);
+            }
+            sel.value = want;
+        }
+
         function populateModelForms() {
             const liveModel = modelData.live_model;
             const fileModel = modelData.file_transcription_model;
@@ -1462,19 +1496,24 @@
             }
             document.getElementById('config_model_type').value = liveModelType;
 
-            // Set faster-whisper model selections
+            // Record every configured selection first, so each dropdown can be
+            // restored whenever its options are rebuilt — whatever order the
+            // loaders below finish in.
+            rememberSelection('config_live_whisper_model', liveModel.whisper?.model);
+            rememberSelection('config_file_whisper_model', fileModel.whisper?.model);
             if (liveModelType === 'faster_whisper') {
-                document.getElementById('config_live_faster_whisper_model').value = liveModel.whisper?.model || 'base';
+                rememberSelection('config_live_faster_whisper_model', liveModel.whisper?.model || 'base');
             }
             if (fileModel.type === 'whisper' && fileModel.backend === 'faster-whisper') {
-                document.getElementById('config_file_faster_whisper_model').value = fileModel.whisper?.model || 'base';
+                rememberSelection('config_file_faster_whisper_model', fileModel.whisper?.model || 'base');
             }
+            rememberSelection('config_live_downloaded_model',
+                liveModel.huggingface?.model_id || liveModel.custom?.model_path || '');
+            rememberSelection('config_file_downloaded_model',
+                fileModel.huggingface?.model_id || fileModel.custom?.model_path || '');
 
-            // Set downloaded model paths
-            const liveDownloadedPath = liveModel.huggingface?.model_id || liveModel.custom?.model_path || '';
-            document.getElementById('config_live_downloaded_model').value = liveDownloadedPath;
-            const fileDownloadedPath = fileModel.huggingface?.model_id || fileModel.custom?.model_path || '';
-            document.getElementById('config_file_downloaded_model').value = fileDownloadedPath;
+            ['config_live_faster_whisper_model', 'config_file_faster_whisper_model',
+             'config_live_downloaded_model', 'config_file_downloaded_model'].forEach(applyConfiguredSelection);
 
             // Load whisper dropdowns with correct selection (async, after options are populated)
             loadAvailableWhisperModels(
@@ -1614,6 +1653,8 @@
                         liveDownloadedSelect.innerHTML = '<option value="">No models downloaded</option>';
                         fileDownloadedSelect.innerHTML = '<option value="">No models downloaded</option>';
                     }
+                    applyConfiguredSelection('config_live_downloaded_model');
+                    applyConfiguredSelection('config_file_downloaded_model');
                 }
             } catch (error) {
                 console.error('Error loading models:', error);
@@ -1648,6 +1689,8 @@
                         liveSelect.innerHTML = '<option value="">No faster-whisper models downloaded</option>';
                         fileSelect.innerHTML = '<option value="">No faster-whisper models downloaded</option>';
                     }
+                    applyConfiguredSelection('config_live_faster_whisper_model');
+                    applyConfiguredSelection('config_file_faster_whisper_model');
                 }
             } catch (error) {
                 console.error('Error loading faster-whisper models:', error);
