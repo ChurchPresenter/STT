@@ -442,7 +442,7 @@ def find_files_to_move(patterns, working_dir):
 
     return files_to_move
 
-def execute_file_move(config_getter):
+def execute_file_move(config_getter, working_dir=None):
     """
     Execute file moving operation synchronously
 
@@ -451,6 +451,9 @@ def execute_file_move(config_getter):
 
     Args:
         config_getter: Function that returns the current config dict
+        working_dir: Directory the source patterns are relative to — the data
+            directory holding _AUTOMATIC_BACKUP. Callers must pass it; the
+            fallback below only exists for older callers and cannot be trusted.
 
     Returns:
         dict: {
@@ -487,9 +490,18 @@ def execute_file_move(config_getter):
         delete_source = mover_config.get('delete_source', True)
         preserve_structure = mover_config.get('preserve_structure', True)
 
-        # Resolve source patterns against APP_DIR (where backups now live in compiled
-        # builds) instead of the launch directory. Mirrors audio_capture.py's lookup.
-        working_dir = getattr(sys.modules.get('speech_to_text'), 'APP_DIR', None) or os.path.dirname(os.path.abspath(__file__))
+        # Source patterns are relative to the data directory, which the caller
+        # knows and this module must not guess. It used to reach into
+        # sys.modules['speech_to_text'].APP_DIR — but the server runs the
+        # monolith as a script, so that module is registered as __main__ and the
+        # lookup always returned None. The fallback then pointed at stt/ itself,
+        # where no backup has ever lived, and every run reported "Moved 0 files"
+        # against a destination it had just successfully reached.
+        if not working_dir:
+            main_mod = sys.modules.get('speech_to_text') or sys.modules.get('__main__')
+            working_dir = (getattr(main_mod, 'APP_DIR', None)
+                           or os.path.dirname(os.path.abspath(__file__)))
+            print(f"[EXECUTE] No working_dir passed; guessed {working_dir}", flush=True)
         base_dirs = get_base_directories_from_patterns(patterns, working_dir)
 
         # Test destination accessibility
@@ -560,7 +572,7 @@ def execute_file_move(config_getter):
             'message': error_msg
         }
 
-def execute_file_move_now(config_getter):
+def execute_file_move_now(config_getter, working_dir=None):
     """
     Execute file moving immediately in the current thread
 
@@ -570,6 +582,7 @@ def execute_file_move_now(config_getter):
 
     Args:
         config_getter: Function that returns the current config dict
+        working_dir: Directory the source patterns are relative to
 
     Returns:
         dict: Result from execute_file_move()
@@ -577,7 +590,7 @@ def execute_file_move_now(config_getter):
     logger.info("Direct file move execution requested")
     print("[FILE MOVER] Executing file move directly...", flush=True)
 
-    result = execute_file_move(config_getter)
+    result = execute_file_move(config_getter, working_dir)
 
     if result['success']:
         print(f"[FILE MOVER] ✓ Complete: Moved {result['moved']}, Failed {result['failed']}", flush=True)

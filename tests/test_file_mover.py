@@ -194,3 +194,70 @@ class TestExecuteFileMove:
     def test_execute_now_passthrough(self, app_dir):
         result = execute_file_move_now(lambda: mover_config("", []))
         assert result["success"] is False
+
+
+class TestWorkingDirIsPassedIn:
+    """The regression: patterns resolved against a directory nobody writes to.
+
+    The server runs the monolith as a script, so it is registered as __main__ and
+    ``sys.modules['speech_to_text']`` does not exist. The old lookup therefore
+    always returned None and fell back to the stt/ package directory, where no
+    backup has ever lived — every run reported "Moved 0 files" while cheerfully
+    confirming the destination was reachable. The tests missed it because this
+    file's fixture installs a fake ``speech_to_text`` module, which is precisely
+    the thing production does not have.
+    """
+
+    def test_the_passed_directory_is_what_patterns_resolve_against(self, tmp_path, monkeypatch):
+        monkeypatch.delitem(sys.modules, "speech_to_text", raising=False)
+        data_dir = tmp_path / "data"
+        (data_dir / "_AUTOMATIC_BACKUP" / "2026" / "07").mkdir(parents=True)
+        (data_dir / "_AUTOMATIC_BACKUP" / "2026" / "07" / "a.db").write_text("x")
+        dest = tmp_path / "dest"
+
+        result = execute_file_move(
+            lambda: mover_config(str(dest), ["_AUTOMATIC_BACKUP/**/*"]), str(data_dir))
+
+        assert result["success"] is True
+        assert (result["moved"], result["failed"]) == (1, 0)
+        assert (dest / "_AUTOMATIC_BACKUP" / "2026" / "07" / "a.db").exists()
+
+    def test_it_wins_over_whatever_sys_modules_says(self, tmp_path, monkeypatch):
+        # A stale or wrong module global must not override an explicit path.
+        monkeypatch.setitem(sys.modules, "speech_to_text",
+                            types.SimpleNamespace(APP_DIR=str(tmp_path / "wrong")))
+        data_dir = tmp_path / "right"
+        (data_dir / "backup").mkdir(parents=True)
+        (data_dir / "backup" / "a.db").write_text("x")
+        dest = tmp_path / "dest"
+
+        result = execute_file_move(
+            lambda: mover_config(str(dest), ["backup/*.db"]), str(data_dir))
+
+        assert result["moved"] == 1
+        assert (dest / "backup" / "a.db").exists()
+
+    def test_execute_now_forwards_it(self, tmp_path, monkeypatch):
+        monkeypatch.delitem(sys.modules, "speech_to_text", raising=False)
+        data_dir = tmp_path / "data"
+        (data_dir / "backup").mkdir(parents=True)
+        (data_dir / "backup" / "a.db").write_text("x")
+        dest = tmp_path / "dest"
+
+        result = execute_file_move_now(
+            lambda: mover_config(str(dest), ["backup/*.db"]), str(data_dir))
+
+        assert result["moved"] == 1
+
+    def test_a_run_as_script_can_still_find_app_dir_on_main(self, tmp_path, monkeypatch):
+        """Fallback for callers that pass nothing: __main__ is where APP_DIR lives."""
+        monkeypatch.delitem(sys.modules, "speech_to_text", raising=False)
+        main = sys.modules["__main__"]
+        monkeypatch.setattr(main, "APP_DIR", str(tmp_path), raising=False)
+        (tmp_path / "backup").mkdir()
+        (tmp_path / "backup" / "a.db").write_text("x")
+        dest = tmp_path / "dest"
+
+        result = execute_file_move(lambda: mover_config(str(dest), ["backup/*.db"]))
+
+        assert result["moved"] == 1

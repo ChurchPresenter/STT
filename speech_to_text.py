@@ -818,6 +818,10 @@ from stt.llm_translate import (
     extract_chat_text as _llm_extract_text,
     validate_translation as _llm_validate,
 )
+from stt.db_maintenance import (
+    checkpoint_and_release as _db_checkpoint_and_release,
+    sweep_orphaned_sidecars as _db_sweep_sidecars,
+)
 from stt.session_meta import (
     append_changes as _session_meta_append,
     append_new_changes as _session_meta_append_new,
@@ -9235,6 +9239,19 @@ def create_folder():
         return jsonify({"success": False, "error": str(e)}), 500
 
 
+@app.route("/api/file-manager/cleanup-sidecars", methods=["POST"])
+def file_manager_cleanup_sidecars():
+    """Retire -wal/-shm files left beside finished session databases.
+
+    Runs automatically at startup; exposed here so an operator who notices them
+    can clear them without waiting for a restart, and see what happened.
+    """
+    if not check_ip_whitelist():
+        return jsonify({"success": False, "error": "Access Denied"}), 403
+    result = sweep_db_sidecars()
+    return jsonify({"success": True, **result})
+
+
 @app.route("/api/file-manager/hidden-items", methods=["GET"])
 def get_hidden_items():
     """API endpoint to get list of hidden files/folders"""
@@ -9640,7 +9657,7 @@ def trigger_file_mover_endpoint():
     try:
         # Use the core file move function for consistency
         set_file_mover_running("manual")
-        result = execute_file_move(lambda: config)
+        result = execute_file_move(lambda: config, APP_DIR)
         set_file_mover_result("manual", result)
 
         if not result['success']:
@@ -17656,7 +17673,7 @@ def thread1_function(ts, cq, cfq, cal_state, cal_data, cal_step1, asq):
                         set_file_mover_running("auto")
                         sleep(10)
                         print("[FILE MOVER] Executing file move after final cleanup...")
-                        result = execute_file_move_now(lambda cfg=current_config: cfg)
+                        result = execute_file_move_now(lambda cfg=current_config: cfg, APP_DIR)
                         set_file_mover_result("auto", result)
                         if result['success']:
                             print(f"[FILE MOVER] OK: Moved {result['moved']} files")
@@ -17681,6 +17698,53 @@ def thread1_function(ts, cq, cfq, cal_state, cal_data, cal_step1, asq):
     except KeyboardInterrupt:
         print("Thread 1 received KeyboardInterrupt")
         os._exit(0)
+
+
+def _sidecar_sweep_dirs():
+    """Directories a session database can live in: the backup tree and any
+    configured custom database path."""
+    dirs = [BACKUP_DIR]
+    custom = (config.get("database", {}).get("path") or "").strip()
+    if custom:
+        dirs.append(custom)
+    return [d for d in dirs if d and os.path.isdir(d)]
+
+
+def sweep_db_sidecars():
+    """Retire -wal/-shm files left beside finished session databases.
+
+    They survive when the *process* is stopped mid-session: the shutdown handler
+    terminates the worker before it reaches its own end-of-session checkpoint,
+    so the sidecars are never retired and nothing sweeps them afterwards. A
+    service restart (an auto-update, say) landing mid-session is the usual cause,
+    which is why it happens only sometimes.
+
+    Never touches the live session, and never deletes a WAL — see
+    stt/db_maintenance.py for why that distinction matters.
+    """
+    try:
+        active = None
+        try:
+            active = transcription_state.get("db_name") if transcription_state else None
+        except Exception:
+            pass  # a torn-down state proxy is not a reason to skip housekeeping
+
+        result = _db_sweep_sidecars(
+            _sidecar_sweep_dirs(),
+            skip_paths=[p for p in (active,) if p],
+            # A session that stopped moments ago may still be having its SRT
+            # written by another thread; leave it for the next sweep.
+            min_age_s=120,
+        )
+        if result["scanned"]:
+            print(f"[WAL-SWEEP] {result['cleaned']} cleaned, "
+                  f"{result['skipped_active']} active, {result['skipped_recent']} recent, "
+                  f"{result['failed']} failed", flush=True)
+        return result
+    except Exception as e:
+        print(f"[WAL-SWEEP] Sweep failed: {e}", flush=True)
+        return {"scanned": 0, "cleaned": 0, "skipped_active": 0,
+                "skipped_recent": 0, "failed": 0, "errors": [str(e)]}
 
 
 def cleanup_old_partials():
@@ -17736,6 +17800,10 @@ def thread2_function():
 
         # Housekeeping off the boot path: strip expired partial rows from old sessions
         threading.Thread(target=cleanup_old_partials, daemon=True).start()
+
+        # Retire sidecars the previous run could not: a process stopped
+        # mid-session never reaches the worker's end-of-session checkpoint.
+        threading.Thread(target=sweep_db_sidecars, daemon=True).start()
 
         # Start the background task for emitting transcriptions
         socketio.start_background_task(emit_new_entries)
