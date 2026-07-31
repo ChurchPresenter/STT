@@ -4,6 +4,19 @@
 {% block page_title %}Model Manager{% endblock %}
 
 {% block extra_css %}
+        /* Two controls to a row where they are halves of one choice (repo +
+           quantisation, engine + fallback). Wraps to one column when the
+           column is too narrow to read them side by side. */
+        .config-pair {
+            display: flex;
+            gap: 14px;
+            flex-wrap: wrap;
+        }
+        .config-pair > .form-group {
+            flex: 1 1 220px;
+            min-width: 0;
+        }
+
         /* Model Manager Panel */
         .model-manager-panel {
             display: flex;
@@ -497,7 +510,7 @@
                                 <small>Local runs a downloaded GGUF here with no server or extra port.</small>
                             </div>
 
-                            <div id="config_llm_local_group">
+                            <div id="config_llm_local_group" class="config-pair">
                                 <div class="form-group">
                                     <label for="config_llm_gguf_repo">GGUF model</label>
                                     <select id="config_llm_gguf_repo" onchange="onConfigLlmRepoChange()">
@@ -542,19 +555,23 @@
                             </label>
                             <small>Disable to run the translation model on CPU, freeing GPU memory for transcription. Reloads the model.</small>
                         </div>
-                        <div class="form-group">
-                            <label style="display: flex; align-items: center; gap: 8px; cursor: pointer;">
-                                <input type="checkbox" id="config_use_fp16" style="width:auto;">
-                                Half precision (fp16) on GPU
-                            </label>
-                            <small>Faster and ~half the VRAM (GPU only). MPS fp16 can occasionally garble output — turn off if translations look wrong. Ignored when CTranslate2 is on. Reloads the model.</small>
-                        </div>
-                        <div class="form-group">
-                            <label style="display: flex; align-items: center; gap: 8px; cursor: pointer;">
-                                <input type="checkbox" id="config_use_ctranslate2" style="width:auto;" onchange="syncCt2Fp16('config_use_ctranslate2','config_use_fp16')">
-                                Use CTranslate2 (int8)
-                            </label>
-                            <small>int8 CPU backend for NLLB &amp; MADLAD — much smaller/faster (e.g. MADLAD-3B in ~3&nbsp;GB), recommended for low-RAM machines like a 16&nbsp;GB Mac. Converts to int8 once on first use (briefly needs ~model-size RAM). No Apple Metal (CPU int8 there). Reloads the model.</small>
+                        <!-- fp16 and int8 are mutually exclusive (syncCt2Fp16),
+                             so they belong side by side rather than stacked. -->
+                        <div class="config-pair">
+                            <div class="form-group">
+                                <label style="display: flex; align-items: center; gap: 8px; cursor: pointer;">
+                                    <input type="checkbox" id="config_use_fp16" style="width:auto;">
+                                    Half precision (fp16) on GPU
+                                </label>
+                                <small>Faster and ~half the VRAM (GPU only). MPS fp16 can occasionally garble output — turn off if translations look wrong. Ignored when CTranslate2 is on. Reloads the model.</small>
+                            </div>
+                            <div class="form-group">
+                                <label style="display: flex; align-items: center; gap: 8px; cursor: pointer;">
+                                    <input type="checkbox" id="config_use_ctranslate2" style="width:auto;" onchange="syncCt2Fp16('config_use_ctranslate2','config_use_fp16')">
+                                    Use CTranslate2 (int8)
+                                </label>
+                                <small>int8 CPU backend for NLLB &amp; MADLAD — much smaller/faster (e.g. MADLAD-3B in ~3&nbsp;GB), recommended for low-RAM machines like a 16&nbsp;GB Mac. Converts to int8 once on first use (briefly needs ~model-size RAM). No Apple Metal (CPU int8 there). Reloads the model.</small>
+                            </div>
                         </div>
                     </div>
 

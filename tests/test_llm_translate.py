@@ -294,6 +294,31 @@ class TestScanGgufModels:
         self._make(tmp_path, "google--madlad400-3b-mt", "model.safetensors")
         assert scan_gguf_models(str(tmp_path)) == []
 
+    def test_transformers_model_shipping_ggufs_is_omitted(self, tmp_path):
+        """MADLAD's own repo ships GGUFs beside its safetensors.
+
+        Downloading it as a translation model therefore offered
+        "madlad400-3b-mt" in the LLM picker — an NMT model with no chat
+        template, which cannot answer a chat-completion request at all.
+        """
+        self._make(tmp_path, "google--madlad400-3b-mt",
+                   "model.safetensors", "model-q4k.gguf", "config.json")
+        assert scan_gguf_models(str(tmp_path)) == []
+
+    @pytest.mark.parametrize("weights", ["model.safetensors", "pytorch_model.bin",
+                                          "flax_model.msgpack", "tf_model.h5"])
+    def test_any_transformers_weight_format_disqualifies_the_directory(self, tmp_path, weights):
+        self._make(tmp_path, "some--repo", weights, "m-Q4_K_M.gguf")
+        assert scan_gguf_models(str(tmp_path)) == []
+
+    def test_a_real_gguf_release_still_lists(self, tmp_path):
+        # Metadata alongside the quantisations is normal and must not disqualify it.
+        self._make(tmp_path, "bartowski--Qwen2.5-7B-Instruct-GGUF",
+                   "Qwen2.5-7B-Instruct-Q4_K_M.gguf", "README.md", "config.json",
+                   ".gitattributes")
+        found = scan_gguf_models(str(tmp_path))
+        assert [m["repo"] for m in found] == ["bartowski/Qwen2.5-7B-Instruct-GGUF"]
+
     def test_missing_directory_is_not_an_error(self, tmp_path):
         assert scan_gguf_models(str(tmp_path / "nope")) == []
 

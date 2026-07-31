@@ -184,6 +184,11 @@ def local_model_path(models_dir: str, gguf_repo: str, gguf_file: str) -> str:
     return os.path.join(models_dir, gguf_repo.replace("/", "--"), gguf_file)
 
 
+# Weight files that mark a directory as a transformers model rather than a
+# standalone GGUF release.
+_TRANSFORMERS_WEIGHTS = (".safetensors", ".bin", ".msgpack", ".h5")
+
+
 def scan_gguf_models(models_dir: str) -> List[Dict[str, Any]]:
     """Downloaded GGUF models as [{repo, files: [{name, size_bytes}]}], repo-sorted.
 
@@ -191,6 +196,15 @@ def scan_gguf_models(models_dir: str) -> List[Dict[str, Any]]:
     replaced by "--", holding one or more quantisations. Only directories that
     actually contain a .gguf are reported, so a half-deleted or unrelated model
     directory does not appear as an empty choice in the picker.
+
+    A directory that also holds transformers weights is skipped even when it does
+    contain .gguf files. google/madlad400-3b-mt is the case that forced this: the
+    HuggingFace repo ships model-q2k/q3k/q4k.gguf beside model.safetensors, so
+    downloading MADLAD as a translation model put "madlad400-3b-mt" in the LLM
+    picker. It is an NMT model with no chat template — selecting it would send
+    chat-completion requests to something that cannot answer them. A genuine GGUF
+    release (bartowski, ggml-org, TheBloke) ships .gguf and metadata, no weights
+    in any other format.
 
     A missing or unreadable models directory yields [] rather than raising — the
     caller is a settings page that must still render.
@@ -208,6 +222,8 @@ def scan_gguf_models(models_dir: str) -> List[Dict[str, Any]]:
         try:
             names = sorted(os.listdir(path))
         except OSError:
+            continue
+        if any(n.lower().endswith(_TRANSFORMERS_WEIGHTS) for n in names):
             continue
         for name in names:
             if not name.lower().endswith(".gguf"):
