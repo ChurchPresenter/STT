@@ -40,6 +40,24 @@ def resolve_sidecars(db_path: str) -> List[str]:
             if os.path.exists(db_path + suffix)]
 
 
+# Every SQLite database begins with this, including one whose pages are later
+# corrupt. Checking it costs one read and keeps us from *opening* a file that is
+# not ours — which matters more than it sounds: on sqlite 3.50, merely opening
+# and closing a file that has a stray "-wal" beside it deletes that sidecar,
+# whatever the caller intended. Refusing to open is the only way to leave a
+# foreign file untouched.
+_SQLITE_MAGIC = b"SQLite format 3\x00"
+
+
+def looks_like_sqlite(path: str) -> bool:
+    """Whether ``path`` starts with the SQLite file header."""
+    try:
+        with open(path, "rb") as handle:
+            return handle.read(len(_SQLITE_MAGIC)) == _SQLITE_MAGIC
+    except OSError:
+        return False
+
+
 def checkpoint_and_release(db_path: str, timeout: float = 5.0) -> bool:
     """Fold the WAL into ``db_path`` and retire the sidecars.
 
@@ -67,9 +85,16 @@ def checkpoint_and_release(db_path: str, timeout: float = 5.0) -> bool:
     """
     if not db_path or not os.path.isfile(db_path):
         return False
+    if not looks_like_sqlite(db_path):
+        return False  # not ours; opening it would itself remove its sidecar
     conn = None
     try:
         conn = sqlite3.connect(db_path, timeout=timeout, isolation_level=None)
+        # Prove it is readable before changing anything about it: connect is
+        # lazy and PRAGMAs do not always touch the file, so a database with a
+        # valid header but corrupt pages would otherwise reach the journal-mode
+        # switch. Reading the schema is the cheapest statement that must hit it.
+        conn.execute("SELECT count(*) FROM sqlite_master").fetchone()
         # Opening already recovered the WAL; this writes it into the main file.
         conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
         # And this removes it, having nothing left to preserve.
