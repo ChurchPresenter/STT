@@ -222,3 +222,20 @@ def test_query_exclude_paths(log):
 
     # no exclusion returns everything
     assert len(log.query()) == 5
+
+
+def test_synchronous_is_normal_not_full(tmp_path):
+    """An access log must not fsync on every request.
+
+    WAL alone leaves synchronous at FULL. With a display client and the health page
+    polling, a service is thousands of fsyncs on the same disk the session audio is being
+    written to. NORMAL is what the session database itself uses; the worst case it admits
+    is losing the last few log rows on a power cut.
+    """
+    log = RequestLog(str(tmp_path / "access.db"))
+    try:
+        mode = log._conn.execute("PRAGMA synchronous").fetchone()[0]
+        assert mode == 1, f"expected NORMAL (1), got {mode}"
+        assert log._conn.execute("PRAGMA journal_mode").fetchone()[0].lower() == "wal"
+    finally:
+        log.close()

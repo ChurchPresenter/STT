@@ -3878,6 +3878,22 @@ def _access_log_enabled():
         return False
 
 
+def _access_log_skip_polling():
+    """Whether to drop dashboard-polling requests before they are written.
+
+    The log already knows these paths are noise — /api/logs filters them out via
+    POLLING_LOG_PATHS whenever hide_polling is set, which the logs page sends by default.
+    Writing and fsyncing a row only to hide it again is pure cost: an operator with the
+    health and live-settings pages open generates around 150 rows a minute, and they
+    displace the real requests inside the 50,000-row cap. Set false to log them anyway
+    when diagnosing the polling itself. Read fresh so a config change takes effect
+    without a restart."""
+    try:
+        return bool((config.get("access_log", {}) or {}).get("skip_polling_paths", True))
+    except Exception:
+        return True
+
+
 def _record_socket_event(event_name, kind):
     """Log a SocketIO connect/disconnect or action. Best-effort, never raises."""
     if request_logger is None or not _access_log_enabled():
@@ -4359,7 +4375,8 @@ def _access_log_record(response):
     try:
         if request_logger is not None and _access_log_enabled():
             path = request.path or ""
-            if not (path.startswith("/static/") or path.startswith("/socket.io/")):
+            if not (path.startswith("/static/") or path.startswith("/socket.io/")
+                    or (_access_log_skip_polling() and path in POLLING_LOG_PATHS)):
                 t0 = getattr(g, "_access_log_t0", None)
                 duration_ms = round((time.perf_counter() - t0) * 1000.0, 2) if t0 is not None else None
                 request_logger.log(
@@ -15141,7 +15158,14 @@ def emit_translated_entries():
                     try:
                         current_db = _ts_get("db_name")
                         if current_db and os.path.exists(current_db):
-                            with sqlite3.connect(current_db) as _tconn:
+                            # timeout/busy_timeout match every other short-lived writer here
+                            # (e.g. /api/transcription/correct). The transcription worker holds
+                            # the session's long-lived connection, so a partial snapshot or a
+                            # finalize batch can be mid-write when this lands; on the default
+                            # 5s this raised "database is locked" instead of waiting, and a lost
+                            # write leaves the row NULL to be retried every cycle thereafter.
+                            with sqlite3.connect(current_db, timeout=30.0) as _tconn:
+                                _tconn.execute("PRAGMA busy_timeout=30000")
                                 _tconn.execute(
                                     "UPDATE transcriptions SET translated_text = ?, translation_language = ?, translation_ts_ms = ? WHERE id = ?",
                                     (translated_text, target_lang, int(time.time() * 1000), seg_id),
@@ -15823,6 +15847,7 @@ def thread1_function(ts, cq, cfq, cal_state, cal_data, cal_step1, asq):
                     _partials_db_cfg = process_config.get("database", {})
                     record_partials = _partials_db_cfg.get("record_partials", True)
                     partials_min_interval_ms = _partials_db_cfg.get("partials_min_interval_ms", 1000)
+                    partials_store_words = _partials_db_cfg.get("partials_store_words", False)
                     last_partial_write_ms = 0
                     last_partial_text = ""        # Last snapshot text (skip unchanged)
                     current_partial_seq = 0       # Increments per snapshot, resets per segment
@@ -17653,7 +17678,20 @@ def thread1_function(ts, cq, cfq, cal_state, cal_data, cal_step1, asq):
                                             _p_now_ms = int(time.time() * 1000)
                                             if _p_now_ms - last_partial_write_ms >= partials_min_interval_ms:
                                                 try:
-                                                    _p_words = _live_update.get("live_word_confidences")
+                                                    # Per-word timings are deliberately not stored on a
+                                                    # partial: nothing reads words_json off an is_final=0
+                                                    # row — not this server (every reference is an INSERT,
+                                                    # there is no SELECT) and not the ChurchPresenter BLE
+                                                    # replay, which reads id/ts_ms/text/translated_text/
+                                                    # speech_type/segment_id/session_id/start_time/
+                                                    # is_final/denied and nothing else. Each snapshot
+                                                    # re-serialised the whole growing word list and the
+                                                    # final row supersedes all of them: measured on a real
+                                                    # 167-minute service that was 4.18 MB of a 9.1 MB
+                                                    # database, 46% of the file, for data no reader has.
+                                                    # Set database.partials_store_words to bring it back.
+                                                    _p_words = (_live_update.get("live_word_confidences")
+                                                                if partials_store_words else None)
                                                     with _db_lock:
                                                         persistent_db_cursor.execute(
                                                             "INSERT INTO transcriptions (timestamp, text, start_time, end_time, ts_ms, original_text, words_json, words_source, session_id, is_final, partial_seq, denied) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, 0)",

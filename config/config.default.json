@@ -148,6 +148,8 @@
     "_record_partials_comment": "Persist in-progress (partial) transcription snapshots as is_final=0 rows for offline replay/tuning. Partials are hidden from the web UI, corrections, and exports",
     "partials_min_interval_ms": 1000,
     "_partials_min_interval_ms_comment": "Minimum milliseconds between partial snapshots of the same segment. Lower = finer replay fidelity, Higher = smaller databases",
+    "partials_store_words": false,
+    "_partials_store_words_comment": "Store per-word timings (words_json) on partial rows too. Off by default: nothing reads words_json off an is_final=0 row \u2014 not this server (every reference is an INSERT; there is no SELECT) and not the ChurchPresenter BLE replay \u2014 while each snapshot re-serialises the whole growing word list and the final row supersedes all of them. On a real 167-minute service that was 4.18 MB of a 9.1 MB database, 46% of the file. Turn on only if something starts consuming per-word data from partials.",
     "partials_retention_days": 0,
     "_partials_retention_days_comment": "Delete is_final=0 rows from session databases older than N days at server startup. 0 = keep partials forever. Final rows are never touched"
   },
@@ -183,7 +185,9 @@
     "enabled": true,
     "_enabled_comment": "Log all HTTP requests, WebSocket connections, and SocketIO actions (tagged web vs api). View at /logs.",
     "max_rows": 50000,
-    "_max_rows_comment": "Maximum log rows to retain in APP_DIR/logs/access_log.db. Oldest rows are pruned past this cap."
+    "_max_rows_comment": "Maximum log rows to retain in APP_DIR/logs/access_log.db. Oldest rows are pruned past this cap.",
+    "skip_polling_paths": true,
+    "_skip_polling_paths_comment": "Do not log the dashboard polling endpoints (/api/health, /api/transcription/status, /api/translation/status, /api/logs, ...). The logs page already hides them by default, so writing and fsyncing a row only to filter it out again costs disk for nothing \u2014 an operator with the health and settings pages open produces about 150 such rows a minute, and they displace real requests inside max_rows. Set false when diagnosing the polling itself."
   },
   "performance": {
     "use_gpu": true,

@@ -201,3 +201,29 @@ class TestSaveCorrection:
         body = make_ns(live_db=db, params={"block_index": 0, "kind": "M",
                                            "label": "Songs"})["save_service_phase_correction"]()
         assert body["corrections"][0]["block_index"] == 0
+
+
+class TestAccessLogPollingSkip:
+    """Polling endpoints are filtered at read time, so writing them is pure cost."""
+
+    def ns(self, cfg=None):
+        return extract_definitions(
+            "speech_to_text.py", ["_access_log_skip_polling", "_access_log_enabled"],
+            extra_globals={"config": {"access_log": cfg} if cfg is not None else {}})
+
+    def test_on_by_default(self):
+        assert self.ns()["_access_log_skip_polling"]() is True
+
+    def test_can_be_turned_off_to_diagnose_the_polling_itself(self):
+        assert self.ns({"skip_polling_paths": False})["_access_log_skip_polling"]() is False
+
+    def test_a_broken_config_still_skips(self):
+        # Failing open would resume thousands of fsyncs per service silently.
+        ns = extract_definitions("speech_to_text.py", ["_access_log_skip_polling"],
+                                 extra_globals={"config": None})
+        assert ns["_access_log_skip_polling"]() is True
+
+    def test_it_is_independent_of_the_enabled_flag(self):
+        cfg = {"enabled": True, "skip_polling_paths": True}
+        ns = self.ns(cfg)
+        assert ns["_access_log_enabled"]() is True and ns["_access_log_skip_polling"]() is True

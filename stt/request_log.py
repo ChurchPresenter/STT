@@ -77,6 +77,13 @@ class RequestLog:
         self._since_prune = 0
         self._conn = sqlite3.connect(db_path, check_same_thread=False)
         self._conn.execute("PRAGMA journal_mode=WAL")
+        # An access log is diagnostics, not the recording. WAL alone still leaves
+        # synchronous at FULL, which fsyncs on every request — and with a display client
+        # and the health page polling, a service is thousands of fsyncs on the same disk
+        # the session audio is being written to. NORMAL matches what the session database
+        # itself uses; the worst case it admits is losing the last few log rows on a power
+        # cut, which is not something anyone reconstructs a service from.
+        self._conn.execute("PRAGMA synchronous=NORMAL")
         self._conn.execute(
             """
             CREATE TABLE IF NOT EXISTS access_log (
