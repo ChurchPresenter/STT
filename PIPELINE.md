@@ -66,6 +66,8 @@ flowchart TD
     MIC --> FF
     FF --> BUF
     FF --> PAN
+    FF --> AUD["<b>Raw audio passthrough</b><br/>own queue, max 10, drops when full<br/><i>never enters transcription</i>"]
+    AUD --> SIO(["Socket.IO — room audio_stream"])
     PAN -.->|music_prob &gt; 0.5<br/>overrides the gate| VAD
     BUF --> VAD
     VAD -->|no| HOLD
@@ -120,40 +122,57 @@ flowchart TD
     subgraph WEBP["P1 · emit loops, every 0.5 s"]
         L1["Transcript loop"]
         L2["Translation loop<br/>max 3 fresh / cycle<br/>newest 2 + oldest 1"]
+        TC[/"Translation cache<br/>keyed by segment id"/]
+        L4["TTS loop<br/>buffers to a sentence end,<br/>or flushes after 4.0 s"]
+        SYN["Edge-TTS or Piper<br/>→ mp3 / wav, base64"]
         L3["Audio loop<br/>PCM passthrough"]
-        L4["TTS loop<br/>flush after 4.0 s"]
         SP["Service phase<br/>own tick, every 20 s"]
         DLY{"Output delay?<br/>off, or 2–30 s<br/>default 7 s"}
-        SIO["Socket.IO broadcast<br/>rooms: audio_stream · tts_audio"]
+        SIO["Socket.IO broadcast"]
     end
 
     subgraph CLIENT["Browser / OBS"]
         C1["Caption screen<br/>transcribe · translate · both"]
         C2["OBS browser source<br/>the same page, as a URL"]
-        C3["🔊 Audio monitor<br/><i>opt-in</i>"]
-        C4["🗣 Spoken translation<br/>queue &gt; 5 → keep newest 3"]
+        C3["🔊 Audio monitor<br/><i>room audio_stream, opt-in</i>"]
+        C4["🗣 Spoken translation<br/><i>room tts_audio, opt-in</i><br/>queue &gt; 5 → keep newest 3"]
+        C5["Corrections page<br/>review queue + live edit"]
     end
 
     R1 --> L1
     R1 --> L2
-    R2 --> L3
     R3 --> L1
     R1 --> SP
+    L2 --> TC
+    TC --> L4
+    L4 --> SYN
+    R2 --> L3
     L1 --> DLY
-    L2 --> DLY
+    TC --> DLY
     DLY --> SIO
-    L3 --> SIO
-    L4 --> SIO
     SP --> SIO
+    L3 -->|raw PCM| SIO
+    SYN -->|synthesised speech| SIO
     SIO --> C1
     SIO --> C2
     SIO --> C3
     SIO --> C4
+    R1 -->|rows flagged needs_review| C5
 ```
 
+**TTS is fed by the translation cache, not by rows** — it waits for translated text, buffers it
+until the joined string ends on sentence punctuation, and only then synthesises, so the voice
+does not stutter one fragment at a time. Enabling it mid-session skips history rather than
+replaying it.
+
+**Raw audio never enters transcription.** It forks straight off the capture and rides its own
+bounded queue, so a slow browser drops frames instead of delaying a caption.
+
+**Rooms** mean audio and speech only reach clients that explicitly joined — a caption screen is
+never sent audio it will not play.
+
 **Output delay** holds captions so an operator can correct a row before the audience ever sees
-it; released rows are back-dated to their real time. **Rooms** mean audio and speech only reach
-clients that explicitly joined, so a caption screen is never sent audio it will not play.
+it; released rows are back-dated to their real time.
 
 ---
 
@@ -201,24 +220,48 @@ there is no context to clear.
 
 ## What flows back
 
-The diagrams above are one-way; the system is not.
+The diagrams above are one-way; the system is not. Three paths run in reverse.
 
 ```mermaid
 flowchart TD
     OP1["Start / stop<br/>and device selection"]
     OP2["Settings change"]
-    OP3["Correct a caption"]
-    WEB["<b>P1</b> — queues and write-back<br/>rewrites the row, drops it from the<br/>translation cache, re-broadcasts"]
+    WEB["<b>P1</b> — queues<br/>posted for the worker to drain"]
     WK["<b>P2</b> — applies mid-session<br/><i>no restart, no dropped audio</i>"]
-    SCR["Every connected screen"]
 
     OP1 -.-> WEB
     OP2 -.-> WEB
-    OP3 -.-> WEB
     WEB -.->|control_queue| WK
     WEB -.->|config_queue| WK
-    WEB -->|re-emit| SCR
 ```
+
+### Correcting a caption
+
+A row saved with confidence below `0.7` is flagged `needs_review` and surfaces in the
+corrections queue. Editing one is not a cosmetic fix — the correction propagates.
+
+```mermaid
+flowchart TD
+    Q["Review queue<br/>rows where needs_review = 1"]
+    ED["Operator edits the text<br/>on /corrections"]
+    DB[("Session database<br/>original_text preserved,<br/>corrected_by recorded")]
+    INV["Translation cache entry dropped"]
+    RT["Row is re-translated<br/>on the next cycle"]
+    SCR["Re-broadcast to every screen"]
+    DEN["Restore a hidden row<br/>denied → visible"]
+
+    Q --> ED
+    ED --> DB
+    DB --> INV
+    INV --> RT
+    RT --> SCR
+    ED --> DEN
+    DEN --> SCR
+```
+
+The verbatim text is never overwritten — `original_text` keeps what the model actually produced
+and `corrected_by` records who changed it, so a corrected transcript stays auditable. The same
+page is where a row hidden by a filter gets restored, which is why nothing is ever deleted.
 
 ---
 
