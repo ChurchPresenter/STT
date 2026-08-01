@@ -26,7 +26,7 @@ from __future__ import annotations
 
 import os
 import re
-from typing import Any, Dict, List, Mapping, Optional
+from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence
 
 # Cyrillic blocks. Reused for the "did it actually translate?" check, mirroring the
 # CJK screen stt/text_utils.py:filter_hallucinated_text already applies to Whisper.
@@ -379,6 +379,97 @@ def validate_translation(raw: Optional[str], source: str, target_lang: str, *,
         return None
 
     return text
+
+
+# --- Input budgeting -------------------------------------------------------------
+#
+# The output side above rejects a bad caption. This side keeps one from being asked
+# for at all: llama.cpp raises once the prompt exceeds n_ctx, and that surfaces as a
+# generic exception the caller can only turn into a fallback. Measuring the input
+# first lets context be shed instead, which keeps the LLM on captions that would
+# otherwise be handed to the NMT model.
+#
+# Characters per token, by script. A BPE vocabulary trained mostly on English splits
+# Cyrillic far harder than Latin — often to two or three tokens per word — so the two
+# are counted separately. Both figures are deliberately pessimistic: over-estimating
+# costs a little context, under-estimating costs the exception this exists to avoid.
+_CHARS_PER_TOKEN_CYRILLIC = 2.0
+_CHARS_PER_TOKEN_OTHER = 3.7
+
+# Chat-template scaffolding — role markers, BOS/EOS, the turn structure that
+# create_chat_completion adds around our two messages. We never see it, so it is
+# reserved rather than measured.
+_CHAT_TEMPLATE_MARGIN = 64
+
+TokenCounter = Callable[[str], int]
+
+
+def estimate_tokens(text: str) -> int:
+    """Approximate token count for ``text``, erring high.
+
+    Used when no real tokenizer is available — the HTTP endpoint provider, where the
+    model runs on another machine and its vocabulary is unknown. The local GGUF path
+    passes the model's own tokenizer as a ``counter`` instead and does not use this.
+    """
+    if not text:
+        return 0
+    cyrillic = len(_CYRILLIC.findall(text))
+    other = len(text) - cyrillic
+    est = cyrillic / _CHARS_PER_TOKEN_CYRILLIC + other / _CHARS_PER_TOKEN_OTHER
+    # Never report zero for non-empty input: a caller comparing against a budget of 0
+    # would otherwise conclude that anything fits.
+    return max(1, int(est) + 1)
+
+
+def _count(text: str, counter: Optional[TokenCounter]) -> int:
+    """Token count via ``counter``, falling back to the heuristic if it fails.
+
+    A tokenizer call must never break a caption, so a raising counter degrades to the
+    estimate rather than propagating.
+    """
+    if counter is not None:
+        try:
+            return int(counter(text))
+        except Exception:
+            pass
+    return estimate_tokens(text)
+
+
+def input_token_budget(n_ctx: int, max_tokens: int, system_prompt: str, *,
+                       counter: Optional[TokenCounter] = None,
+                       margin: int = _CHAT_TEMPLATE_MARGIN) -> int:
+    """How many tokens of user text fit, given the context window and reply reservation.
+
+    ``max_tokens`` is subtracted because llama.cpp needs room for the answer inside the
+    same window; a prompt that fits exactly would leave nothing to generate into.
+    """
+    budget = int(n_ctx) - int(max_tokens) - _count(system_prompt or "", counter) - int(margin)
+    return max(0, budget)
+
+
+def input_fits(text: str, budget: int, *, counter: Optional[TokenCounter] = None) -> bool:
+    """Whether ``text`` fits the user-text budget from :func:`input_token_budget`."""
+    if budget <= 0:
+        return False
+    return _count(text or "", counter) <= budget
+
+
+def fit_context_prefix(context_texts: Sequence[str], target_text: str, budget: int, *,
+                       counter: Optional[TokenCounter] = None) -> List[str]:
+    """The longest suffix of ``context_texts`` that still fits alongside ``target_text``.
+
+    Oldest entries are shed first, so a context window degrades toward 1 rather than the
+    whole caption being declined. Returns ``[]`` when not even one context entry fits —
+    the target alone may still fit, and that is the caller's check to make, because the
+    target is the caption and can never be dropped.
+    """
+    kept = [t for t in context_texts if t]
+    while kept:
+        combined = " ".join(kept) + " " + target_text
+        if input_fits(combined, budget, counter=counter):
+            return kept
+        kept = kept[1:]
+    return []
 
 
 def looks_like_reasoning_model(response: Mapping[str, Any]) -> bool:

@@ -13,7 +13,11 @@ from stt.llm_translate import (
     build_chat_messages,
     build_chat_payload,
     build_system_prompt,
+    estimate_tokens,
     extract_chat_text,
+    fit_context_prefix,
+    input_fits,
+    input_token_budget,
     language_name,
     local_model_path,
     looks_like_reasoning_model,
@@ -408,3 +412,121 @@ class TestUsesLocalLlm:
     def test_unusable_shapes(self):
         assert not uses_local_llm({})
         assert not uses_local_llm(None)
+
+
+# A word-per-token counter: deterministic, and independent of any real vocabulary, so
+# these tests assert the budgeting arithmetic rather than a tokenizer's behaviour.
+def _words(text):
+    return len(text.split())
+
+
+class TestEstimateTokens:
+    """The fallback used when no real tokenizer is available (the endpoint provider)."""
+
+    def test_cyrillic_costs_more_than_latin_per_character(self):
+        # A BPE vocabulary trained mostly on English splits Cyrillic harder. Under-
+        # estimating it is what would let a prompt past the budget and into the
+        # exception this whole path exists to avoid.
+        cyr = "абвгдежзийклмнопрстуфхцчшщэюя" * 4
+        lat = "abcdefghijklmnopqrstuvwxyzabc" * 4
+        assert len(cyr) == len(lat)
+        assert estimate_tokens(cyr) > estimate_tokens(lat)
+
+    def test_never_zero_for_non_empty_input(self):
+        # A zero would read as "fits" against any budget, including an exhausted one.
+        assert estimate_tokens("a") >= 1
+        assert estimate_tokens(".") >= 1
+
+    def test_empty_is_free(self):
+        assert estimate_tokens("") == 0
+
+    def test_grows_with_length(self):
+        assert estimate_tokens(SRC * 4) > estimate_tokens(SRC)
+
+
+class TestInputTokenBudget:
+    def test_reserves_reply_prompt_and_margin(self):
+        # 1000 ctx - 100 reply - 3 prompt words - 64 margin
+        assert input_token_budget(1000, 100, "one two three", counter=_words, margin=64) == 833
+
+    def test_floors_at_zero_when_the_window_is_tiny(self):
+        # Never negative: callers compare against it, and a negative budget would
+        # invert the comparison rather than reject.
+        assert input_token_budget(512, 1024, "a system prompt", counter=_words) == 0
+
+    def test_uses_the_estimate_when_no_counter_is_given(self):
+        assert input_token_budget(2048, 160, "") == 2048 - 160 - 64
+
+    def test_a_raising_counter_degrades_to_the_estimate(self):
+        # A tokenizer call must never break a caption.
+        def boom(_):
+            raise RuntimeError("tokenizer gone")
+
+        assert input_token_budget(2048, 160, "hello", counter=boom) > 0
+
+
+class TestInputFits:
+    def test_a_real_caption_fits_the_shipped_defaults(self):
+        budget = input_token_budget(2048, 160, DEFAULT_SYSTEM_PROMPT_TEMPLATE)
+        assert input_fits(SRC, budget)
+
+    def test_an_exhausted_budget_admits_nothing(self):
+        assert not input_fits("a", 0)
+        assert not input_fits("a", -5)
+
+    def test_boundary_is_inclusive(self):
+        assert input_fits("one two three", 3, counter=_words)
+        assert not input_fits("one two three four", 3, counter=_words)
+
+
+class TestFitContextPrefix:
+    def test_everything_kept_when_it_all_fits(self):
+        ctx = ["one", "two", "three"]
+        assert fit_context_prefix(ctx, "target", 100, counter=_words) == ctx
+
+    def test_sheds_oldest_first(self):
+        # budget 3 words: "two three target" fits, "one two three target" does not.
+        assert fit_context_prefix(["one", "two", "three"], "target", 3, counter=_words) == ["two", "three"]
+
+    def test_returns_empty_when_not_even_one_entry_fits(self):
+        # The target alone may still fit — that is the caller's separate check, because
+        # the target is the caption and can never be dropped.
+        assert fit_context_prefix(["one"], "target", 1, counter=_words) == []
+
+    def test_never_drops_the_target(self):
+        # Whatever comes back is prefix only; the caption is not this function's to cut.
+        kept = fit_context_prefix(["a", "b"], "the caption", 0, counter=_words)
+        assert kept == []
+
+    def test_blank_context_entries_are_dropped(self):
+        assert fit_context_prefix(["", "two", ""], "target", 100, counter=_words) == ["two"]
+
+    def test_empty_context_is_returned_unchanged(self):
+        assert fit_context_prefix([], "target", 100, counter=_words) == []
+
+
+class TestArchiveHeadroom:
+    """Pins the measured headroom, so a default change cannot silently spend it.
+
+    Figures are from 87 real sessions (70,153 captions, 96.3% Cyrillic): p99.9 is 238
+    characters, and the worst context-stacked input ever recorded was ~1,800 characters
+    at the maximum context_window of 5.
+    """
+
+    WORST_STACKED = "Да будет мир Твой, Господи, с нами всегда, " * 36  # ~1800 ch
+
+    def test_the_worst_real_input_fits_the_shipped_defaults(self):
+        assert len(self.WORST_STACKED) > 1750
+        budget = input_token_budget(2048, 160, DEFAULT_SYSTEM_PROMPT_TEMPLATE)
+        assert input_fits(self.WORST_STACKED, budget)
+
+    def test_the_same_input_does_not_fit_the_smallest_configurable_window(self):
+        # n_ctx bottoms out at 512 in the UI; that is the one setting that turns this
+        # guard from inert into load-bearing.
+        budget = input_token_budget(512, 160, DEFAULT_SYSTEM_PROMPT_TEMPLATE)
+        assert not input_fits(self.WORST_STACKED, budget)
+
+    def test_a_typical_caption_still_fits_the_smallest_window(self):
+        # Degrading must cost context, not captions.
+        budget = input_token_budget(512, 160, DEFAULT_SYSTEM_PROMPT_TEMPLATE)
+        assert input_fits(SRC, budget)

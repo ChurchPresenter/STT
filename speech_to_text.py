@@ -811,6 +811,9 @@ from stt.llm_translate import (
     build_chat_messages as _llm_chat_messages,
     build_chat_payload as _llm_chat_payload,
     build_system_prompt as _llm_system_prompt,
+    fit_context_prefix as _llm_fit_context,
+    input_fits as _llm_input_fits,
+    input_token_budget as _llm_input_budget,
     local_model_path as _llm_local_model_path,
     looks_like_reasoning_model as _llm_looks_like_reasoning,
     resolve_gpu_layers as _llm_resolve_gpu_layers,
@@ -6703,6 +6706,15 @@ def translate_remote():
     _register_translation_client(client_ip)
 
     cfg = config.get("live_translation", {})
+    # A caption is short; anything large here is a malformed or runaway payload. Reject
+    # it before the model sees it and — just as important — before it becomes a
+    # TextTranslationCache key, which holds the full text for up to server_cache_size
+    # entries.
+    _max_chars = coerce_int((cfg.get("remote", {}) or {}).get("max_text_chars"), 8000, lo=200, hi=1000000)
+    if len(text) > _max_chars:
+        return jsonify({"success": False,
+                        "error": f"Text too long: {len(text)} chars exceeds the {_max_chars}-char limit."}), 413
+
     source_lang = data.get("source_lang", cfg.get("source_language", "auto"))
     target_lang = data.get("target_lang", cfg.get("target_language", "en"))
     return_extras = bool(data.get("return_extras", False))
@@ -14366,6 +14378,30 @@ def is_local_llm_loaded():
     return _local_llm is not None
 
 
+def _llm_token_counter():
+    """The loaded model's own tokenizer as a callable, or None to use the estimate.
+
+    Exact beats the heuristic wherever it can be had: the estimate is deliberately
+    pessimistic and would shed context the model actually had room for. Only the local
+    provider can offer this — an endpoint's vocabulary lives on another machine.
+    """
+    llm = _local_llm
+    if llm is None:
+        return None
+
+    def _count(s):
+        return len(llm.tokenize(s.encode("utf-8")))
+
+    return _count
+
+
+def _llm_budget_for(llm_cfg, system_prompt, max_tokens):
+    """User-text token budget for the configured model, and the counter used for it."""
+    counter = _llm_token_counter()
+    n_ctx = coerce_int(llm_cfg.get("n_ctx"), 2048, lo=512, hi=32768)
+    return _llm_input_budget(n_ctx, max_tokens, system_prompt, counter=counter), counter
+
+
 def _translate_via_local_llm(text, system_prompt, max_tokens, llm_cfg_override=None):
     """One caption through the in-process GGUF model. Returns raw text or None.
 
@@ -14423,6 +14459,19 @@ def _translate_via_llm(text, source_lang, target_lang, timeout_override=None,
     # installer, no port — which is what makes this workable on a fresh install that
     # has no inference runtime of its own.
     if (llm_cfg.get("provider") or "endpoint").strip().lower() == "local":
+        # Too long for the context window is a decline, not an attempt. llama.cpp
+        # raises once the prompt exceeds n_ctx, which reaches the caller as a generic
+        # failure; measuring first turns that into the same orderly fallback every
+        # other rejection takes. Only the local provider is checked — n_ctx sizes the
+        # Llama() we construct here, and says nothing about an endpoint model's window.
+        # Live captions never come near this (p99.9 is 40 words, and the run-on valve
+        # caps a row well before context can stack); it is n_ctx set low, a batch
+        # segment, or a paired machine's payload that gets here.
+        _budget, _counter = _llm_budget_for(llm_cfg, system_prompt, max_tokens)
+        if not _llm_input_fits(text, _budget, counter=_counter):
+            print(f"[LLM-TRANSLATE] input exceeds the {_budget}-token context budget "
+                  f"({len(text)} chars); using the NMT model")
+            return (None, None, "input exceeds context budget") if return_raw else None
         raw = _translate_via_local_llm(text, system_prompt, max_tokens, llm_cfg_override)
         clean = _llm_validate(raw, text, target_lang)
         return (clean, raw, None) if return_raw else clean
@@ -14643,6 +14692,29 @@ def emit_translated_entries():
             # Max 5: beyond that the combined NLLB input approaches the 1024-token truncation
             context_window = max(1, min(5, int(trans_config.get("context_window", 1) or 1)))
 
+            # The LLM has its own, much smaller ceiling: n_ctx. Where NLLB silently
+            # truncates a too-long input, llama.cpp raises and the caption drops to the
+            # NMT model — losing the engine the operator chose over a prefix that is
+            # only there to help. So the prefix is sized to fit and the oldest entries
+            # shed, which costs context instead of costing the LLM. Computed once per
+            # cycle: the budget is the same for every segment in it.
+            _llm_ctx_budget = None
+            _llm_ctx_counter = None
+            # _uses_local_llm, not just the method: n_ctx belongs to the GGUF this box
+            # constructs. An endpoint model's window is the other machine's business.
+            if context_window > 1 and _uses_local_llm(trans_config):
+                try:
+                    _cw_llm_cfg = trans_config.get("llm") or {}
+                    _cw_max_tokens = coerce_int(_cw_llm_cfg.get("max_tokens"), 160, lo=16, hi=1024)
+                    _cw_prompt = _llm_system_prompt(
+                        _cw_llm_cfg.get("system_prompt") or _DEFAULT_LLM_SYSTEM_PROMPT,
+                        target_lang, TRANSLATION_LANGUAGES)
+                    _llm_ctx_budget, _llm_ctx_counter = _llm_budget_for(
+                        _cw_llm_cfg, _cw_prompt, _cw_max_tokens)
+                except Exception:
+                    pass  # sizing is an optimisation; the backstop in _translate_via_llm still holds
+            _llm_ctx_shrunk = False  # log a shrink once per cycle, not once per caption
+
             max_translations_per_cycle = 3  # Limit new translations per cycle so cached segments emit fast
 
             # Budget the cycle's fresh translations newest-first (with one slot
@@ -14795,6 +14867,17 @@ def emit_translated_entries():
                     if context_window > 1 and idx > 0:
                         ctx_start = max(0, idx - (context_window - 1))
                         context_texts = [entries[j][2] for j in range(ctx_start, idx)]
+                        if context_texts and _llm_ctx_budget is not None:
+                            _fitted = _llm_fit_context(
+                                context_texts, original_text, _llm_ctx_budget,
+                                counter=_llm_ctx_counter)
+                            if len(_fitted) != len(context_texts):
+                                if not _llm_ctx_shrunk:
+                                    print(f"[LLM-TRANSLATE] context trimmed to "
+                                          f"{len(_fitted)}/{len(context_texts)} segments "
+                                          f"to fit the {_llm_ctx_budget}-token budget")
+                                    _llm_ctx_shrunk = True
+                                context_texts = _fitted
                         if context_texts:
                             context_prefix = " ".join(context_texts)
                             num_ctx_sentences = count_sentence_units(context_prefix)
