@@ -533,6 +533,35 @@
     "transcribe_detected_music": false,
     "_transcribe_detected_music_comment": "Music is always transcribed (even when VAD would drop it). When true, its rows show in the transcript. When false, they are saved hidden with denied_reason 'music' and can be restored on /corrections."
   },
+  "service_phase": {
+    "_comment": "Proof of concept: track which part of a service is running (songs / speaking / quiet blocks, with a tentative name) from the PANNs audio labels already stored on each row. Detection is deterministic and needs no LLM. Review and correct it on /service-phase.",
+    "enabled": true,
+    "_enabled_comment": "Run the detector during live transcription and save its output to the session database.",
+    "interval_seconds": 20,
+    "_interval_seconds_comment": "How often the detector re-runs. It re-reads the whole session each tick (~180 bins for a 3-hour service), so this is cheap; lower values only shorten the lag on the display, not the detection lag.",
+    "bin_seconds": 60,
+    "_bin_seconds_comment": "Width of one analysis bucket in seconds. One minute matches the dwell settings below; changing it invalidates their tuning.",
+    "dominance": 0.35,
+    "_dominance_comment": "Share (0.0-1.0) of a bucket's rows that must be Music or Speaking for the bucket to count as that. A share, not a majority: a minute of preaching still contains pauses tagged Quiet.",
+    "enter_minutes": 2,
+    "_enter_minutes_comment": "Consecutive minutes of a new type before the block switches. Measured over 10 real services, 2 recovers 89% of major blocks at a 1-minute median lag with ~1 spurious flip per service; 3 gives 81% at 2 minutes with a quarter of the flips.",
+    "exit_minutes": 3,
+    "_exit_minutes_comment": "Same, for switching into Quiet. Deliberately longer than enter_minutes: a lull inside a sermon is common and must not end it.",
+    "sermon_min_minutes": 8,
+    "_sermon_min_minutes_comment": "A speaking block at least this long is named 'Sermon N'; a shorter one before the first sermon is named 'Opening'.",
+    "songs_min_minutes": 3,
+    "_songs_min_minutes_comment": "A music block at least this long is named 'Songs N'; shorter ones are just 'Music'.",
+    "closing_max_minutes": 6,
+    "_closing_max_minutes_comment": "A short final speaking block no longer than this is named 'Closing'.",
+    "communion_min_hits": 12,
+    "_communion_min_hits_comment": "Communion keyword hits within one speaking block before it is named 'Communion' instead of a sermon. Separation is by volume, not position: in the archive the actual communion scored 34 hits while a sermon merely discussing it scored 8 across 84 minutes.",
+    "cue_phrases": {
+      "_comment": "Regex fragments counted per bucket and shown on the review page. Cues annotate and help name blocks; they never move a boundary. Defaults are Russian because that is what these services are in — replace them for another language.",
+      "amen": ["амин[ья]"],
+      "communion": ["причасти\\w*", "преломлен\\w*", "чаш[аиуе]", "хлеб\\w*", "тело христово", "кров[ьи] христ\\w*"],
+      "opening": ["добро пожаловать", "приветству\\w*", "дорогие брать\\w*", "мир вам"]
+    }
+  },
   "watchdog": {
     "update_channel": "main",
     "_update_channel_comment": "Auto-update channel: 'main' = track the latest code on GitHub (default), 'stable' = tagged releases only.",

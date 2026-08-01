@@ -822,6 +822,17 @@ from stt.llm_translate import (
     uses_local_llm as _uses_local_llm,
     validate_translation as _llm_validate,
 )
+# Service-phase detection lives in stt/service_phase.py (importable, unit-tested);
+# the monolith supplies the connection and the live config and does nothing else.
+from stt.service_phase import (
+    analyze as _service_phase_analyze,
+    ensure_tables as _service_phase_ensure_tables,
+    load_analysis as _service_phase_load,
+    load_corrections as _service_phase_corrections,
+    read_rows as _service_phase_rows,
+    save_analysis as _service_phase_save,
+    save_correction as _service_phase_save_correction,
+)
 from stt.db_maintenance import (
     checkpoint_and_release as _db_checkpoint_and_release,
     sweep_orphaned_sidecars as _db_sweep_sidecars,
@@ -3695,6 +3706,15 @@ def initialize_database(session_config=None):
                 db_connection.commit()
                 print("[DB] OK: Migration complete (added translation_ts_ms column)")
 
+            # Service-phase tables. Created here, inside the init transaction, so the
+            # detector's tick (which runs in the web process, on its own connection)
+            # never races a CREATE against the writer. Empty tables are harmless on a
+            # session where the feature is disabled.
+            try:
+                _service_phase_ensure_tables(db_connection)
+            except Exception as _sp_err:
+                print(f"[DB] WARNING: service phase tables unavailable ({_sp_err})")
+
             # Insert a blank first entry with default values
             default_timestamp = " "
             default_text = " "
@@ -4561,6 +4581,112 @@ def settings_page():
         return render_template("auth-required.html"), 403
 
     return render_template("live-settings.html")
+
+
+@app.route("/service-phase")
+def service_phase_page():
+    """Render the service phase detection / review page"""
+    if not check_ip_whitelist():
+        return render_template("auth-required.html"), 403
+
+    return render_template("service-phase.html")
+
+
+def _service_phase_resolve_db(session):
+    """(path, error_response) for a session argument, or the live session when absent."""
+    if session:
+        abs_path = safe_managed_path(session)  # commonpath + realpath confinement
+        if abs_path is None:
+            return None, (jsonify({"success": False, "error": "Access denied"}), 403)
+        if not os.path.isfile(abs_path):
+            return None, (jsonify({"success": False, "error": "Session not found"}), 404)
+        return abs_path, None
+    live = _service_phase_session_db()
+    if not live or not os.path.exists(live):
+        return None, (jsonify({"success": False, "error": "No session is running"}), 404)
+    return live, None
+
+
+@app.route("/api/service-phase")
+def get_service_phase():
+    """Detected phases for the live session, or for a past one via ?session=<path>.
+
+    ``?recompute=1`` re-runs the detector over the stored rows instead of reading the
+    saved output, without writing anything. That is how a session recorded before this
+    feature existed — or one recorded under different settings — gets reviewed, and it is
+    the loop that makes the logic improvable: change a threshold, replay, compare.
+    """
+    if not check_ip_whitelist():
+        return jsonify({"success": False, "error": "Access denied"}), 403
+
+    db_path, err = _service_phase_resolve_db(request.args.get("session"))
+    if err:
+        return err
+
+    cfg = _service_phase_config()
+    recompute = request.args.get("recompute") in ("1", "true", "yes")
+    try:
+        with sqlite3.connect(f"file:{db_path}?mode=ro", uri=True) as conn:
+            if recompute:
+                result = _service_phase_analyze(
+                    _service_phase_rows(conn), cfg,
+                    first_sunday=_service_phase_first_sunday(db_path))
+            else:
+                result = _service_phase_load(conn)
+            corrections = _service_phase_corrections(conn)
+    except Exception as e:
+        return jsonify({"success": False, "error": f"{type(e).__name__}: {e}"}), 500
+
+    return jsonify({
+        "success": True,
+        "session_id": os.path.basename(db_path),
+        "session_path": db_path,
+        "live": bool(not request.args.get("session")),
+        "recomputed": recompute,
+        "enabled": bool(cfg.get("enabled", True)),
+        "first_sunday": _service_phase_first_sunday(db_path),
+        "current": result.get("current"),
+        "blocks": result.get("blocks", []),
+        "bins": result.get("bins", []),
+        "classes": result.get("classes", ""),
+        "corrections": corrections,
+    })
+
+
+@app.route("/api/service-phase/correct", methods=["POST"])
+def save_service_phase_correction():
+    """Record an operator correction. Never touched by the detector's own rewrites."""
+    if not check_ip_whitelist():
+        return jsonify({"success": False, "error": "Access denied"}), 403
+
+    data = _control_params(keep_blank=True)
+    db_path, err = _service_phase_resolve_db(data.get("session"))
+    if err:
+        return err
+
+    block_index = data.get("block_index")
+    block_index = None if block_index in (None, "", "null") else coerce_int(block_index, 0, lo=0, hi=10000)
+    label = (data.get("label") or "").strip()[:120]
+    kind = (data.get("kind") or "").strip()[:8]
+    note = (data.get("note") or "").strip()[:500]
+    if not label and not kind:
+        return jsonify({"success": False, "error": "A correction needs a label or a kind."}), 400
+
+    try:
+        conn = sqlite3.connect(db_path, timeout=5)
+        try:
+            row_id = _service_phase_save_correction(
+                conn, block_index, kind=kind or None, label=label or None,
+                start_ms=coerce_int(data.get("start_ms"), 0, lo=0, hi=2 ** 62) or None,
+                end_ms=coerce_int(data.get("end_ms"), 0, lo=0, hi=2 ** 62) or None,
+                note=note, corrected_at=datetime.now().isoformat(timespec="seconds"))
+            corrections = _service_phase_corrections(conn)
+        finally:
+            conn.close()
+    except Exception as e:
+        return jsonify({"success": False, "error": f"{type(e).__name__}: {e}"}), 500
+
+    return jsonify({"success": True, "id": row_id, "corrections": corrections})
 
 
 @app.route("/corrections")
@@ -14023,6 +14149,85 @@ def _live_preview_suppressed(text):
     return False
 
 
+_service_phase_last_run = 0.0
+_service_phase_state = {"current": None, "blocks": [], "session_id": None}
+
+
+def _service_phase_session_db():
+    """Path of the session database the detector should read, or None."""
+    try:
+        return _ts_get("db_name")
+    except Exception:
+        return None
+
+
+def _service_phase_first_sunday(db_path):
+    """Whether this session's date is a first Sunday — communion's usual slot.
+
+    Derived from the session filename (``%Y-%m-%d_%H%M%S.db``) rather than today's date,
+    so reviewing an old session doesn't get scored against the calendar it is read on.
+    Only ever raises the confidence of a communion label; it never creates one, because
+    the exceptions the operator named — Passover, Good Friday — are real and frequent.
+    """
+    try:
+        stamp = os.path.basename(db_path or "")[:10]
+        d = datetime.strptime(stamp, "%Y-%m-%d").date()
+        return d.weekday() == 6 and d.day <= 7
+    except Exception:
+        return False
+
+
+def _service_phase_config():
+    return config.get("service_phase", {}) or {}
+
+
+def _service_phase_tick(is_running):
+    """Re-run phase detection at most once per interval, then broadcast the result.
+
+    Runs in the web process on its own short-lived connection, the same way
+    /api/transcription/correct reaches a session database — the long-lived writer belongs
+    to the transcription worker. The whole thing is best-effort: a caption must never be
+    delayed or lost because a diagnostic could not classify the service.
+    """
+    global _service_phase_last_run
+    cfg = _service_phase_config()
+    if not cfg.get("enabled", True) or not is_running:
+        return
+    interval = coerce_float(cfg.get("interval_seconds"), 20, lo=2, hi=600)
+    now = time.time()
+    if now - _service_phase_last_run < interval:
+        return
+    _service_phase_last_run = now
+
+    db_path = _service_phase_session_db()
+    if not db_path or not os.path.exists(db_path):
+        return
+    try:
+        conn = sqlite3.connect(db_path, timeout=5)
+        try:
+            result = _service_phase_analyze(
+                _service_phase_rows(conn), cfg,
+                first_sunday=_service_phase_first_sunday(db_path))
+            _service_phase_save(conn, result)
+        finally:
+            conn.close()
+    except Exception as e:
+        print(f"[SERVICE-PHASE] tick failed ({type(e).__name__}: {e})")
+        return
+
+    _service_phase_state["current"] = result.get("current")
+    _service_phase_state["blocks"] = result.get("blocks", [])
+    _service_phase_state["session_id"] = os.path.basename(db_path)
+    try:
+        socketio.emit("service_phase_update", {
+            "current": result.get("current"),
+            "blocks": result.get("blocks", []),
+            "session_id": os.path.basename(db_path),
+        })
+    except Exception:
+        pass  # a diagnostic broadcast must never break the emit loop
+
+
 def emit_new_entries():
     """Emit combined transcription updates and audio levels to web clients"""
     update_interval = config.get("web_server", {}).get("update_interval", 0.5)
@@ -14162,6 +14367,8 @@ def emit_new_entries():
                     )
                 except Exception as emit_error:
                     print(f"[AUDIO-DEBUG] {time.strftime('%H:%M:%S')} - EMIT FAILED: {emit_error}", flush=True)
+
+        _service_phase_tick(is_running)
 
         try:
             socketio.sleep(update_interval)  # Emit updates based on config

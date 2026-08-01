@@ -1,0 +1,267 @@
+{% extends "base.html" %}
+
+{% block title %}Service Phase - Speech to Text{% endblock %}
+{% block page_title %}Service Phase{% endblock %}
+
+{% block extra_css %}
+      /* Current phase headline */
+      .sp-now {
+        display: flex; align-items: baseline; gap: 14px; flex-wrap: wrap;
+        padding: 16px 18px; background: var(--bg-card);
+        border: 1px solid var(--border); border-radius: var(--radius-md); margin-bottom: 14px;
+      }
+      .sp-now-label { font-size: 1.6em; font-weight: 600; color: var(--text-primary); }
+      .sp-now-kind {
+        font-size: 0.72em; letter-spacing: 0.04em; text-transform: uppercase;
+        padding: 2px 8px; border-radius: var(--radius-sm);
+      }
+      .sp-kind-M { color: var(--accent); background: rgba(41,121,255,0.15); }
+      .sp-kind-S { color: var(--success); background: rgba(34,197,94,0.15); }
+      .sp-kind-_ { color: var(--text-muted); background: rgba(90,94,102,0.15); }
+      .sp-now-meta { color: var(--text-secondary); font-size: 0.9em; }
+
+      /* Per-minute signal strip: one cell per bin, so the operator can see the
+         evidence rather than just the verdict. */
+      .sp-strip {
+        display: flex; gap: 1px; flex-wrap: wrap; padding: 12px;
+        background: var(--bg-base); border: 1px solid var(--border);
+        border-radius: var(--radius-md); margin-bottom: 14px;
+      }
+      .sp-cell { width: 7px; height: 22px; border-radius: 2px; flex-shrink: 0; }
+      .sp-cell.M { background: var(--accent); }
+      .sp-cell.S { background: var(--success); }
+      .sp-cell._ { background: var(--bg-elevated); }
+      .sp-cell.cue { outline: 1px solid var(--warning); outline-offset: -1px; }
+
+      /* Block timeline */
+      .sp-block {
+        display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+        padding: 10px 14px; background: var(--bg-card);
+        border: 1px solid var(--border); border-radius: var(--radius-sm); margin-bottom: 6px;
+      }
+      .sp-block.corrected { border-color: var(--warning); }
+      .sp-block.ongoing { border-color: var(--success); }
+      .sp-time { font-variant-numeric: tabular-nums; color: var(--text-secondary); min-width: 108px; font-size: 0.9em; }
+      .sp-label { font-weight: 600; color: var(--text-primary); min-width: 120px; }
+      .sp-conf { color: var(--text-muted); font-size: 0.82em; }
+      .sp-cues { color: var(--warning); font-size: 0.82em; }
+      .sp-fix { margin-left: auto; display: flex; gap: 6px; align-items: center; }
+      .sp-fix input, .sp-fix select {
+        padding: 4px 8px; border: 1px solid var(--border); border-radius: var(--radius-sm);
+        background: var(--bg-base); color: var(--text-primary); font-size: 0.85em;
+      }
+      .sp-fix button {
+        padding: 4px 12px; border: 1px solid var(--accent); border-radius: var(--radius-sm);
+        background: rgba(41,121,255,0.15); color: var(--accent); cursor: pointer; font-size: 0.85em;
+      }
+      .sp-fix button:hover { background: rgba(41,121,255,0.28); }
+      .sp-was {
+        font-size: 0.8em; color: var(--warning); width: 100%;
+        padding-left: 120px; padding-top: 4px;
+      }
+      .sp-toolbar { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-bottom: 14px; }
+      .sp-toolbar input, .sp-toolbar button {
+        padding: 6px 12px; border: 1px solid var(--border); border-radius: var(--radius-sm);
+        background: var(--bg-card); color: var(--text-primary); font-size: 0.88em;
+      }
+      .sp-toolbar button { cursor: pointer; }
+      .sp-toolbar input { min-width: 320px; }
+      .sp-note { color: var(--text-secondary); font-size: 0.86em; line-height: 1.5; margin-bottom: 14px; }
+{% endblock %}
+
+{% block content %}
+<div class="sp-note">
+  Detection is a proof of concept. Structure (songs / speaking / quiet) comes from the PANNs
+  audio labels already stored on every row and is the reliable part; the <em>name</em> beside
+  it is a guess from position, duration and word cues. Correct anything that is wrong — the
+  corrections are stored separately from the detector's own output, so they survive it
+  re-running, and they are what the logic gets tuned against.
+</div>
+
+<div class="sp-toolbar">
+  <input type="text" id="sp-session" placeholder="Path to a saved session .db (blank = live session)">
+  <button type="button" id="sp-load" onclick="loadPhases()">Load</button>
+  <button type="button" id="sp-recompute" onclick="loadPhases(true)">Re-run detector</button>
+  <span id="sp-status" style="color: var(--text-secondary); font-size: 0.86em;"></span>
+</div>
+
+<div class="sp-now">
+  <span class="sp-now-label" id="sp-now-label">—</span>
+  <span class="sp-now-kind sp-kind-_" id="sp-now-kind">—</span>
+  <span class="sp-now-meta" id="sp-now-meta">Waiting for a session…</span>
+</div>
+
+<div class="sp-strip" id="sp-strip"></div>
+
+<div id="sp-blocks"></div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  // The detector's own vocabulary. Kept in sync with stt/service_phase.py by hand: the
+  // page only ever offers labels the detector can also produce, so a correction stays
+  // comparable with what it is correcting.
+  const SP_LABELS = ['Opening', 'Songs', 'Sermon 1', 'Sermon 2', 'Sermon 3',
+                     'Communion', 'Prayer', 'Poem', 'Closing', 'Speaking', 'Music', 'Other'];
+  const SP_KINDS = { 'M': 'Songs', 'S': 'Speaking', '_': 'Quiet' };
+
+  let spData = { blocks: [], bins: [], corrections: [], session_path: '' };
+
+  function fmtClock(ms, base) {
+    const s = Math.max(0, Math.round((ms - base) / 1000));
+    const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60);
+    return (h ? h + 'h' : '') + String(m).padStart(h ? 2 : 1, '0') + 'm';
+  }
+
+  function correctionFor(idx) {
+    return spData.corrections.find(c => c.block_index === idx) || null;
+  }
+
+  function renderNow() {
+    const cur = spData.current;
+    const label = document.getElementById('sp-now-label');
+    const kind = document.getElementById('sp-now-kind');
+    const meta = document.getElementById('sp-now-meta');
+    if (!cur) {
+      label.textContent = '—';
+      kind.textContent = '—';
+      kind.className = 'sp-now-kind sp-kind-_';
+      meta.textContent = 'No phases detected for this session yet.';
+      return;
+    }
+    label.textContent = cur.label || SP_KINDS[cur.kind] || '—';
+    kind.textContent = SP_KINDS[cur.kind] || cur.kind;
+    kind.className = 'sp-now-kind sp-kind-' + cur.kind;
+    const conf = Math.round((cur.confidence || 0) * 100);
+    meta.textContent = cur.minutes + ' min' + (cur.ongoing ? ' and running' : '')
+      + ' · confidence ' + conf + '%'
+      + (spData.first_sunday ? ' · first Sunday' : '');
+  }
+
+  function renderStrip() {
+    const strip = document.getElementById('sp-strip');
+    strip.innerHTML = '';
+    const classes = spData.classes || '';
+    if (!classes) {
+      strip.textContent = 'No audio bins recorded yet.';
+      strip.style.color = 'var(--text-secondary)';
+      strip.style.fontSize = '0.86em';
+      return;
+    }
+    strip.style.color = '';
+    spData.bins.forEach((b, i) => {
+      const cell = document.createElement('div');
+      const hasCue = b.cues && Object.keys(b.cues).length > 0;
+      cell.className = 'sp-cell ' + (classes[i] || '_') + (hasCue ? ' cue' : '');
+      const cues = hasCue ? Object.entries(b.cues).map(([k, v]) => k + '×' + v).join(', ') : 'no cues';
+      cell.title = 'minute ' + i + ' · ' + (SP_KINDS[classes[i]] || '?')
+        + ' · ' + b.speech + ' speech / ' + b.music + ' music / ' + b.quiet + ' quiet · ' + cues;
+      strip.appendChild(cell);
+    });
+  }
+
+  function renderBlocks() {
+    const host = document.getElementById('sp-blocks');
+    host.innerHTML = '';
+    if (!spData.blocks.length) {
+      host.innerHTML = '<div class="sp-note">Nothing detected yet.</div>';
+      return;
+    }
+    const base = spData.bins.length ? spData.bins[0].start_ms : 0;
+    spData.blocks.forEach(b => {
+      const fix = correctionFor(b.index);
+      const row = document.createElement('div');
+      row.className = 'sp-block' + (fix ? ' corrected' : '') + (b.ongoing ? ' ongoing' : '');
+
+      const cues = Object.entries(b.cues || {}).map(([k, v]) => k + '×' + v).join(' ');
+      const opts = SP_LABELS.map(l =>
+        '<option value="' + l + '"' + (l === (fix ? fix.label : b.label) ? ' selected' : '') + '>' + l + '</option>'
+      ).join('');
+
+      row.innerHTML =
+        '<span class="sp-time">' + fmtClock(b.start_ms, base) + ' – ' + fmtClock(b.end_ms, base) + '</span>' +
+        '<span class="sp-now-kind sp-kind-' + b.kind + '">' + (SP_KINDS[b.kind] || b.kind) + '</span>' +
+        '<span class="sp-label">' + (b.label || '—') + '</span>' +
+        '<span class="sp-conf">' + b.minutes + ' min · ' + Math.round((b.confidence || 0) * 100) + '%</span>' +
+        '<span class="sp-cues">' + cues + '</span>' +
+        '<span class="sp-fix">' +
+          '<select id="sp-sel-' + b.index + '">' + opts + '</select>' +
+          '<button type="button" onclick="correctBlock(' + b.index + ', \'' + b.kind + '\')">Correct</button>' +
+        '</span>' +
+        (fix ? '<span class="sp-was">corrected to "' + fix.label + '"' +
+               (fix.corrected_at ? ' at ' + fix.corrected_at : '') + '</span>' : '');
+      host.appendChild(row);
+    });
+  }
+
+  function render() {
+    renderNow();
+    renderStrip();
+    renderBlocks();
+  }
+
+  async function correctBlock(index, kind) {
+    const sel = document.getElementById('sp-sel-' + index);
+    if (!sel) return;
+    try {
+      const resp = await fetch('/api/service-phase/correct', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          session: spData.live ? '' : spData.session_path,
+          block_index: index, kind: kind, label: sel.value
+        })
+      });
+      const data = await resp.json();
+      if (data.success) {
+        spData.corrections = data.corrections || [];
+        renderBlocks();
+        showAlert('Correction saved.', 'success');
+      } else {
+        showAlert('Could not save: ' + data.error, 'error');
+      }
+    } catch (e) {
+      showAlert('Could not save: ' + e, 'error');
+    }
+  }
+
+  async function loadPhases(recompute) {
+    const session = document.getElementById('sp-session').value.trim();
+    const status = document.getElementById('sp-status');
+    const params = [];
+    if (session) params.push('session=' + encodeURIComponent(session));
+    if (recompute) params.push('recompute=1');
+    try {
+      const resp = await fetch('/api/service-phase' + (params.length ? '?' + params.join('&') : ''));
+      const data = await resp.json();
+      if (!data.success) {
+        status.textContent = data.error || 'Could not load.';
+        return;
+      }
+      spData = data;
+      status.textContent = data.session_id + ' · ' + data.bins.length + ' min'
+        + (data.recomputed ? ' · re-run, not saved' : '')
+        + (data.enabled ? '' : ' · detection disabled in settings');
+      render();
+    } catch (e) {
+      status.textContent = 'Could not load: ' + e;
+    }
+  }
+
+  // Live updates. The tick only broadcasts for the running session, so a page that is
+  // reviewing an archived one must ignore them rather than have its view yanked away.
+  const socket = io();
+  socket.on('service_phase_update', function (data) {
+    if (!spData.live) return;
+    spData.current = data.current;
+    spData.blocks = data.blocks || [];
+    renderNow();
+    renderBlocks();
+  });
+
+  document.addEventListener('DOMContentLoaded', function () {
+    loadPhases();
+    setInterval(function () { if (spData.live) loadPhases(); }, 60000);
+  });
+</script>
+{% endblock %}

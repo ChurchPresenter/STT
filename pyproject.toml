@@ -49,6 +49,7 @@ module = [
     "stt.session_meta",
     "stt.http_params",
     "stt.llm_translate",
+    "stt.service_phase",
 ]
 disallow_untyped_defs = true
 
