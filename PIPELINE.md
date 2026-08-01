@@ -5,10 +5,18 @@ from `config/config.default.json`.
 
 - [Four processes, not one](#four-processes-not-one)
 - [Live audio to a saved row](#live-audio-to-a-saved-row)
+- [Three ways a row gets written](#three-ways-a-row-gets-written)
 - [Why a row was hidden](#why-a-row-was-hidden)
+- [Calibration — the other thing that stops transcription](#calibration--the-other-thing-that-stops-transcription)
+- [Who holds the VRAM](#who-holds-the-vram)
 - [Delivery](#delivery)
+- [Who can reach what](#who-can-reach-what)
 - [Translation](#translation)
+- [Two machines](#two-machines)
 - [What flows back](#what-flows-back)
+- [Three timestamps](#three-timestamps)
+- [What is being measured](#what-is-being-measured)
+- [Batch file transcription is a different pipeline](#batch-file-transcription-is-a-different-pipeline)
 - [On stop](#on-stop)
 - [Where each stage lives](#where-each-stage-lives)
 
@@ -54,7 +62,7 @@ flowchart TD
     BUF["<b>Rolling buffer</b><br/>never drained on a timer<br/>clip 45 s → drop oldest 30 s"]
     VAD{"<b>Speech present?</b><br/>energy 100, then Silero 0.5<br/>exception → fails open"}
     HOLD["Hold the audio<br/>force finalise at 2 s silence"]
-    WSP["<b>Whisper</b> — faster-whisper CT2<br/>beam 3 · temp 0.0 forced<br/>prompt = last 200 chars"]
+    WSP["<b>Whisper</b> — faster-whisper CT2<br/>beam 3 · temp 0.0 forced<br/>prompt = last 5 saved rows, 200 chars"]
     P2["<b>Whisper pass 2</b><br/><i>whisper_translate modes only</i><br/>decodes straight to the target language"]
     FIN{"<b>Stopped changing?</b><br/>similarity 0.85 · 7 agreeing passes"}
     LIVE["<b>Live line → screen</b><br/>LocalAgreement-2<br/><i>never saved as a row</i>"]
@@ -87,6 +95,24 @@ flowchart TD
 **Music always wins.** A confident music reading forces the gate to accept, so singing is always
 transcribed; `transcribe_detected_music` decides only whether the row is *shown*.
 
+**Loudness normalisation** (off by default) boosts quiet audio toward `-20 dBFS`, capped so it
+can never clip, and only on the copy handed to Whisper — the buffer, the energy gate and
+calibration all still see raw levels. **Overlap de-duplication** runs before the sentence split,
+trimming any prefix the new text shares with the last saved row or the held fragment.
+
+---
+
+## Three ways a row gets written
+
+The chart above shows one finalisation node for clarity. There are actually three writers, each
+running the full filter chain independently:
+
+| Path | Fires when | Notes |
+|------|-----------|-------|
+| Segment batch | Whisper finalises one or more segments | The normal case; carries `words_json` |
+| Phrase timeout | `phrase_timeout` (2 s) of silence | Recomputes its own confidence, speech type and word data |
+| Stop flush | Session ends | Drains the held fragment; `words_json` is `NULL` |
+
 ---
 
 ## Why a row was hidden
@@ -103,6 +129,62 @@ it. `denied_reason` is the complete vocabulary — the first rule to fire wins.
 | 4 | *(none)* | Profanity filter — rewrites the text in place and keeps the verbatim original. Not a rejection |
 | 5 | `short` | Fewer words than `min_words`. Off by default |
 | 6 | `dup` | Fuzzy match ≥ 0.85 against anything already saved this session |
+
+---
+
+## Calibration — the other thing that stops transcription
+
+Besides `stop`, calibration is the only thing that silently halts the transcription path. It
+measures the room in two steps — noise floor, then speech — and while it runs **every chunk is
+diverted before it reaches the rolling buffer**. Whisper sees nothing for the duration.
+
+```mermaid
+flowchart LR
+    ST["Operator starts calibration<br/><i>auto-starts transcription if idle</i>"]
+    S1["Step 1 — noise floor<br/>15 s default, 3–120 s"]
+    S2["Step 2 — speech<br/>same duration"]
+    AN["Analyse<br/>→ suggested energy + VAD thresholds"]
+    BYP["Audio diverted<br/><i>skip_transcription = true</i>"]
+    PASS(["Raw audio passthrough<br/>keeps running"])
+
+    ST --> S1 --> S2 --> AN
+    S1 -.-> BYP
+    S2 -.-> BYP
+    BYP -.-> PASS
+```
+
+Raw audio passthrough is unaffected, so an operator monitoring the feed still hears the room.
+
+---
+
+## Who holds the VRAM
+
+Four models can want the GPU at once, and the order they load in decides whether the one you
+chose actually runs. This is the least visible part of the system and the easiest to get wrong.
+
+```mermaid
+flowchart TD
+    WSPM["Whisper<br/>loaded on first chunk, no warm-up"]
+    NMT["NMT — NLLB / MADLAD<br/>warmed at start if enabled"]
+    LLM["LLM — GGUF<br/>warm-up gets its own long timeout"]
+    PANNSM["PANNs CNN14<br/>cpu by default"]
+    TTSM["TTS — Piper<br/>only if local backend"]
+    GPU[/"GPU memory"/]
+
+    WSPM --> GPU
+    NMT --> GPU
+    LLM --> GPU
+    PANNSM --> GPU
+    TTSM --> GPU
+```
+
+**With `translation_method: llm` the NMT fallback is deliberately not preloaded.** Measured on a
+10 GB card: Whisper took 4202 MiB and NMT 3558 MiB, leaving 1976 MiB — the LLM never fit, so
+every caption fell back to NMT forever. The LLM's warm-up call carries its own long timeout for
+the same reason: if it times out, NMT loads instead and takes the memory the LLM needed.
+
+Unloading is triggered by a session stop, an explicit unload command, disabling translation,
+switching method or model, or the last paired machine unpairing.
 
 ---
 
@@ -174,6 +256,44 @@ never sent audio it will not play.
 **Output delay** holds captions so an operator can correct a row before the audience ever sees
 it; released rows are back-dated to their real time.
 
+**The bare host is not neutral.** Opening `/` with no query parameters redirects to whichever
+display profile is marked active, and `/profile/<name>` expands a saved profile into URL
+parameters. Both are unauthenticated by design — a projector should not need a login.
+
+---
+
+## Who can reach what
+
+One function gates almost everything, and it tries three things in order. An empty IP whitelist
+means *allow all*; localhost is always allowed.
+
+```mermaid
+flowchart TD
+    REQ(["Incoming request"])
+    K{"?key= access token<br/><i>constant-time compare</i>"}
+    S{"Session cookie<br/><i>bound to the issuing IP</i>"}
+    W{"IP whitelist<br/><i>exact or CIDR</i>"}
+    OK(["Allowed"])
+    NO(["403 — auth-required page"])
+    MINT["Mint an IP-bound session cookie<br/><i>so an OBS source keeps working</i>"]
+
+    REQ --> K
+    K -->|match| MINT --> OK
+    K -->|no| S
+    S -->|valid| OK
+    S -->|no| W
+    W -->|listed| OK
+    W -->|not listed| NO
+```
+
+Display surfaces are intentionally open — `/`, `/profile/<name>`, and the live status endpoint.
+Everything that changes state is gated, including every mutating Socket.IO handler, which fails
+closed. A **paired machine bypasses the whitelist entirely** for `/api/translate/*` and health,
+authenticated instead by being in the trusted-client list.
+
+Login is throttled at 5 failures per IP with a 30-second lockout, and if password auth is on
+with a blank password, one is generated at boot and printed to the console.
+
 ---
 
 ## Translation
@@ -216,6 +336,43 @@ process only reads the result.
 Each caption is an independent two-message call — nothing accumulates between sentences, so
 there is no context to clear.
 
+**The glossary only applies to the NMT leg.** Forced terminology is a post-processing replace on
+decoded NMT output — the LLM path, the remote path and both whisper-translate passes never see
+it. Switching translation method silently turns it off.
+
+**Switching target language mid-session does not clear the cache.** Already-translated rows keep
+their old-language text through a stale-language fallback, so a transcript can legitimately end
+up mixed; the per-row `translation_language` column records which row went where. Changing the
+*model* or *method*, by contrast, does clear it.
+
+---
+
+## Two machines
+
+Offload is not a stateless HTTP call. Machine A transcribes; Machine B owns the translation
+model — and A pushes settings into B, so a paired B is not running its own configuration.
+
+```mermaid
+flowchart TD
+    A["<b>Machine A</b> — transcribes"]
+    B["<b>Machine B</b> — translates"]
+
+    A -->|1 · pair request| B
+    B -.->|6-digit code, shown to the operator<br/>expires in 300 s · 5 attempts| A
+    A -->|2 · confirm the code| B
+    A -->|3 · heartbeat every 20 s| B
+    A -->|4 · translate · 15 s timeout · 8000 char cap| B
+    A -->|5 · push target language, glossary,<br/>model and precision| B
+    A -->|6 · unload when finished| B
+    B -.->|health, proxied on a 3 s timeout| A
+```
+
+Pairing is **persisted**, so it survives a restart on both sides. B can serve several A's at
+once, which is why an unload request is refused if any *other* trusted client has been seen in
+the last 60 seconds. The glossary A pushes is held in memory for the session only and never
+written to B's own dictionary. A box can be both A and B simultaneously — serving someone else's
+translation request always translates locally, even on a machine that offloads its own captions.
+
 ---
 
 ## What flows back
@@ -237,8 +394,16 @@ flowchart TD
 
 ### Correcting a caption
 
-A row saved with confidence below `0.7` is flagged `needs_review` and surfaces in the
-corrections queue. Editing one is not a cosmetic fix — the correction propagates.
+Confidence is the **mean per-word probability** from Whisper's word timestamps — not
+`avg_logprob`. A row below `corrections.confidence_threshold` (default `0.7`) is flagged
+`needs_review` at insert time, in the worker, and surfaces in the corrections queue.
+
+> **The queue is only populated if word timestamps are on.** They are requested only when
+> `corrections.enabled` **and** `corrections.confidence_highlighting` are both true. Turn either
+> off and every row stores `confidence = NULL`, nothing is ever flagged, and the review queue is
+> permanently empty. The queue itself returns at most 50 rows, final and not denied.
+
+Editing a row is not a cosmetic fix — the correction propagates.
 
 ```mermaid
 flowchart TD
@@ -250,18 +415,89 @@ flowchart TD
     SCR["Re-broadcast to every screen"]
     DEN["Restore a hidden row<br/>denied → visible"]
 
+    MRK["Bookmark a row<br/>marked = 1, independent of review"]
+    DIS["Discard a staged row<br/><i>DELETE — the one destructive action</i>"]
+
     Q --> ED
+    Q --> MR["Mark reviewed<br/><i>dismiss without editing</i>"]
     ED --> DB
     DB --> INV
     INV --> RT
     RT --> SCR
     ED --> DEN
     DEN --> SCR
+    MR --> DB
+    MRK --> SCR
+    DIS --> SCR
 ```
+
+Three independent flags, often confused: **`needs_review`** is set by the worker from
+confidence, **`denied`** is set by a filter or an operator and hides the row, and **`marked`** is
+a purely manual bookmark with no automatic source. Deny and mark changes are pushed to every open
+page on their own broadcasts rather than riding the normal entries payload.
 
 The verbatim text is never overwritten — `original_text` keeps what the model actually produced
 and `corrected_by` records who changed it, so a corrected transcript stays auditable. The same
-page is where a row hidden by a filter gets restored, which is why nothing is ever deleted.
+page is where a row hidden by a filter gets restored.
+
+**One exception to "nothing is deleted".** With the output delay on, discarding a staged segment
+runs a real `DELETE` — it is the only place in the system where a row is destroyed rather than
+hidden, and it exists so a mis-heard caption never reaches the audience or the transcript.
+
+---
+
+## Three timestamps
+
+All three are written from the same instant, but they are not interchangeable.
+
+| Column | Type | Mutable? | What it is for |
+|--------|------|----------|----------------|
+| `timestamp` | text, second resolution | **yes** — the output delay rewrites it | What exports and the UI display |
+| `ts_ms` | epoch milliseconds | no | Arrival time. What makes replay faithful, and the only ordering key the service-phase detector uses |
+| `translation_ts_ms` | epoch milliseconds | no | When the translation was written. Exists because translation arrives as a later async update, so the row's own `ts_ms` cannot show the lag a viewer actually experienced |
+
+---
+
+## What is being measured
+
+Instrumentation runs in both processes and is wrapped so it can never break a caption.
+
+| Metric | Where | Note |
+|--------|-------|------|
+| `infer_ms_ema`, `rtf_ema` | worker, after each decode | Pushed to shared state at most once a second, not per chunk |
+| `segments_per_min`, `rows_saved` | worker | |
+| `queue_depth` | worker | The **raw-audio passthrough** queue, max 10 — *not* a transcription backlog |
+| local / remote translate ms | web | Comparing the two isolates network overhead from model time |
+| TTS synthesis ms | web | |
+| Access log | web | Every request and every Socket.IO action, capped at 50,000 rows |
+
+Real-time factor above `1.0` reads as degraded and above `1.5` as an error. All live metrics are
+nulled when transcription is not running, so an idle machine never shows stale green.
+
+The access log **drops the query string on purpose**, because it can carry an access token;
+routes add their own curated detail instead.
+
+---
+
+## Batch file transcription is a different pipeline
+
+Uploading a file does not run the live path. Almost every stage differs, which matters when
+comparing output between the two.
+
+| | Live | File |
+|---|---|---|
+| Audio | 1 s chunks into a rolling buffer | whole file, one decode |
+| Model | `model` (default `small`) | `file_transcription.model` — a *different*, smaller default |
+| beam_size | 3 | 5 |
+| temperature | forced to 0.0 | fallback ladder 0.0 → 0.8 |
+| VAD · PANNs · energy gate | yes | none |
+| Filters | six | profanity only |
+| Confidence / review queue | yes | none |
+| Session database | every row written | nothing written — segments go straight to the browser |
+| Translation | dispatcher + cache | own chain, no cache |
+
+The file path also unloads Whisper before loading a translator, making the VRAM hand-off
+explicit, and always clears the model cache afterwards so a file job cannot poison the live one.
 
 ---
 
@@ -295,6 +531,9 @@ portable file rather than a database plus sidecars.
 | VAD + music bypass | `speech_to_text.py:16266` · `:16901` |
 | PANNs detector thread | `speech_to_text.py:3354-3432` · `stt/segments.py:8` |
 | Whisper decode params | `speech_to_text.py:316` · `:17013` |
+| Loudness normalisation (off by default) | `speech_to_text.py:16938-16955` |
+| Context prompt from saved rows | `speech_to_text.py:16983-17007` |
+| Overlap de-duplication | `stt/text_utils.py:333` |
 | Finalisation rule | `speech_to_text.py:2758-2918` |
 | Live-line stabiliser | `stt/hypothesis_buffer.py:34` |
 | Sentence split + pending buffer | `stt/text_utils.py:152` · `speech_to_text.py:17180` |
@@ -305,6 +544,16 @@ portable file rather than a database plus sidecars.
 | LLM validation | `stt/llm_translate.py:335` |
 | Service phase detector | `stt/service_phase.py` · `speech_to_text.py:14184` |
 | Teardown / exports | `speech_to_text.py:17955-18030` · `stt/file_mover.py:445` |
+| Calibration | `speech_to_text.py:5064` · `:16662` · `stt/calibration.py:35` |
+| Model load / unload | `speech_to_text.py:1679` · `:2057` · `:15663` · `:10166` |
+| Auth gate | `speech_to_text.py:4248` · socket gate `:13476` |
+| Display profiles | `speech_to_text.py:4174` · `:5519` |
+| Review queue · mark · deny · stage | `:10441` · `:13994` · `:13952` · `:13890-13948` |
+| Remote pairing + heartbeat | `speech_to_text.py:7154-7434` · `:6483` |
+| Session provenance | `stt/session_meta.py` · `speech_to_text.py:1082` · `:3739` |
+| Metrics + access log | `stt/metrics.py` · `stt/request_log.py` · `:3915` |
+| Watchdog + self-update | `stt/watchdog.py:1505` · `:1884` · `stt/self_update.py` |
+| Batch file path | `speech_to_text.py:8390` |
 
 ---
 
