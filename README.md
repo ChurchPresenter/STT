@@ -133,6 +133,7 @@ Run once at startup via Task Scheduler:
 | `/file` | File upload and batch transcription |
 | `/translation` | Translation settings, language pairs, TTS voice selection |
 | `/corrections` | Review and edit transcription segments |
+| `/service-phase` | Detected service part (songs / speaking / quiet) and operator review |
 | `/word-highlighting` | Manage highlighted phrases |
 | `/url-builder` | Build and save display profiles (fonts, colors, layout URL parameters) |
 | `/live-settings` | Audio device, language, VAD settings |
@@ -143,7 +144,9 @@ Run once at startup via Task Scheduler:
 
 ## Documentation
 
-See [INSTALL.md](INSTALL.md) for detailed installation instructions, system requirements, and troubleshooting.
+- [PIPELINE.md](PIPELINE.md) — how audio becomes a caption: the four processes, every stage and the number that governs it, and what happens when translation declines.
+- [INSTALL.md](INSTALL.md) — detailed installation instructions, system requirements, and troubleshooting.
+- [DESIGN.md](DESIGN.md) — colours, typography and component rules for the control UI.
 
 ## System Requirements
 
