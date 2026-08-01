@@ -86,8 +86,7 @@
 </div>
 
 <div class="sp-toolbar">
-  <input type="text" id="sp-session" placeholder="Path to a saved session .db (blank = live session)">
-  <button type="button" id="sp-load" onclick="loadPhases()">Load</button>
+  <button type="button" id="sp-load" onclick="loadPhases()">Refresh</button>
   <button type="button" id="sp-recompute" onclick="loadPhases(true)">Re-run detector</button>
   <span id="sp-status" style="color: var(--text-secondary); font-size: 0.86em;"></span>
 </div>
@@ -114,7 +113,7 @@
                      'Communion', 'Prayer', 'Poem', 'Closing', 'Speaking', 'Music', 'Other'];
   const SP_KINDS = { 'M': 'Songs', 'S': 'Speaking', '_': 'Quiet' };
 
-  let spData = { blocks: [], bins: [], corrections: [], session_path: '' };
+  let spData = { blocks: [], bins: [], corrections: [] };
 
   function fmtClock(ms, base) {
     const s = Math.max(0, Math.round((ms - base) / 1000));
@@ -228,10 +227,7 @@
       const resp = await fetch('/api/service-phase/correct', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          session: spData.live ? '' : spData.session_path,
-          block_index: index, kind: kind, label: sel.value
-        })
+        body: JSON.stringify({ block_index: index, kind: kind, label: sel.value })
       });
       const data = await resp.json();
       if (data.success) {
@@ -247,13 +243,9 @@
   }
 
   async function loadPhases(recompute) {
-    const session = document.getElementById('sp-session').value.trim();
     const status = document.getElementById('sp-status');
-    const params = [];
-    if (session) params.push('session=' + encodeURIComponent(session));
-    if (recompute) params.push('recompute=1');
     try {
-      const resp = await fetch('/api/service-phase' + (params.length ? '?' + params.join('&') : ''));
+      const resp = await fetch('/api/service-phase' + (recompute ? '?recompute=1' : ''));
       const data = await resp.json();
       if (!data.success) {
         status.textContent = data.error || 'Could not load.';
@@ -269,11 +261,9 @@
     }
   }
 
-  // Live updates. The tick only broadcasts for the running session, so a page that is
-  // reviewing an archived one must ignore them rather than have its view yanked away.
+  // Live updates straight from the detector tick.
   const socket = io();
   socket.on('service_phase_update', function (data) {
-    if (!spData.live) return;
     spData.current = data.current;
     spData.blocks = data.blocks || [];
     renderNow();
@@ -282,7 +272,7 @@
 
   document.addEventListener('DOMContentLoaded', function () {
     loadPhases();
-    setInterval(function () { if (spData.live) loadPhases(); }, 60000);
+    setInterval(loadPhases, 60000);
   });
 </script>
 {% endblock %}

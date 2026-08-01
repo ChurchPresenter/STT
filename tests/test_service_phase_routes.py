@@ -4,9 +4,9 @@ Extracted from the monolith and run against a stub namespace (see tests/conftest
 module cannot be imported, and CI installs no Flask. jsonify is stubbed to return the
 mapping unchanged, which is what these assertions care about.
 
-The behaviour worth guarding here is confinement and survivability: the session argument
-reaches sqlite, so it must go through the path-safety helper, and a session recorded before
-this feature existed must read as empty rather than as an error.
+These routes are live-only and take no path from the caller, so there is nothing to
+confine — the behaviour worth guarding is that they read the running session and nothing
+else, and that a session without the tables reads as empty rather than as an error.
 """
 
 import sqlite3
@@ -47,13 +47,7 @@ def session_db(tmp_path, spec="M" * 5 + "S" * 12, name="2026-03-01_093218.db", a
     return path
 
 
-def make_ns(*, live_db=None, safe=True, params=None, args=None):
-    calls = {"safe_managed_path": []}
-
-    def _safe(path, base_dir=None):
-        calls["safe_managed_path"].append(path)
-        return path if safe else None
-
+def make_ns(*, live_db=None, params=None, args=None):
     ns = extract_definitions(
         "speech_to_text.py",
         ["_service_phase_resolve_db", "get_service_phase", "save_service_phase_correction",
@@ -66,7 +60,6 @@ def make_ns(*, live_db=None, safe=True, params=None, args=None):
             })(),
             "jsonify": lambda payload: payload,
             "check_ip_whitelist": lambda: True,
-            "safe_managed_path": _safe,
             "sqlite3": sqlite3,
             "coerce_int": coerce_int,
             "_control_params": lambda keep_blank=False: params or {},
@@ -79,7 +72,6 @@ def make_ns(*, live_db=None, safe=True, params=None, args=None):
             "app": type("A", (), {"route": staticmethod(lambda *a, **k: (lambda f: f))})(),
             "datetime": __import__("datetime").datetime,
         })
-    ns["_calls"] = calls
     return ns
 
 
@@ -105,52 +97,41 @@ class TestFirstSunday:
 
 
 class TestGetServicePhase:
-    def test_returns_the_live_sessions_saved_timeline(self, tmp_path):
+    def test_returns_the_running_sessions_saved_timeline(self, tmp_path):
         db = session_db(tmp_path)
         body = make_ns(live_db=db)["get_service_phase"]()
         assert body["success"] is True
-        assert body["live"] is True
         assert [b["kind"] for b in body["blocks"]] == ["M", "S"]
         assert body["current"]["kind"] == "S"
+        assert body["session_id"] == "2026-03-01_093218.db"
 
     def test_no_running_session_is_a_404_not_a_crash(self):
-        result = make_ns(live_db=None)["get_service_phase"]()
-        body, status = result
+        body, status = make_ns(live_db=None)["get_service_phase"]()
         assert status == 404 and body["success"] is False
 
-    def test_a_session_argument_goes_through_path_confinement(self, tmp_path):
+    def test_a_session_argument_is_ignored(self, tmp_path):
+        # The routes are live-only: a caller-supplied path must not reach sqlite at all.
         db = session_db(tmp_path)
-        ns = make_ns(args={"session": db})
-        ns["get_service_phase"]()
-        assert ns["_calls"]["safe_managed_path"] == [db]
-
-    def test_a_rejected_path_is_denied(self, tmp_path):
-        db = session_db(tmp_path)
-        body, status = make_ns(args={"session": db}, safe=False)["get_service_phase"]()
-        assert status == 403 and body["success"] is False
-
-    def test_a_missing_file_is_a_404(self, tmp_path):
-        _, status = make_ns(args={"session": str(tmp_path / "gone.db")})["get_service_phase"]()
-        assert status == 404
+        other = session_db(tmp_path, name="2026-01-01_000000.db")
+        body = make_ns(live_db=db, args={"session": other})["get_service_phase"]()
+        assert body["session_id"] == "2026-03-01_093218.db"
 
     def test_recompute_reruns_the_detector_without_saving(self, tmp_path):
-        # How a session recorded before this feature existed gets reviewed.
         db = session_db(tmp_path, analyzed=False)
-        body = make_ns(args={"session": db, "recompute": "1"})["get_service_phase"]()
+        body = make_ns(live_db=db, args={"recompute": "1"})["get_service_phase"]()
         assert body["recomputed"] is True
         assert [b["kind"] for b in body["blocks"]] == ["M", "S"]
         # Nothing was written: reading it back without recompute is still empty.
-        plain = make_ns(args={"session": db})["get_service_phase"]()
-        assert plain["blocks"] == []
+        assert make_ns(live_db=db)["get_service_phase"]()["blocks"] == []
 
     def test_a_session_without_the_tables_reads_as_empty(self, tmp_path):
         db = session_db(tmp_path, analyzed=False)
-        body = make_ns(args={"session": db})["get_service_phase"]()
+        body = make_ns(live_db=db)["get_service_phase"]()
         assert body["success"] is True and body["blocks"] == []
 
     def test_first_sunday_is_reported_from_the_session_name(self, tmp_path):
         db = session_db(tmp_path, name="2026-03-01_093218.db")
-        assert make_ns(args={"session": db})["get_service_phase"]()["first_sunday"] is True
+        assert make_ns(live_db=db)["get_service_phase"]()["first_sunday"] is True
 
 
 class TestSaveCorrection:
@@ -176,17 +157,19 @@ class TestSaveCorrection:
                                params={"block_index": 1})["save_service_phase_correction"]()
         assert status == 400 and body["success"] is False
 
-    def test_the_session_argument_is_confined(self, tmp_path):
+    def test_a_session_argument_cannot_redirect_the_write(self, tmp_path):
+        # Live-only: a path in the body must not steer the correction to another file.
         db = session_db(tmp_path)
-        ns = make_ns(params={"session": db, "block_index": 0, "label": "Songs"})
-        ns["save_service_phase_correction"]()
-        assert ns["_calls"]["safe_managed_path"] == [db]
+        other = session_db(tmp_path, name="2026-01-01_000000.db")
+        make_ns(live_db=db, params={"session": other, "block_index": 0,
+                                    "label": "Songs"})["save_service_phase_correction"]()
+        assert len(load_corrections(sqlite3.connect(db))) == 1
+        assert load_corrections(sqlite3.connect(other)) == []
 
-    def test_a_rejected_path_cannot_be_written(self, tmp_path):
-        db = session_db(tmp_path)
-        _, status = make_ns(params={"session": db, "block_index": 0, "label": "x"},
-                               safe=False)["save_service_phase_correction"]()
-        assert status == 403
+    def test_no_running_session_is_a_404(self):
+        _, status = make_ns(live_db=None, params={"block_index": 0,
+                                                  "label": "x"})["save_service_phase_correction"]()
+        assert status == 404
 
     def test_long_free_text_is_truncated_not_stored_whole(self, tmp_path):
         db = session_db(tmp_path)

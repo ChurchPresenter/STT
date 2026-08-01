@@ -4609,15 +4609,12 @@ def service_phase_page():
     return render_template("service-phase.html")
 
 
-def _service_phase_resolve_db(session):
-    """(path, error_response) for a session argument, or the live session when absent."""
-    if session:
-        abs_path = safe_managed_path(session)  # commonpath + realpath confinement
-        if abs_path is None:
-            return None, (jsonify({"success": False, "error": "Access denied"}), 403)
-        if not os.path.isfile(abs_path):
-            return None, (jsonify({"success": False, "error": "Session not found"}), 404)
-        return abs_path, None
+def _service_phase_resolve_db():
+    """(path, error_response) for the running session.
+
+    Live only, deliberately. These routes take no path from the caller, so there is no
+    path to confine and no way to reach a file outside the running session.
+    """
     live = _service_phase_session_db()
     if not live or not os.path.exists(live):
         return None, (jsonify({"success": False, "error": "No session is running"}), 404)
@@ -4626,17 +4623,17 @@ def _service_phase_resolve_db(session):
 
 @app.route("/api/service-phase")
 def get_service_phase():
-    """Detected phases for the live session, or for a past one via ?session=<path>.
+    """Detected phases for the running session.
 
-    ``?recompute=1`` re-runs the detector over the stored rows instead of reading the
-    saved output, without writing anything. That is how a session recorded before this
-    feature existed — or one recorded under different settings — gets reviewed, and it is
-    the loop that makes the logic improvable: change a threshold, replay, compare.
+    ``?recompute=1`` re-runs the detector over the session's rows instead of reading the
+    output the tick saved, without writing anything. That is what makes the logic
+    improvable without waiting: change a threshold, reload, compare against what the
+    operator is watching happen.
     """
     if not check_ip_whitelist():
         return jsonify({"success": False, "error": "Access denied"}), 403
 
-    db_path, err = _service_phase_resolve_db(request.args.get("session"))
+    db_path, err = _service_phase_resolve_db()
     if err:
         return err
 
@@ -4657,8 +4654,6 @@ def get_service_phase():
     return jsonify({
         "success": True,
         "session_id": os.path.basename(db_path),
-        "session_path": db_path,
-        "live": bool(not request.args.get("session")),
         "recomputed": recompute,
         "enabled": bool(cfg.get("enabled", True)),
         "first_sunday": _service_phase_first_sunday(db_path),
@@ -4677,7 +4672,7 @@ def save_service_phase_correction():
         return jsonify({"success": False, "error": "Access denied"}), 403
 
     data = _control_params(keep_blank=True)
-    db_path, err = _service_phase_resolve_db(data.get("session"))
+    db_path, err = _service_phase_resolve_db()
     if err:
         return err
 
