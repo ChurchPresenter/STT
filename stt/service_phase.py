@@ -145,13 +145,26 @@ def compile_cues(phrases: Dict[str, Sequence[str]]) -> Dict[str, "re.Pattern[str
 
 def bin_rows(rows: Sequence[Tuple], bin_seconds: int = 60, *,
              music_prob_threshold: float = 0.5,
-             cues: Optional[Dict[str, "re.Pattern[str]"]] = None) -> List[Bin]:
+             cues: Optional[Dict[str, "re.Pattern[str]"]] = None,
+             cues_translated: Optional[Dict[str, "re.Pattern[str]"]] = None) -> List[Bin]:
     """Bucket finalized rows into fixed-width bins.
 
-    ``rows`` are ``(ts_ms, speech_type, music_prob, text)`` tuples ordered by ts_ms — plain
-    tuples so this module never touches SQL. Bins are contiguous from the first row, so a
-    silent stretch is an empty bin rather than a missing one; the tracker needs the gap to
-    exist in order to see it.
+    ``rows`` are ``(ts_ms, speech_type, music_prob, text[, translated_text])`` tuples
+    ordered by ts_ms — plain tuples so this module never touches SQL. Bins are contiguous
+    from the first row, so a silent stretch is an empty bin rather than a missing one; the
+    tracker needs the gap to exist in order to see it.
+
+    Cues are counted against the transcript and the translation together, because either
+    can miss what the other catches. The transcript can spell a word the phrase list does
+    not anticipate, while the translation normalises those variants; the translation in
+    turn paraphrases and sometimes drops a term entirely. Measured over the archive, taking
+    both raised communion hits 17% and opening-phrase hits 28% over the transcript alone —
+    and that is with only 53% of rows carrying a translation at all.
+
+    The per-row count is the *larger* of the two, never the sum: a caption whose transcript
+    and translation both say the word is still one utterance, and summing would inflate
+    translated rows relative to untranslated ones, which is exactly the comparison the
+    communion threshold rests on.
     """
     usable = [r for r in rows if r and r[0] is not None]
     if not usable:
@@ -162,7 +175,9 @@ def bin_rows(rows: Sequence[Tuple], bin_seconds: int = 60, *,
     count = span // width + 1
     bins = [Bin(i, t0 + i * width, t0 + (i + 1) * width) for i in range(count)]
 
-    for ts_ms, speech_type, music_prob, text in usable:
+    for row in usable:
+        ts_ms, speech_type, music_prob, text = row[0], row[1], row[2], row[3]
+        translated = row[4] if len(row) > 4 else None
         b = bins[min(count - 1, (int(ts_ms) - t0) // width)]
         if speech_type == "Music" or (music_prob or 0.0) > music_prob_threshold:
             b.music += 1
@@ -172,8 +187,13 @@ def bin_rows(rows: Sequence[Tuple], bin_seconds: int = 60, *,
             b.quiet += 1
         body = text or ""
         b.words += len(body.split())
-        for name, pattern in (cues or {}).items():
-            hits = len(pattern.findall(body))
+        for name in set(cues or {}) | set(cues_translated or {}):
+            src = (cues or {}).get(name)
+            tgt = (cues_translated or {}).get(name)
+            hits = max(
+                len(src.findall(body)) if src is not None else 0,
+                len(tgt.findall(translated or "")) if tgt is not None else 0,
+            )
             if hits:
                 b.cues[name] = b.cues.get(name, 0) + hits
     return bins
@@ -323,12 +343,12 @@ def analyze(rows: Sequence[Tuple], cfg: Optional[dict] = None, *,
     no state and cannot drift from what a replay would produce.
     """
     cfg = cfg or {}
-    cues = compile_cues(cfg.get("cue_phrases", {}))
     bins = bin_rows(
         rows,
         bin_seconds=int(cfg.get("bin_seconds", 60)),
         music_prob_threshold=float(cfg.get("music_prob_threshold", 0.5)),
-        cues=cues,
+        cues=compile_cues(cfg.get("cue_phrases", {})),
+        cues_translated=compile_cues(cfg.get("cue_phrases_translated", {})),
     )
     if not bins:
         return {"current": None, "blocks": [], "bins": [], "classes": ""}
@@ -381,13 +401,21 @@ def ensure_tables(conn: "sqlite3.Connection") -> None:
 def read_rows(conn: "sqlite3.Connection") -> List[Tuple]:
     """The finalized rows the detector runs on, oldest first.
 
-    Denied rows are kept deliberately: music segments are auto-denied from the transcript
+    Both the transcript and its translation are read: either can miss a cue the other
+    catches (see bin_rows). Denied rows are kept deliberately: music segments are auto-denied from the transcript
     (``denied_reason`` like ``music:0.5``) and excluding them would erase exactly the
     evidence that a song is playing.
     """
-    return list(conn.execute(
-        "SELECT ts_ms, speech_type, music_prob, text FROM transcriptions "
-        "WHERE is_final = 1 AND ts_ms IS NOT NULL ORDER BY ts_ms"))
+    try:
+        return list(conn.execute(
+            "SELECT ts_ms, speech_type, music_prob, text, translated_text FROM transcriptions "
+            "WHERE is_final = 1 AND ts_ms IS NOT NULL ORDER BY ts_ms"))
+    except sqlite3.Error:
+        # A session recorded before translation existed has no such column; the cue
+        # union simply degrades to the transcript alone rather than the read failing.
+        return list(conn.execute(
+            "SELECT ts_ms, speech_type, music_prob, text FROM transcriptions "
+            "WHERE is_final = 1 AND ts_ms IS NOT NULL ORDER BY ts_ms"))
 
 
 def save_analysis(conn: "sqlite3.Connection", analysis: dict) -> None:

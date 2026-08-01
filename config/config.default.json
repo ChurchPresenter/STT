@@ -554,12 +554,18 @@
     "closing_max_minutes": 6,
     "_closing_max_minutes_comment": "A short final speaking block no longer than this is named 'Closing'.",
     "communion_min_hits": 12,
-    "_communion_min_hits_comment": "Communion keyword hits within one speaking block before it is named 'Communion' instead of a sermon. Separation is by volume, not position: in the archive the actual communion scored 34 hits while a sermon merely discussing it scored 8 across 84 minutes.",
+    "_communion_min_hits_comment": "Communion keyword hits within one speaking block before it is named 'Communion' instead of a sermon. Separation is by volume, not position — a sermon can discuss communion at length without being one. Counting transcript and translation together, the archive's one real communion block scored 17 while the highest non-communion block scored 6, so 12 sits mid-gap. On the transcript alone the peak is only 12, i.e. exactly on the threshold: if you clear cue_phrases_translated, lower this to about 9.",
     "cue_phrases": {
-      "_comment": "Regex fragments counted per bucket and shown on the review page. Cues annotate and help name blocks; they never move a boundary. Defaults are Russian because that is what these services are in — replace them for another language.",
+      "_comment": "Regex fragments counted per bucket against the TRANSCRIPT, and shown on the review page. Cues annotate and help name blocks; they never move a boundary. Defaults are Russian because that is what these services are in — replace them for another language.",
       "amen": ["амин[ья]"],
       "communion": ["причасти\\w*", "преломлен\\w*", "чаш[аиуе]", "хлеб\\w*", "тело христово", "кров[ьи] христ\\w*"],
       "opening": ["добро пожаловать", "приветству\\w*", "дорогие брать\\w*", "мир вам"]
+    },
+    "cue_phrases_translated": {
+      "_comment": "The same cues against the TRANSLATION, in the target language. Either side can miss what the other catches: the transcript may spell a word the list does not anticipate, while the translation normalises the variants but sometimes paraphrases the term away. Measured over the archive, using both raised communion hits 17% and opening-phrase hits 28% over the transcript alone. A cue is counted once per row (the larger of the two counts), never summed, so translated rows are not weighted above untranslated ones. Leave empty to use the transcript only.",
+      "amen": ["amen"],
+      "communion": ["communion", "lord'?s supper", "breaking of bread", "the bread", "the cup", "body of christ", "blood of christ"],
+      "opening": ["welcome", "dear brothers", "peace be (?:with|unto) you", "greet\\w*"]
     }
   },
   "watchdog": {

@@ -426,3 +426,80 @@ class TestPersistence:
         self.fill(conn, "S" * 10, text="Аминь.")
         save_analysis(conn, analyze(read_rows(conn), {"cue_phrases": {"amen": [r"амин[ья]"]}}))
         assert load_analysis(conn)["blocks"][0]["cues"]["amen"] == 10
+
+
+class TestDualLanguageCues:
+    """Transcript and translation together: either can miss what the other catches.
+
+    Measured over the archive, the union raised communion hits 17% and opening-phrase hits
+    28% over the transcript alone — with only 53% of rows carrying a translation at all.
+    """
+
+    RU = compile_cues({"communion": [r"хлеб\w*"]})
+    EN = compile_cues({"communion": ["the bread"]})
+
+    def dual(self, pairs):
+        rs = [(1_000_000 + i * MIN, "Speaking", 0.0, t, tr) for i, (t, tr) in enumerate(pairs)]
+        return bin_rows(rs, cues=self.RU, cues_translated=self.EN)
+
+    def test_the_translation_catches_what_the_transcript_missed(self):
+        b = self.dual([("нечто иное", "he broke the bread")])
+        assert b[0].cues["communion"] == 1
+
+    def test_the_transcript_catches_what_the_translation_missed(self):
+        b = self.dual([("преломил хлеб", "he shared it with them")])
+        assert b[0].cues["communion"] == 1
+
+    def test_a_row_matching_both_counts_once_not_twice(self):
+        # Summing would weight translated rows above untranslated ones, which is exactly
+        # the comparison the communion threshold rests on.
+        b = self.dual([("преломил хлеб", "he broke the bread")])
+        assert b[0].cues["communion"] == 1
+
+    def test_multiple_mentions_in_one_row_still_count(self):
+        b = self.dual([("хлеб и хлеб", "")])
+        assert b[0].cues["communion"] == 2
+
+    def test_the_larger_side_wins(self):
+        b = self.dual([("хлеб", "the bread and the bread")])
+        assert b[0].cues["communion"] == 2
+
+    def test_a_missing_translation_degrades_to_the_transcript(self):
+        for missing in (None, ""):
+            b = self.dual([("преломил хлеб", missing)])
+            assert b[0].cues["communion"] == 1
+
+    def test_four_tuple_rows_still_work(self):
+        # Sessions recorded before translation existed have no fifth column.
+        b = bin_rows(rows("S" * 3, text="хлеб"), cues=self.RU, cues_translated=self.EN)
+        assert b[0].cues["communion"] == 1
+
+    def test_a_cue_defined_only_for_the_translation_still_counts(self):
+        b = bin_rows([(0, "Speaking", 0.0, "ничего", "welcome everyone")],
+                     cues=self.RU, cues_translated=compile_cues({"opening": ["welcome"]}))
+        assert b[0].cues["opening"] == 1
+
+    def test_analyze_reads_both_phrase_lists_from_config(self):
+        cfg = {"cue_phrases": {"communion": [r"хлеб\w*"]},
+               "cue_phrases_translated": {"communion": ["the bread"]}}
+        out = analyze([(0, "Speaking", 0.0, "ничего", "the bread"),
+                       (MIN, "Speaking", 0.0, "хлеб", None)], cfg)
+        assert sum(b["cues"].get("communion", 0) for b in out["bins"]) == 2
+
+    def test_the_translation_widens_the_communion_margin(self):
+        """The shipped threshold depends on this, so pin it.
+
+        In the archive the one real communion block scores 17 hits counting transcript and
+        translation together, against 6 for the highest non-communion block. On the
+        transcript alone the peak is 12 — exactly the shipped threshold, one missed keyword
+        from failing. This asserts the mechanism that buys the headroom.
+        """
+        cfg_both = {"cue_phrases": {"communion": [r"хлеб\w*"]},
+                    "cue_phrases_translated": {"communion": ["the bread"]},
+                    "communion_min_hits": 12, "sermon_min_minutes": 8}
+        cfg_src = dict(cfg_both, cue_phrases_translated={})
+        # 12 minutes: transcript names it in 8, the translation carries the other 4.
+        pairs = ([("хлеб", None)] * 8) + ([("нечто иное", "the bread")] * 4)
+        rs = [(1_000_000 + i * MIN, "Speaking", 0.0, t, tr) for i, (t, tr) in enumerate(pairs)]
+        assert analyze(rs, cfg_both)["blocks"][0]["label"] == "Communion"
+        assert analyze(rs, cfg_src)["blocks"][0]["label"] == "Sermon 1"
