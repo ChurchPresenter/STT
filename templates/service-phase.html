@@ -40,6 +40,13 @@
         border: 1px solid var(--border); border-radius: var(--radius-sm); margin-bottom: 6px;
       }
       .sp-block.corrected { border-color: var(--warning); }
+      .sp-block.unusual { border-left: 3px solid var(--warning); }
+      .sp-flag { color: var(--warning); font-size: 0.8em; width: 100%; padding-left: 120px; padding-top: 4px; }
+      .sp-notes {
+        padding: 10px 14px; margin-bottom: 14px; border-radius: var(--radius-sm);
+        background: rgba(245,158,11,0.12); border: 1px solid var(--warning);
+        color: var(--warning); font-size: 0.88em;
+      }
       .sp-block.ongoing { border-color: var(--success); }
       .sp-time { font-variant-numeric: tabular-nums; color: var(--text-secondary); min-width: 108px; font-size: 0.9em; }
       .sp-label { font-weight: 600; color: var(--text-primary); min-width: 120px; }
@@ -90,6 +97,8 @@
   <span class="sp-now-kind sp-kind-_" id="sp-now-kind">—</span>
   <span class="sp-now-meta" id="sp-now-meta">Waiting for a session…</span>
 </div>
+
+<div class="sp-notes" id="sp-notes" style="display: none;"></div>
 
 <div class="sp-strip" id="sp-strip"></div>
 
@@ -171,7 +180,9 @@
     spData.blocks.forEach(b => {
       const fix = correctionFor(b.index);
       const row = document.createElement('div');
-      row.className = 'sp-block' + (fix ? ' corrected' : '') + (b.ongoing ? ' ongoing' : '');
+      const flags = b.unusual || [];
+      row.className = 'sp-block' + (fix ? ' corrected' : '') + (b.ongoing ? ' ongoing' : '')
+        + (flags.length ? ' unusual' : '');
 
       const cues = Object.entries(b.cues || {}).map(([k, v]) => k + '×' + v).join(' ');
       const opts = SP_LABELS.map(l =>
@@ -188,13 +199,23 @@
           '<select id="sp-sel-' + b.index + '">' + opts + '</select>' +
           '<button type="button" onclick="correctBlock(' + b.index + ', \'' + b.kind + '\')">Correct</button>' +
         '</span>' +
+        (flags.length ? '<span class="sp-flag">&#9888; ' + flags.join(' · ') + '</span>' : '') +
         (fix ? '<span class="sp-was">corrected to "' + fix.label + '"' +
                (fix.corrected_at ? ' at ' + fix.corrected_at : '') + '</span>' : '');
       host.appendChild(row);
     });
   }
 
+  function renderNotes() {
+    const el = document.getElementById('sp-notes');
+    const notes = spData.notes || [];
+    if (!notes.length) { el.style.display = 'none'; return; }
+    el.style.display = '';
+    el.innerHTML = notes.map(n => '&#9888; ' + n).join('<br>');
+  }
+
   function render() {
+    renderNotes();
     renderNow();
     renderStrip();
     renderBlocks();

@@ -88,6 +88,7 @@ class Block:
         "ongoing",
         "start_bin",
         "start_ms",
+        "unusual",
     )
 
     def __init__(self, index: int, kind: str, start_bin: int, end_bin: int,
@@ -102,6 +103,7 @@ class Block:
         self.confidence: float = 0.0
         self.cues: Dict[str, int] = {}
         self.ongoing = False
+        self.unusual: List[str] = []
 
     @property
     def minutes(self) -> int:
@@ -114,7 +116,7 @@ class Block:
             "start_ms": self.start_ms, "end_ms": self.end_ms,
             "minutes": self.minutes, "label": self.label,
             "confidence": round(self.confidence, 2), "cues": dict(self.cues),
-            "ongoing": self.ongoing,
+            "ongoing": self.ongoing, "unusual": list(self.unusual),
         }
 
 
@@ -264,6 +266,55 @@ def track_blocks(classes: Sequence[str], bins: Sequence[Bin], *,
     return blocks
 
 
+def flag_unusual(blocks: Sequence[Block], cfg: Optional[dict] = None) -> List[str]:
+    """Mark blocks whose duration is outside anything the archive contains, and describe
+    the service as a whole. Returns the service-level notes.
+
+    Duration is genuinely informative — a song set does not run for an hour — but it is
+    used to *flag*, never to relabel. The bands below come from ten ordinary services, and
+    ordinary is the only thing they can describe: the exceptions the operator named happen
+    a few times a year, so none is in the sample. On a music-heavy service or a Christmas
+    play, the long block is real, and a rule that "corrected" it would mislabel precisely
+    the service most worth labelling. So the audio still decides what a block *is*; an
+    implausible duration only lowers confidence and asks the operator to look.
+
+    Observed over 44 music and 38 speaking blocks: music p50 7 min, p95 21, longest 27;
+    speaking p50 12, p95 44, longest 54. Music share of a service ran 27%-61%.
+    """
+    cfg = cfg or {}
+    music_max = int(cfg.get("typical_music_max_minutes", 30))
+    speech_max = int(cfg.get("typical_speaking_max_minutes", 60))
+    share_lo = float(cfg.get("typical_music_share_min", 0.20))
+    share_hi = float(cfg.get("typical_music_share_max", 0.70))
+
+    for b in blocks:
+        b.unusual = []
+        # An ongoing block is judged too. Exceeding a maximum is monotone — once a block
+        # has run longer than anything in the archive, finishing later cannot make that
+        # untrue — and a sermon that has already overrun is exactly what an operator
+        # wants flagged while it is still happening rather than afterwards.
+        if b.kind == MUSIC and b.minutes > music_max:
+            b.unusual.append(f"music runs {b.minutes} min; nothing in the archive exceeds 27")
+        elif b.kind == SPEECH and b.minutes > speech_max:
+            b.unusual.append(f"speaking runs {b.minutes} min; nothing in the archive exceeds 54")
+        if b.unusual:
+            # Structure is still trusted; only the name becomes a weaker claim.
+            b.confidence = min(b.confidence, 0.3)
+
+    notes: List[str] = []
+    music = sum(b.minutes for b in blocks if b.kind == MUSIC)
+    speech = sum(b.minutes for b in blocks if b.kind == SPEECH)
+    if music + speech >= 30:  # too short to characterise before that
+        share = music / float(music + speech)
+        if share > share_hi:
+            notes.append(f"More musical than usual ({share:.0%} of the service; "
+                         f"typical is 27-61%) — a music service or a play would look like this.")
+        elif share < share_lo:
+            notes.append(f"Less musical than usual ({share:.0%} of the service; "
+                         f"typical is 27-61%).")
+    return notes
+
+
 def _sum_cues(bins: Sequence[Bin], block: Block) -> Dict[str, int]:
     out: Dict[str, int] = {}
     for b in bins[block.start_bin:block.end_bin + 1]:
@@ -351,7 +402,7 @@ def analyze(rows: Sequence[Tuple], cfg: Optional[dict] = None, *,
         cues_translated=compile_cues(cfg.get("cue_phrases_translated", {})),
     )
     if not bins:
-        return {"current": None, "blocks": [], "bins": [], "classes": ""}
+        return {"current": None, "blocks": [], "bins": [], "classes": "", "notes": []}
 
     classes = [classify_bin(b, dominance=float(cfg.get("dominance", 0.35))) for b in bins]
     blocks = track_blocks(
@@ -360,12 +411,14 @@ def analyze(rows: Sequence[Tuple], cfg: Optional[dict] = None, *,
         exit_minutes=int(cfg.get("exit_minutes", 3)),
     )
     label_blocks(blocks, bins, cfg, first_sunday=first_sunday)
+    notes = flag_unusual(blocks, cfg)
     current = blocks[-1] if blocks else None
     return {
         "current": current.to_dict() if current else None,
         "blocks": [b.to_dict() for b in blocks],
         "bins": [b.to_dict() for b in bins],
         "classes": "".join(classes),
+        "notes": notes,
     }
 
 
@@ -384,17 +437,30 @@ _DDL = (
     """CREATE TABLE IF NOT EXISTS service_phase_blocks (
         block_index INTEGER PRIMARY KEY, kind TEXT, start_bin INTEGER, end_bin INTEGER,
         start_ms INTEGER, end_ms INTEGER, minutes INTEGER, label TEXT,
-        confidence REAL, cues_json TEXT, ongoing INTEGER)""",
+        confidence REAL, cues_json TEXT, ongoing INTEGER, unusual_json TEXT)""",
     """CREATE TABLE IF NOT EXISTS service_phase_corrections (
         id INTEGER PRIMARY KEY AUTOINCREMENT, block_index INTEGER, start_ms INTEGER,
         end_ms INTEGER, kind TEXT, label TEXT, note TEXT, corrected_at TEXT)""",
 )
 
 
+# Columns added after the tables first shipped. CREATE TABLE IF NOT EXISTS is a no-op on
+# an existing table, so a session started under an earlier build keeps the older shape and
+# the INSERT would fail on the missing column.
+_ADDED_COLUMNS = (("service_phase_blocks", "unusual_json", "TEXT"),)
+
+
 def ensure_tables(conn: "sqlite3.Connection") -> None:
-    """Create the three tables if absent. Safe to call on every tick."""
+    """Create the three tables if absent and add any later columns. Safe on every tick."""
     for stmt in _DDL:
         conn.execute(stmt)
+    for table, column, decl in _ADDED_COLUMNS:
+        try:
+            have = {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
+            if column not in have:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
+        except sqlite3.Error:
+            pass  # a derived table is rebuilt each tick; never block a session over it
     conn.commit()
 
 
@@ -435,11 +501,12 @@ def save_analysis(conn: "sqlite3.Connection", analysis: dict) -> None:
           b["words"], json.dumps(b["cues"], ensure_ascii=False)) for b in analysis.get("bins", [])])
     conn.executemany(
         "INSERT INTO service_phase_blocks (block_index, kind, start_bin, end_bin, start_ms, "
-        "end_ms, minutes, label, confidence, cues_json, ongoing) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "end_ms, minutes, label, confidence, cues_json, ongoing, unusual_json) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         [(b["index"], b["kind"], b["start_bin"], b["end_bin"], b["start_ms"], b["end_ms"],
           b["minutes"], b["label"], b["confidence"],
-          json.dumps(b["cues"], ensure_ascii=False), 1 if b["ongoing"] else 0)
+          json.dumps(b["cues"], ensure_ascii=False), 1 if b["ongoing"] else 0,
+          json.dumps(b.get("unusual", []), ensure_ascii=False))
          for b in analysis.get("blocks", [])])
     conn.commit()
 
@@ -485,9 +552,10 @@ def load_analysis(conn: "sqlite3.Connection") -> dict:
             "FROM service_phase_bins ORDER BY bin_index").fetchall()
         blocks = conn.execute(
             "SELECT block_index, kind, start_bin, end_bin, start_ms, end_ms, minutes, label, "
-            "confidence, cues_json, ongoing FROM service_phase_blocks ORDER BY block_index").fetchall()
+            "confidence, cues_json, ongoing, unusual_json "
+            "FROM service_phase_blocks ORDER BY block_index").fetchall()
     except sqlite3.Error:
-        return {"current": None, "blocks": [], "bins": [], "classes": ""}
+        return {"current": None, "blocks": [], "bins": [], "classes": "", "notes": []}
 
     def _cues(raw: Optional[str]) -> dict:
         try:
@@ -495,11 +563,18 @@ def load_analysis(conn: "sqlite3.Connection") -> dict:
         except ValueError:
             return {}
 
+    def _list(raw: Optional[str]) -> list:
+        try:
+            return json.loads(raw) if raw else []
+        except ValueError:
+            return []
+
     out_bins = [{"index": r[0], "start_ms": r[1], "end_ms": r[2], "music": r[3], "speech": r[4],
                  "quiet": r[5], "words": r[6], "cues": _cues(r[7])} for r in bins]
     out_blocks = [{"index": r[0], "kind": r[1], "start_bin": r[2], "end_bin": r[3],
                    "start_ms": r[4], "end_ms": r[5], "minutes": r[6], "label": r[7],
-                   "confidence": r[8], "cues": _cues(r[9]), "ongoing": bool(r[10])}
+                   "confidence": r[8], "cues": _cues(r[9]), "ongoing": bool(r[10]),
+                   "unusual": _list(r[11] if len(r) > 11 else None)}
                   for r in blocks]
     classes = "".join(
         next((b["kind"] for b in out_blocks if b["start_bin"] <= i <= b["end_bin"]), QUIET)

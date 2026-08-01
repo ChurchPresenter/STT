@@ -503,3 +503,101 @@ class TestDualLanguageCues:
         rs = [(1_000_000 + i * MIN, "Speaking", 0.0, t, tr) for i, (t, tr) in enumerate(pairs)]
         assert analyze(rs, cfg_both)["blocks"][0]["label"] == "Communion"
         assert analyze(rs, cfg_src)["blocks"][0]["label"] == "Sermon 1"
+
+
+class TestUnusualDurations:
+    """Duration flags departures from the archive; it never overrides the audio.
+
+    The bands come from ten ordinary services — music p50 7 min / longest 27, speaking
+    p50 12 / longest 54, music share 27%-61%. None of the exceptions the operator named
+    (music services, Christmas plays) is in that sample, which is exactly why an
+    implausible duration lowers confidence and asks for review rather than relabelling.
+    """
+
+    CFG = {"sermon_min_minutes": 8, "songs_min_minutes": 3,
+           "typical_music_max_minutes": 30, "typical_speaking_max_minutes": 60}
+
+    def blocks_for(self, spec, cfg=None):
+        return analyze(rows(spec), cfg or self.CFG)["blocks"]
+
+    def test_an_hour_of_music_is_flagged(self):
+        b = self.blocks_for("M" * 60 + "S" * 10)[0]
+        assert b["unusual"] and "music runs 60 min" in b["unusual"][0]
+
+    def test_but_it_is_still_music(self):
+        # The audio said music. A play or a carol night is real; relabelling it would be
+        # wrong on precisely the service most worth getting right.
+        b = self.blocks_for("M" * 60 + "S" * 10)[0]
+        assert b["kind"] == MUSIC
+        assert b["label"].startswith("Songs")
+
+    def test_flagging_lowers_confidence(self):
+        long_b = self.blocks_for("M" * 60 + "S" * 10)[0]
+        normal = self.blocks_for("M" * 10 + "S" * 10)[0]
+        assert long_b["confidence"] < normal["confidence"]
+
+    def test_a_normal_length_song_set_is_not_flagged(self):
+        # The longest real song set in the archive is 27 minutes.
+        assert self.blocks_for("M" * 25 + "S" * 10)[0]["unusual"] == []
+
+    def test_a_long_sermon_is_flagged_only_past_the_observed_maximum(self):
+        # The longest real sermon is 54 minutes; 44 must stay unremarkable.
+        assert self.blocks_for("S" * 44)[0]["unusual"] == []
+        assert self.blocks_for("S" * 70 + "M" * 5)[0]["unusual"] != []
+
+    def test_an_ongoing_block_that_has_already_overrun_is_flagged(self):
+        # Exceeding a maximum is monotone: finishing later cannot make it untrue. A sermon
+        # already past anything in the archive is exactly what an operator wants to see
+        # flagged while it is still running, not afterwards.
+        blocks = self.blocks_for("S" * 90)
+        assert blocks[-1]["ongoing"] and blocks[-1]["unusual"] != []
+
+    def test_a_short_ongoing_block_is_not_flagged(self):
+        # It has not finished growing; calling it implausible would be premature.
+        blocks = self.blocks_for("S" * 12)
+        assert blocks[-1]["ongoing"] and blocks[-1]["unusual"] == []
+
+    def test_the_bands_come_from_config(self):
+        cfg = dict(self.CFG, typical_music_max_minutes=5)
+        assert self.blocks_for("M" * 10 + "S" * 10, cfg)[0]["unusual"] != []
+
+
+class TestServiceNotes:
+    CFG = {"sermon_min_minutes": 8, "typical_music_share_min": 0.20,
+           "typical_music_share_max": 0.70}
+
+    def test_a_music_heavy_service_is_noted(self):
+        notes = analyze(rows("M" * 80 + "S" * 10), self.CFG)["notes"]
+        assert notes and "more musical than usual" in notes[0].lower()
+
+    def test_a_typical_balance_is_not_noted(self):
+        # 43% music is the archive median.
+        assert analyze(rows("M" * 40 + "S" * 55), self.CFG)["notes"] == []
+
+    def test_a_sermon_only_service_is_noted(self):
+        notes = analyze(rows("S" * 90), self.CFG)["notes"]
+        assert notes and "less musical" in notes[0].lower()
+
+    def test_a_service_too_short_to_characterise_is_not_judged(self):
+        assert analyze(rows("M" * 10), self.CFG)["notes"] == []
+
+    def test_notes_survive_an_empty_session(self):
+        assert analyze([], self.CFG)["notes"] == []
+
+
+class TestBlocksSchemaMigration:
+    def test_a_table_from_an_earlier_build_gains_the_new_column(self, tmp_path):
+        # CREATE TABLE IF NOT EXISTS is a no-op on an existing table, so without the
+        # migration the next tick's INSERT would fail on a session already running.
+        conn = sqlite3.connect(str(tmp_path / "old.db"))
+        conn.execute("CREATE TABLE service_phase_blocks (block_index INTEGER PRIMARY KEY, "
+                     "kind TEXT, start_bin INTEGER, end_bin INTEGER, start_ms INTEGER, "
+                     "end_ms INTEGER, minutes INTEGER, label TEXT, confidence REAL, "
+                     "cues_json TEXT, ongoing INTEGER)")
+        conn.commit()
+        ensure_tables(conn)
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(service_phase_blocks)")}
+        assert "unusual_json" in cols
+        save_analysis(conn, analyze(rows("M" * 60 + "S" * 10), {"sermon_min_minutes": 8}))
+        assert load_analysis(conn)["blocks"][0]["unusual"] != []
+        conn.close()
