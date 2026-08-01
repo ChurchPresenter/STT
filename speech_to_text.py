@@ -371,6 +371,9 @@ from stt.config_utils import (  # noqa: F401
     _atomic_write_json,
     _merge_missing_keys,
     validate_file,
+    is_known_timezone as _is_known_timezone,
+    resolve_timezone as _resolve_timezone,
+    system_timezone as _system_timezone,
 )
 
 
@@ -768,11 +771,23 @@ if password_auth_config.get("enabled", False) and not password_auth_config.get("
 
 # Timezone Helper Function
 def get_configured_timezone():
-    """Get system timezone."""
-    return datetime.now().astimezone().tzinfo
+    """The timezone transcript rows are stamped in.
+
+    Honours config["timezone"]; mode "auto" (the default) means the machine's own
+    zone, anything else uses "value" as an IANA name. A name this machine cannot
+    load falls back to the system zone with a warning rather than raising —
+    timestamps are written on every row, so a typo in a setting must not be able to
+    stop a service from recording.
+    """
+    tz, note = _resolve_timezone(config.get("timezone"), _system_timezone())
+    if note:
+        print(f"[TIMEZONE] {note}")
+    return tz
 
 
-# Load configured timezone
+# Load configured timezone. Read once at import: the value is stamped onto rows in
+# the worker, which re-imports this module, so a change needs a restart to take
+# effect on both sides — which is what the save endpoint tells the operator.
 configured_timezone = get_configured_timezone()
 print(f"[OK] Using timezone: {configured_timezone}")
 
@@ -5787,6 +5802,9 @@ def get_timezone_settings():
                 "mode": tz_config.get("mode", "auto"),
                 "value": tz_config.get("value", ""),
             },
+            # What the server is actually stamping rows with right now, which differs
+            # from the setting until a restart.
+            "effective": str(configured_timezone),
         }
     )
 
@@ -5803,18 +5821,32 @@ def save_timezone_settings():
     if "timezone" not in config:
         config["timezone"] = {}
 
-    if "mode" in data:
-        config["timezone"]["mode"] = data["mode"]
-    if "value" in data:
-        config["timezone"]["value"] = data["value"]
+    mode = str(data.get("mode", config["timezone"].get("mode", "auto")) or "auto").strip().lower()
+    value = str(data.get("value", config["timezone"].get("value", "")) or "").strip()
+
+    # Reject an unloadable zone here rather than accepting it and silently falling back
+    # to the system zone at the next restart, which is what used to happen.
+    if mode != "auto" and not _is_known_timezone(value):
+        return jsonify({
+            "success": False,
+            "error": (f"Unknown timezone {value!r}. Use an IANA name such as "
+                      f"'America/New_York' or 'Europe/Kyiv', or set mode to 'auto' "
+                      f"to follow the machine's own zone."),
+        }), 400
+
+    config["timezone"]["mode"] = mode
+    config["timezone"]["value"] = "" if mode == "auto" else value
 
     # Save to file
     save_config(config)
 
+    _effective, _note = _resolve_timezone(config["timezone"], _system_timezone())
     return jsonify(
         {
             "success": True,
-            "message": "Timezone settings saved successfully. Restart application to apply.",
+            "effective": str(_effective),
+            "message": ("Timezone saved. Restart the server to apply it — rows already "
+                        "written keep the timezone they were stamped with."),
         }
     )
 

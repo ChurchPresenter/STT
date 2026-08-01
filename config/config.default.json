@@ -580,6 +580,13 @@
       "opening": ["welcome", "dear brothers", "peace be (?:with|unto) you", "greet\\w*"]
     }
   },
+  "timezone": {
+    "_comment": "Timezone that transcript rows are stamped with. Affects the human-readable `timestamp` column, and therefore SRT/HTML exports and the UI. The immutable `ts_ms` column is always epoch milliseconds and is unaffected.",
+    "mode": "auto",
+    "_mode_comment": "'auto' follows the machine's own timezone. Any other value uses `value` below.",
+    "value": "",
+    "_value_comment": "IANA timezone name, e.g. 'America/New_York' or 'Europe/Kyiv'. Only used when mode is not 'auto'. A name this machine cannot load falls back to the system zone with a warning rather than failing, because a typo must not be able to stop a service recording. Takes effect on restart."
+  },
   "watchdog": {
     "update_channel": "main",
     "_update_channel_comment": "Auto-update channel: 'main' = track the latest code on GitHub (default), 'stable' = tagged releases only.",

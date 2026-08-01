@@ -6,12 +6,13 @@ version strings are passed in explicitly; thin wrappers in speech_to_text.py
 supply the live values.
 """
 
+import datetime as _dt
 import json
 import os
 import re
 import shutil
 import tempfile
-from typing import Any, Optional, Tuple
+from typing import Any, Mapping, Optional, Tuple
 
 SUPPORTED_AUDIO_FORMATS = ["mp3", "wav", "flac", "ogg", "m4a", "aac", "wma", "opus"]
 SUPPORTED_VIDEO_FORMATS = [
@@ -119,3 +120,58 @@ def compute_display_version(describe: str, commit: str, version: str) -> str:
     if commit:
         return f"{version}-{commit}"  # frozen build with known commit
     return version
+
+
+def system_timezone() -> _dt.tzinfo:
+    """The machine's own timezone, as a concrete tzinfo."""
+    tz = _dt.datetime.now().astimezone().tzinfo
+    return tz if tz is not None else _dt.timezone.utc
+
+
+def resolve_timezone(tz_config: Optional[Mapping[str, Any]],
+                     system_tz: Optional[_dt.tzinfo] = None,
+                     ) -> Tuple[_dt.tzinfo, Optional[str]]:
+    """Resolve the ``timezone`` config block to a tzinfo, plus a note to log.
+
+    Returns ``(tz, note)``. ``note`` is None when the configuration was used as
+    written, and a human-readable sentence when it could not be and the system zone
+    was used instead — the caller logs it rather than this deciding how to complain.
+
+    Mode ``auto`` (the default, and what every install had before this existed) means
+    the machine's own zone. Any other mode uses ``value`` as an IANA name such as
+    ``America/New_York``. An unknown or unavailable name falls back to the system zone
+    rather than raising: timestamps are stamped on every transcript row, so a typo in a
+    setting must not be able to stop a service from recording.
+    """
+    system = system_tz if system_tz is not None else system_timezone()
+    cfg = tz_config or {}
+    mode = str(cfg.get("mode", "auto") or "auto").strip().lower()
+    value = str(cfg.get("value", "") or "").strip()
+
+    if mode == "auto":
+        return system, None
+    if not value:
+        return system, f"timezone mode is {mode!r} but no value is set; using the system zone"
+
+    try:
+        from zoneinfo import ZoneInfo  # stdlib on 3.9+
+        return ZoneInfo(value), None
+    except Exception as err:  # unknown zone, or no tz database on this machine
+        return system, (f"timezone {value!r} could not be loaded ({type(err).__name__}); "
+                        f"using the system zone")
+
+
+def is_known_timezone(value: str) -> bool:
+    """Whether ``value`` names a timezone this machine can actually load.
+
+    Used to reject a bad name when it is saved, instead of accepting it and silently
+    falling back at the next restart.
+    """
+    if not (value or "").strip():
+        return False
+    try:
+        from zoneinfo import ZoneInfo
+        ZoneInfo(value.strip())
+        return True
+    except Exception:
+        return False

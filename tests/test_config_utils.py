@@ -1,5 +1,6 @@
 """Config persistence, upload validation, and version helpers (stt/config_utils.py)."""
 
+import datetime
 import json
 import os
 
@@ -11,6 +12,9 @@ from stt.config_utils import (
     compute_display_version,
     restore_config_from_template,
     validate_file,
+    is_known_timezone,
+    resolve_timezone,
+    system_timezone,
 )
 
 
@@ -133,3 +137,89 @@ class TestComputeDisplayVersion:
     def test_monotonic_across_a_release(self):
         # one commit after the 26.1.3 tag must sort above the tag itself
         assert compute_display_version("26.1.3-1-gaaaa111", "", "x") == "26.1.4-aaaa111"
+
+
+class TestResolveTimezone:
+    """The timezone the transcript is stamped in.
+
+    This setting existed in the API and in config for a long time while
+    get_configured_timezone() ignored it entirely and always returned the machine's
+    own zone — so it silently did nothing, even after the restart the save endpoint
+    told the operator to perform.
+    """
+
+    UTC = datetime.timezone.utc
+    FIXED = datetime.timezone(datetime.timedelta(hours=5), "TEST")
+
+    def test_auto_uses_the_system_zone(self):
+        tz, note = resolve_timezone({"mode": "auto", "value": "Asia/Tokyo"}, self.FIXED)
+        assert tz is self.FIXED
+        assert note is None
+
+    def test_missing_config_is_auto(self):
+        for cfg in (None, {}, {"value": "Asia/Tokyo"}):
+            tz, note = resolve_timezone(cfg, self.FIXED)
+            assert tz is self.FIXED and note is None
+
+    def test_a_named_zone_is_actually_used(self):
+        # The whole point: a configured zone must reach the returned tzinfo.
+        tz, note = resolve_timezone({"mode": "manual", "value": "America/New_York"}, self.FIXED)
+        assert note is None
+        assert tz is not self.FIXED
+        assert "New_York" in str(tz)
+
+    def test_the_zone_changes_the_wall_clock(self):
+        # Proves it resolves to a real zone rather than a label.
+        moment = datetime.datetime(2026, 7, 1, 12, 0, tzinfo=self.UTC)
+        ny, _ = resolve_timezone({"mode": "manual", "value": "America/New_York"}, self.UTC)
+        tokyo, _ = resolve_timezone({"mode": "manual", "value": "Asia/Tokyo"}, self.UTC)
+        assert moment.astimezone(ny).hour != moment.astimezone(tokyo).hour
+
+    def test_an_unknown_zone_falls_back_and_explains(self):
+        # Timestamps are written on every row; a typo must not stop a service.
+        tz, note = resolve_timezone({"mode": "manual", "value": "Mars/Olympus_Mons"}, self.FIXED)
+        assert tz is self.FIXED
+        assert note and "Mars/Olympus_Mons" in note
+
+    def test_a_mode_with_no_value_falls_back_and_explains(self):
+        tz, note = resolve_timezone({"mode": "manual", "value": "   "}, self.FIXED)
+        assert tz is self.FIXED
+        assert note and "no value" in note
+
+    def test_mode_is_case_and_space_insensitive(self):
+        tz, note = resolve_timezone({"mode": "  AUTO  "}, self.FIXED)
+        assert tz is self.FIXED and note is None
+
+    def test_a_value_is_trimmed(self):
+        tz, note = resolve_timezone({"mode": "manual", "value": "  Asia/Tokyo  "}, self.FIXED)
+        assert note is None and "Tokyo" in str(tz)
+
+    def test_it_always_returns_a_usable_tzinfo(self):
+        for cfg in (None, {}, {"mode": "manual"}, {"mode": "x", "value": "nope"}):
+            tz, _ = resolve_timezone(cfg, self.FIXED)
+            assert datetime.datetime.now(tz).utcoffset() is not None
+
+
+class TestIsKnownTimezone:
+    """Guards the save endpoint so a bad name is rejected, not silently ignored."""
+
+    def test_real_zones(self):
+        for z in ("America/New_York", "Europe/Kyiv", "UTC", "Asia/Tokyo"):
+            assert is_known_timezone(z)
+
+    def test_nonsense_is_rejected(self):
+        for z in ("Mars/Olympus_Mons", "EST5EDT_typo", "not a zone"):
+            assert not is_known_timezone(z)
+
+    def test_blank_is_rejected(self):
+        for z in ("", "   ", None):
+            assert not is_known_timezone(z)
+
+    def test_whitespace_is_trimmed_before_checking(self):
+        assert is_known_timezone("  America/New_York  ")
+
+
+class TestSystemTimezone:
+    def test_returns_a_concrete_tzinfo(self):
+        tz = system_timezone()
+        assert datetime.datetime.now(tz).utcoffset() is not None
