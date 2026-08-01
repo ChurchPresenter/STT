@@ -530,3 +530,57 @@ class TestArchiveHeadroom:
         # Degrading must cost context, not captions.
         budget = input_token_budget(512, 160, DEFAULT_SYSTEM_PROMPT_TEMPLATE)
         assert input_fits(SRC, budget)
+
+
+class TestExpansionCeiling:
+    """The ratio alone leaves a long source too much room to hide a recitation in.
+
+    A context window prepends prior captions before translating, so the source the
+    validator measures against is several captions long. Under the ratio alone a
+    30-word combined source bought a 90-word budget — enough for a correct caption
+    plus a recited passage behind it. Figures below come from 36,264 aligned
+    source/translation pairs from real services.
+    """
+
+    def test_short_sources_are_unaffected(self):
+        # The ratio must keep governing here: p99 expansion at 1-3 words is 5.00, and
+        # a legitimate "Щит веры." -> "The shield of faith." must still pass.
+        assert validate_translation("The shield of faith.", "Щит веры.", "en")
+
+    def test_a_six_word_source_keeps_its_full_ratio_budget(self):
+        # 6 words -> ratio allows 18, ceiling allows 30; the ratio still binds.
+        src = " ".join(["слово"] * 6)
+        assert validate_translation(" ".join(["word"] * 18), src, "en")
+        assert validate_translation(" ".join(["word"] * 19), src, "en") is None
+
+    def test_a_long_source_is_capped_below_the_ratio(self):
+        # 30 words: the ratio would allow 90, the ceiling allows 54. Real translations
+        # of a 26+ word source never exceeded 1.73x, and never grew by more than 22.
+        src = " ".join(["слово"] * 30)
+        assert validate_translation(" ".join(["word"] * 54), src, "en")
+        assert validate_translation(" ".join(["word"] * 55), src, "en") is None
+
+    def test_the_context_recitation_shape_is_now_rejected(self):
+        # A correct caption for a context-stacked source, with a passage riding along
+        # behind it. Under the ratio alone this fit inside the 90-word budget.
+        src = " ".join(["слово"] * 30)
+        caption = " ".join(["word"] * 34)          # a plausible 1.13x translation
+        recitation = " ".join(["verse"] * 50)      # and then the passage
+        assert validate_translation(caption + " " + recitation, src, "en") is None
+        assert validate_translation(caption, src, "en") == caption
+
+    def test_real_expansion_at_length_still_passes(self):
+        # The largest ratio ever recorded for a 26+ word source was 1.73x.
+        src = " ".join(["слово"] * 30)
+        assert validate_translation(" ".join(["word"] * 51), src, "en")
+
+    def test_the_ceiling_is_configurable(self):
+        src = " ".join(["слово"] * 30)
+        # slack 10 -> allowed 40 (inclusive); slack 40 -> the ratio's 90 binds again.
+        assert validate_translation(" ".join(["word"] * 40), src, "en", max_slack_words=10)
+        assert validate_translation(" ".join(["word"] * 41), src, "en", max_slack_words=10) is None
+        assert validate_translation(" ".join(["word"] * 41), src, "en", max_slack_words=40)
+
+    def test_the_floor_still_wins_for_a_tiny_source(self):
+        # min_word_budget must not be clipped by the ceiling on a 1-word source.
+        assert validate_translation(" ".join(["word"] * 8), "Аминь.", "en")
