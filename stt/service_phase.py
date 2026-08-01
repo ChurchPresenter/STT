@@ -484,31 +484,90 @@ def read_rows(conn: "sqlite3.Connection") -> List[Tuple]:
             "WHERE is_final = 1 AND ts_ms IS NOT NULL ORDER BY ts_ms"))
 
 
-def save_analysis(conn: "sqlite3.Connection", analysis: dict) -> None:
-    """Replace the stored detector output with this tick's.
+def save_analysis(conn: "sqlite3.Connection", analysis: dict) -> Dict[str, int]:
+    """Persist this tick's detector output, writing only what actually changed.
 
-    DELETE-then-INSERT rather than an upsert: blocks merge and renumber as a service runs,
-    so a stale row from a previous tick would otherwise survive as a phantom block. Only
-    the detector's own tables are touched — corrections are never in scope here.
+    Returns ``{"bins": n, "blocks": n}`` — the rows written, so a caller (or a test) can
+    see that an idle tick is genuinely free.
+
+    The detector re-derives the whole session every tick, but almost none of it moves: a
+    minute-wide bin is only mutable while it is the current minute, so across a real
+    167-minute service exactly one bin changes per minute (max two), and the block list
+    changes far more rarely still. Rewriting both tables wholesale on a 20-second tick cost
+    ~46,000 row-writes per service to record ~500 real changes, and grew the WAL by
+    hundreds of KB per minute — on the same disk the session recording is being written to.
+
+    So bins are diffed against what is stored and upserted individually. The comparison
+    read is deliberate: reads do not grow the WAL, and one SELECT of a few hundred narrow
+    rows is far cheaper than the writes it avoids. It also keeps this stateless — a
+    mid-service restart re-derives and re-diffs correctly with nothing held in memory.
+
+    Blocks keep DELETE-then-INSERT, because they merge and renumber as a service runs and a
+    stale row would survive as a phantom block — but only when they have actually changed,
+    and there are only a couple of dozen of them.
+
+    Only the detector's own tables are touched; corrections are never in scope here.
     """
     ensure_tables(conn)
-    conn.execute("DELETE FROM service_phase_bins")
-    conn.execute("DELETE FROM service_phase_blocks")
-    conn.executemany(
-        "INSERT INTO service_phase_bins (bin_index, start_ms, end_ms, music, speech, quiet, "
-        "words, cues_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-        [(b["index"], b["start_ms"], b["end_ms"], b["music"], b["speech"], b["quiet"],
-          b["words"], json.dumps(b["cues"], ensure_ascii=False)) for b in analysis.get("bins", [])])
-    conn.executemany(
-        "INSERT INTO service_phase_blocks (block_index, kind, start_bin, end_bin, start_ms, "
-        "end_ms, minutes, label, confidence, cues_json, ongoing, unusual_json) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        [(b["index"], b["kind"], b["start_bin"], b["end_bin"], b["start_ms"], b["end_ms"],
-          b["minutes"], b["label"], b["confidence"],
-          json.dumps(b["cues"], ensure_ascii=False), 1 if b["ongoing"] else 0,
-          json.dumps(b.get("unusual", []), ensure_ascii=False))
-         for b in analysis.get("blocks", [])])
-    conn.commit()
+    written = {"bins": 0, "blocks": 0}
+
+    bins = analysis.get("bins", [])
+    # cues_json is part of the comparison, not just the payload. Translation lands via a
+    # later async UPDATE on a row the bin already counted, so a cue can appear in a settled
+    # bin with every other field unchanged — and an operator correcting a word does the
+    # same. Diffing on counts alone silently loses both.
+    stored_bins = {
+        r[0]: (r[1], r[2], r[3], r[4], r[5], r[6], r[7])
+        for r in conn.execute("SELECT bin_index, start_ms, end_ms, music, speech, quiet, "
+                              "words, cues_json FROM service_phase_bins")
+    }
+    changed_bins = []
+    for b in bins:
+        row = (b["start_ms"], b["end_ms"], b["music"], b["speech"], b["quiet"], b["words"],
+               json.dumps(b["cues"], ensure_ascii=False))
+        if stored_bins.get(b["index"]) != row:
+            changed_bins.append((b["index"], *row))
+    if changed_bins:
+        conn.executemany(
+            "INSERT OR REPLACE INTO service_phase_bins (bin_index, start_ms, end_ms, music, "
+            "speech, quiet, words, cues_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?)", changed_bins)
+        written["bins"] = len(changed_bins)
+    # Bins only ever grow during a session, but a reused database would leave a tail.
+    if stored_bins and max(stored_bins) >= len(bins):
+        conn.execute("DELETE FROM service_phase_bins WHERE bin_index >= ?", (len(bins),))
+        written["bins"] += 1
+
+    block_rows = [
+        (b["index"], b["kind"], b["start_bin"], b["end_bin"], b["start_ms"], b["end_ms"],
+         b["minutes"], b["label"], b["confidence"],
+         json.dumps(b["cues"], ensure_ascii=False), 1 if b["ongoing"] else 0,
+         json.dumps(b.get("unusual", []), ensure_ascii=False))
+        for b in analysis.get("blocks", [])
+    ]
+    # Blocks get the same treatment, and need it: the last block is ongoing, so its end and
+    # minutes grow on every single tick. Rewriting the table for that one row meant the
+    # block table alone outwrote the bins three to one.
+    stored_blocks = {
+        r[0]: tuple(r) for r in conn.execute(
+            "SELECT block_index, kind, start_bin, end_bin, start_ms, end_ms, minutes, label, "
+            "confidence, cues_json, ongoing, unusual_json FROM service_phase_blocks")
+    }
+    changed_blocks = [r for r in block_rows if stored_blocks.get(r[0]) != r]
+    if changed_blocks:
+        conn.executemany(
+            "INSERT OR REPLACE INTO service_phase_blocks (block_index, kind, start_bin, "
+            "end_bin, start_ms, end_ms, minutes, label, confidence, cues_json, ongoing, "
+            "unusual_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", changed_blocks)
+        written["blocks"] = len(changed_blocks)
+    # Blocks merge as a service runs, so the list can get *shorter*. A leftover row would
+    # survive as a phantom block on the timeline.
+    if stored_blocks and max(stored_blocks) >= len(block_rows):
+        conn.execute("DELETE FROM service_phase_blocks WHERE block_index >= ?", (len(block_rows),))
+        written["blocks"] += 1
+
+    if written["bins"] or written["blocks"]:
+        conn.commit()
+    return written
 
 
 def save_correction(conn: "sqlite3.Connection", block_index: Optional[int], *,

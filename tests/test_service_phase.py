@@ -601,3 +601,96 @@ class TestBlocksSchemaMigration:
         save_analysis(conn, analyze(rows("M" * 60 + "S" * 10), {"sermon_min_minutes": 8}))
         assert load_analysis(conn)["blocks"][0]["unusual"] != []
         conn.close()
+
+
+class TestWriteChurn:
+    """The tick re-derives the whole session but must only write what moved.
+
+    Rewriting both tables wholesale on a 20-second tick cost ~46,000 row-writes across a
+    real 167-minute service to record ~500 real changes, on the same disk the session
+    recording is being written to. Measured on that session, exactly one bin changes per
+    minute (max two) and the block list changes far more rarely.
+    """
+
+    CFG = {"sermon_min_minutes": 8, "songs_min_minutes": 3}
+
+    def db(self, tmp_path):
+        conn = sqlite3.connect(str(tmp_path / "churn.db"))
+        ensure_tables(conn)
+        return conn
+
+    def test_an_unchanged_analysis_writes_nothing(self, tmp_path):
+        conn = self.db(tmp_path)
+        a = analyze(rows("M" * 6 + "S" * 12), self.CFG)
+        assert save_analysis(conn, a) == {"bins": 18, "blocks": 2}
+        assert save_analysis(conn, a) == {"bins": 0, "blocks": 0}
+
+    def test_only_the_changed_bin_is_written(self, tmp_path):
+        conn = self.db(tmp_path)
+        save_analysis(conn, analyze(rows("S" * 20), self.CFG))
+        # One more minute of audio: one new bin, plus the ongoing block whose end moved.
+        written = save_analysis(conn, analyze(rows("S" * 21), self.CFG))
+        assert written["bins"] == 1
+        assert written["blocks"] <= 1
+
+    def test_a_growing_session_does_not_rewrite_settled_bins(self, tmp_path):
+        conn = self.db(tmp_path)
+        total = 0
+        for n in range(10, 40):
+            total += save_analysis(conn, analyze(rows("S" * n), self.CFG))["bins"]
+        # 30 steps, one new bin each — not 30 x the whole table.
+        assert total <= 60, f"settled bins are being rewritten ({total} writes)"
+
+    def test_the_result_is_still_correct_after_incremental_writes(self, tmp_path):
+        conn = self.db(tmp_path)
+        spec = "M" * 8 + "S" * 14 + "M" * 6 + "S" * 12
+        for n in range(5, len(spec) + 1):
+            save_analysis(conn, analyze(rows(spec[:n]), self.CFG))
+        fresh = analyze(rows(spec), self.CFG)
+        stored = load_analysis(conn)
+        assert [b["label"] for b in stored["blocks"]] == [b["label"] for b in fresh["blocks"]]
+        assert [(b["index"], b["music"], b["speech"], b["cues"]) for b in stored["bins"]] == \
+               [(b["index"], b["music"], b["speech"], b["cues"]) for b in fresh["bins"]]
+
+    def test_merged_blocks_do_not_leave_a_phantom(self, tmp_path):
+        # Blocks renumber and merge as a service runs; a leftover row would show on the
+        # timeline as a block that never happened.
+        conn = self.db(tmp_path)
+        save_analysis(conn, analyze(rows("M" * 6 + "S" * 12 + "M" * 6), self.CFG))
+        assert len(load_analysis(conn)["blocks"]) == 3
+        save_analysis(conn, analyze(rows("S" * 12), self.CFG))
+        assert len(load_analysis(conn)["blocks"]) == 1
+
+    def test_a_shorter_session_truncates_stale_bins(self, tmp_path):
+        conn = self.db(tmp_path)
+        save_analysis(conn, analyze(rows("S" * 30), self.CFG))
+        save_analysis(conn, analyze(rows("S" * 10), self.CFG))
+        assert len(load_analysis(conn)["bins"]) == 10
+
+    def test_a_late_translation_updates_a_settled_bin(self, tmp_path):
+        """Translation lands via a later async UPDATE on a row the bin already counted.
+
+        The cue appears with the row count, word count and audio mix all unchanged, so a
+        diff on those alone silently loses it — and an operator correcting a misheard word
+        does the same. cues_json has to be part of the comparison.
+        """
+        conn = self.db(tmp_path)
+        cfg = {"cue_phrases": {}, "cue_phrases_translated": {"amen": ["amen"]},
+               "sermon_min_minutes": 8}
+        # Identical transcript both times; only translated_text arrives on the second pass.
+        before = [(1_000_000 + i * MIN, "Speaking", 0.0, "одно слово", None) for i in range(10)]
+        after = [(1_000_000 + i * MIN, "Speaking", 0.0, "одно слово", "amen") for i in range(10)]
+        save_analysis(conn, analyze(before, cfg))
+        assert load_analysis(conn)["bins"][0]["cues"] == {}
+        written = save_analysis(conn, analyze(after, cfg))
+        assert written["bins"] == 10, "the late translation was not persisted"
+        assert load_analysis(conn)["bins"][0]["cues"] == {"amen": 1}
+
+    def test_an_operator_correction_that_keeps_the_word_count_still_writes(self, tmp_path):
+        conn = self.db(tmp_path)
+        cfg = {"cue_phrases": {"amen": [r"амин[ья]"]}, "sermon_min_minutes": 8}
+        typo = [(1_000_000 + i * MIN, "Speaking", 0.0, "аминт", None) for i in range(6)]
+        fixed = [(1_000_000 + i * MIN, "Speaking", 0.0, "аминь", None) for i in range(6)]
+        save_analysis(conn, analyze(typo, cfg))
+        assert save_analysis(conn, analyze(fixed, cfg))["bins"] == 6
+        assert load_analysis(conn)["bins"][0]["cues"] == {"amen": 1}
