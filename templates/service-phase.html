@@ -53,7 +53,7 @@
       .sp-conf { color: var(--text-muted); font-size: 0.82em; }
       .sp-cues { color: var(--warning); font-size: 0.82em; }
       .sp-fix { margin-left: auto; display: flex; gap: 6px; align-items: center; }
-      .sp-fix input, .sp-fix select {
+      .sp-fix select {
         padding: 4px 8px; border: 1px solid var(--border); border-radius: var(--radius-sm);
         background: var(--bg-base); color: var(--text-primary); font-size: 0.85em;
       }
@@ -67,12 +67,11 @@
         padding-left: 120px; padding-top: 4px;
       }
       .sp-toolbar { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-bottom: 14px; }
-      .sp-toolbar input, .sp-toolbar button {
+      .sp-toolbar button {
         padding: 6px 12px; border: 1px solid var(--border); border-radius: var(--radius-sm);
         background: var(--bg-card); color: var(--text-primary); font-size: 0.88em;
+        cursor: pointer;
       }
-      .sp-toolbar button { cursor: pointer; }
-      .sp-toolbar input { min-width: 320px; }
       .sp-note { color: var(--text-secondary); font-size: 0.86em; line-height: 1.5; margin-bottom: 14px; }
 {% endblock %}
 
