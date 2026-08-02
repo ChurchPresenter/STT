@@ -841,6 +841,7 @@ from stt.llm_translate import (
 # the monolith supplies the connection and the live config and does nothing else.
 from stt.service_phase import (
     analyze as _service_phase_analyze,
+    delete_correction as _service_phase_delete_correction,
     ensure_tables as _service_phase_ensure_tables,
     load_analysis as _service_phase_load,
     load_corrections as _service_phase_corrections,
@@ -4714,6 +4715,35 @@ def save_service_phase_correction():
         return jsonify({"success": False, "error": f"{type(e).__name__}: {e}"}), 500
 
     return jsonify({"success": True, "id": row_id, "corrections": corrections})
+
+
+@app.route("/api/service-phase/uncorrect", methods=["POST"])
+def delete_service_phase_correction():
+    """Withdraw an operator correction, handing the block back to the detector."""
+    if not check_ip_whitelist():
+        return jsonify({"success": False, "error": "Access denied"}), 403
+
+    data = _control_params(keep_blank=True)
+    db_path, err = _service_phase_resolve_db()
+    if err:
+        return err
+
+    block_index = data.get("block_index")
+    if block_index in (None, "", "null"):
+        return jsonify({"success": False, "error": "An undo needs a block index."}), 400
+    block_index = coerce_int(block_index, 0, lo=0, hi=10000)
+
+    try:
+        conn = sqlite3.connect(db_path, timeout=5)
+        try:
+            removed = _service_phase_delete_correction(conn, block_index)
+            corrections = _service_phase_corrections(conn)
+        finally:
+            conn.close()
+    except Exception as e:
+        return jsonify({"success": False, "error": f"{type(e).__name__}: {e}"}), 500
+
+    return jsonify({"success": True, "removed": removed, "corrections": corrections})
 
 
 @app.route("/corrections")

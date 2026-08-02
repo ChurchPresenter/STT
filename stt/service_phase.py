@@ -591,6 +591,20 @@ def save_correction(conn: "sqlite3.Connection", block_index: Optional[int], *,
     return int(cur.lastrowid or 0)
 
 
+def delete_correction(conn: "sqlite3.Connection", block_index: int) -> int:
+    """Drop the correction for one block, returning how many rows went.
+
+    The counterpart to save_correction: a reviewer who mislabels a block should be able to
+    withdraw the claim entirely, not just overwrite it with another guess. Only corrections
+    tied to a block are removable this way — a correction with no block_index describes a
+    boundary the detector never produced, so there is no row on the page to undo it from.
+    """
+    ensure_tables(conn)
+    cur = conn.execute("DELETE FROM service_phase_corrections WHERE block_index = ?", (block_index,))
+    conn.commit()
+    return int(cur.rowcount or 0)
+
+
 def load_corrections(conn: "sqlite3.Connection") -> List[dict]:
     """Operator corrections, oldest first. Missing table = none recorded yet."""
     try:

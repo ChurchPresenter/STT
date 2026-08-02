@@ -22,6 +22,7 @@ from stt.service_phase import (
     bin_rows,
     classify_bin,
     compile_cues,
+    delete_correction,
     ensure_tables,
     label_blocks,
     load_analysis,
@@ -407,6 +408,34 @@ class TestPersistence:
         save_correction(conn, None, kind="S", label="Sermon 3", start_ms=1, end_ms=2)
         save_correction(conn, None, kind="M", label="Songs 4", start_ms=3, end_ms=4)
         assert len(load_corrections(conn)) == 2
+
+    def test_deleting_a_correction_leaves_the_others(self, tmp_path):
+        conn = self.db(tmp_path)
+        save_correction(conn, 1, kind="S", label="Opening")
+        save_correction(conn, 2, kind="M", label="Songs 1")
+        assert delete_correction(conn, 1) == 1
+        got = load_corrections(conn)
+        assert [c["block_index"] for c in got] == [2]
+
+    def test_deleting_a_correction_that_is_not_there_is_not_an_error(self, tmp_path):
+        # The page can race a re-render against a click; a no-op beats a 500.
+        conn = self.db(tmp_path)
+        assert delete_correction(conn, 7) == 0
+
+    def test_delete_leaves_blockless_corrections_alone(self, tmp_path):
+        # block_index NULL never matches `= ?`, and nothing on the page can undo it.
+        conn = self.db(tmp_path)
+        save_correction(conn, None, kind="S", label="Sermon 3", start_ms=1, end_ms=2)
+        assert delete_correction(conn, 0) == 0
+        assert len(load_corrections(conn)) == 1
+
+    def test_a_deleted_correction_can_be_made_again(self, tmp_path):
+        conn = self.db(tmp_path)
+        save_correction(conn, 0, kind="S", label="Opening")
+        delete_correction(conn, 0)
+        save_correction(conn, 0, kind="S", label="Closing")
+        got = load_corrections(conn)
+        assert len(got) == 1 and got[0]["label"] == "Closing"
 
     def test_missing_tables_read_as_empty_not_an_error(self, tmp_path):
         # Reviewing a session recorded before this feature existed.

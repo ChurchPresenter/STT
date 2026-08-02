@@ -69,6 +69,10 @@
         background: rgba(41,121,255,0.15); color: var(--accent); cursor: pointer; font-size: 0.85em;
       }
       .sp-fix button:hover { background: rgba(41,121,255,0.28); }
+      .sp-fix button.sp-undo {
+        border-color: var(--warning); background: rgba(245,158,11,0.12); color: var(--warning);
+      }
+      .sp-fix button.sp-undo:hover { background: rgba(245,158,11,0.26); }
       .sp-was {
         font-size: 0.8em; color: var(--warning); width: 100%;
         padding-left: 266px; padding-top: 4px;
@@ -164,11 +168,11 @@
       meta.textContent = 'No phases detected for this session yet.';
       return;
     }
+    const anchor = serviceStartMs();
     label.textContent = cur.label || SP_KINDS[cur.kind] || '—';
     kind.textContent = SP_KINDS[cur.kind] || cur.kind;
     kind.className = 'sp-now-kind sp-kind-' + cur.kind;
     const conf = Math.round((cur.confidence || 0) * 100);
-    const anchor = serviceStartMs();
     const into = (anchor !== null && cur.start_ms >= anchor)
       ? ' · ' + fmtClock(cur.start_ms, anchor) + ' into the service' : '';
     meta.textContent = cur.minutes + ' min' + (cur.ongoing ? ' and running' : '')
@@ -232,6 +236,7 @@
         '<span class="sp-fix">' +
           '<select id="sp-sel-' + b.index + '">' + opts + '</select>' +
           '<button type="button" onclick="correctBlock(' + b.index + ', \'' + b.kind + '\')">Correct</button>' +
+          (fix ? '<button type="button" class="sp-undo" onclick="undoCorrection(' + b.index + ')">Undo</button>' : '') +
         '</span>' +
         (flags.length ? '<span class="sp-flag">&#9888; ' + flags.join(' · ') + '</span>' : '') +
         (fix ? '<span class="sp-was">corrected to "' + fix.label + '"' +
@@ -268,12 +273,37 @@
       if (data.success) {
         spData.corrections = data.corrections || [];
         renderBlocks();
+        renderNow();
         showAlert('Correction saved.', 'success');
       } else {
         showAlert('Could not save: ' + data.error, 'error');
       }
     } catch (e) {
       showAlert('Could not save: ' + e, 'error');
+    }
+  }
+
+  // Withdraws the correction rather than overwriting it, so the block goes back to being
+  // the detector's own answer. Re-renders from the server's list: an undo can move the
+  // service anchor, so every row's "into service" column may change, not just this one.
+  async function undoCorrection(index) {
+    try {
+      const resp = await fetch('/api/service-phase/uncorrect', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ block_index: index })
+      });
+      const data = await resp.json();
+      if (data.success) {
+        spData.corrections = data.corrections || [];
+        renderBlocks();
+        renderNow();
+        showAlert('Correction removed.', 'success');
+      } else {
+        showAlert('Could not undo: ' + data.error, 'error');
+      }
+    } catch (e) {
+      showAlert('Could not undo: ' + e, 'error');
     }
   }
 

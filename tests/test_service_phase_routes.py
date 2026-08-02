@@ -17,6 +17,7 @@ from conftest import extract_definitions
 from stt.coercion import coerce_int
 from stt.service_phase import (
     analyze,
+    delete_correction,
     load_analysis,
     load_corrections,
     read_rows,
@@ -51,7 +52,8 @@ def make_ns(*, live_db=None, params=None, args=None):
     ns = extract_definitions(
         "speech_to_text.py",
         ["_service_phase_resolve_db", "get_service_phase", "save_service_phase_correction",
-         "_service_phase_first_sunday", "_service_phase_config"],
+         "delete_service_phase_correction", "_service_phase_first_sunday",
+         "_service_phase_config"],
         extra_globals={
             "config": {"service_phase": CFG},
             "request": type("R", (), {
@@ -69,6 +71,7 @@ def make_ns(*, live_db=None, params=None, args=None):
             "_service_phase_rows": read_rows,
             "_service_phase_corrections": load_corrections,
             "_service_phase_save_correction": save_correction,
+            "_service_phase_delete_correction": delete_correction,
             "app": type("A", (), {"route": staticmethod(lambda *a, **k: (lambda f: f))})(),
             "datetime": __import__("datetime").datetime,
         })
@@ -184,6 +187,77 @@ class TestSaveCorrection:
         body = make_ns(live_db=db, params={"block_index": 0, "kind": "M",
                                            "label": "Songs"})["save_service_phase_correction"]()
         assert body["corrections"][0]["block_index"] == 0
+
+
+class TestDeleteCorrection:
+    """Undo hands the block back to the detector, rather than overwriting one guess with another."""
+
+    def correct(self, db, **params):
+        return make_ns(live_db=db, params=params)["save_service_phase_correction"]()
+
+    def test_removes_the_correction_and_returns_the_new_list(self, tmp_path):
+        db = session_db(tmp_path)
+        self.correct(db, block_index=1, kind="S", label="Communion")
+        body = make_ns(live_db=db,
+                       params={"block_index": 1})["delete_service_phase_correction"]()
+        assert body["success"] is True and body["removed"] == 1
+        assert body["corrections"] == []
+
+    def test_it_leaves_the_other_blocks_corrections_alone(self, tmp_path):
+        db = session_db(tmp_path)
+        self.correct(db, block_index=0, kind="M", label="Other")
+        self.correct(db, block_index=1, kind="S", label="Opening")
+        body = make_ns(live_db=db,
+                       params={"block_index": 0})["delete_service_phase_correction"]()
+        assert [c["block_index"] for c in body["corrections"]] == [1]
+
+    def test_undoing_nothing_is_a_success_with_no_rows_removed(self, tmp_path):
+        # The page can race a re-render against the click; a no-op beats a 500.
+        db = session_db(tmp_path)
+        body = make_ns(live_db=db,
+                       params={"block_index": 4})["delete_service_phase_correction"]()
+        assert body["success"] is True and body["removed"] == 0
+
+    def test_a_missing_block_index_is_rejected(self, tmp_path):
+        # Without one the delete has no subject; it must not fall through to a wider wipe.
+        db = session_db(tmp_path)
+        self.correct(db, block_index=1, kind="S", label="Communion")
+        body, status = make_ns(live_db=db, params={})["delete_service_phase_correction"]()
+        assert status == 400 and body["success"] is False
+        assert len(load_corrections(sqlite3.connect(db))) == 1
+
+    def test_block_zero_is_undoable(self, tmp_path):
+        # Falsy-but-present, the same trap the save route has.
+        db = session_db(tmp_path)
+        self.correct(db, block_index=0, kind="M", label="Other")
+        body = make_ns(live_db=db,
+                       params={"block_index": 0})["delete_service_phase_correction"]()
+        assert body["removed"] == 1 and body["corrections"] == []
+
+    def test_a_session_argument_cannot_redirect_the_delete(self, tmp_path):
+        # Live-only, as with the save route: a path in the body must not reach another file.
+        db = session_db(tmp_path)
+        other = session_db(tmp_path, name="2026-01-01_000000.db")
+        conn = sqlite3.connect(other)
+        save_correction(conn, 0, kind="M", label="Songs")
+        conn.close()
+        make_ns(live_db=db, params={"session": other, "block_index": 0}
+                )["delete_service_phase_correction"]()
+        assert len(load_corrections(sqlite3.connect(other))) == 1
+
+    def test_no_running_session_is_a_404(self):
+        _, status = make_ns(live_db=None,
+                            params={"block_index": 0})["delete_service_phase_correction"]()
+        assert status == 404
+
+    def test_the_detector_reclaims_the_block_on_its_next_run(self, tmp_path):
+        db = session_db(tmp_path)
+        self.correct(db, block_index=0, kind="M", label="Other")
+        make_ns(live_db=db, params={"block_index": 0})["delete_service_phase_correction"]()
+        conn = sqlite3.connect(db)
+        save_analysis(conn, analyze(read_rows(conn), CFG))
+        assert load_corrections(conn) == []
+        conn.close()
 
 
 class TestAccessLogPollingSkip:
