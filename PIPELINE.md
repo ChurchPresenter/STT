@@ -631,6 +631,9 @@ portable file rather than a database plus sidecars.
 
 ## Where each stage lives
 
+<details>
+<summary>Symbol reference — expand when you are in the code</summary>
+
 Symbols rather than line numbers — line numbers in a document go stale the first time anyone
 edits the file, and these did. Search for the name.
 
@@ -699,6 +702,8 @@ edits the file, and these did. Search for the name.
 | Metrics + access log | `stt/metrics.py` · `stt/request_log.py` · `:3915` |
 | Watchdog + self-update | `stt/watchdog.py:1505` · `:1884` · `stt/self_update.py` |
 | Batch file path | `speech_to_text.py:8390` |
+
+</details>
 
 ---
 
