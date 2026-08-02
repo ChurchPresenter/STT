@@ -23,6 +23,7 @@ from stt.service_phase import (
     classify_bin,
     compile_cues,
     delete_correction,
+    delete_correction_by_id,
     ensure_tables,
     label_blocks,
     load_analysis,
@@ -30,6 +31,7 @@ from stt.service_phase import (
     read_rows,
     save_analysis,
     save_correction,
+    save_group_correction,
     track_blocks,
 )
 
@@ -467,6 +469,64 @@ class TestPersistence:
         save_correction(conn, 0, kind="S", label="Closing")
         got = load_corrections(conn)
         assert len(got) == 1 and got[0]["label"] == "Closing"
+
+    def test_a_group_is_stored_as_a_span_with_no_block(self, tmp_path):
+        conn = self.db(tmp_path)
+        save_group_correction(conn, 1_000, 5_000, kind="M", label="Worship set")
+        got = load_corrections(conn)
+        assert len(got) == 1
+        assert got[0]["block_index"] is None
+        assert (got[0]["start_ms"], got[0]["end_ms"]) == (1_000, 5_000)
+        assert got[0]["label"] == "Worship set"
+
+    def test_regrouping_the_same_span_replaces_it(self, tmp_path):
+        # Otherwise a reviewer renaming a group stacks a second claim on the same minutes.
+        conn = self.db(tmp_path)
+        save_group_correction(conn, 1_000, 5_000, kind="M", label="Worship set")
+        save_group_correction(conn, 1_000, 5_000, kind="M", label="Opening songs")
+        got = load_corrections(conn)
+        assert len(got) == 1 and got[0]["label"] == "Opening songs"
+
+    def test_groups_on_different_spans_coexist(self, tmp_path):
+        conn = self.db(tmp_path)
+        save_group_correction(conn, 1_000, 5_000, kind="M", label="Worship set")
+        save_group_correction(conn, 6_000, 9_000, kind="S", label="Teaching")
+        assert len(load_corrections(conn)) == 2
+
+    def test_a_group_leaves_per_block_corrections_alone(self, tmp_path):
+        conn = self.db(tmp_path)
+        save_correction(conn, 0, kind="M", label="Other")
+        save_group_correction(conn, 1_000, 5_000, kind="M", label="Worship set")
+        assert sorted(c["block_index"] for c in load_corrections(conn)
+                      if c["block_index"] is not None) == [0]
+        assert len(load_corrections(conn)) == 2
+
+    def test_delete_by_id_removes_only_that_row(self, tmp_path):
+        conn = self.db(tmp_path)
+        keep = save_group_correction(conn, 1_000, 5_000, kind="M", label="Worship set")
+        drop = save_group_correction(conn, 6_000, 9_000, kind="S", label="Teaching")
+        assert delete_correction_by_id(conn, drop) == 1
+        assert [c["id"] for c in load_corrections(conn)] == [keep]
+
+    def test_delete_by_id_reaches_a_group_that_block_index_cannot(self, tmp_path):
+        # The whole reason the id path exists: a group has no block_index to name it by.
+        conn = self.db(tmp_path)
+        row_id = save_group_correction(conn, 1_000, 5_000, kind="M", label="Worship set")
+        assert delete_correction(conn, 0) == 0
+        assert delete_correction_by_id(conn, row_id) == 1
+        assert load_corrections(conn) == []
+
+    def test_delete_by_id_of_a_missing_row_is_not_an_error(self, tmp_path):
+        conn = self.db(tmp_path)
+        assert delete_correction_by_id(conn, 4242) == 0
+
+    def test_a_group_survives_a_detector_rewrite(self, tmp_path):
+        conn = self.db(tmp_path)
+        self.fill(conn, "S" * 20)
+        save_analysis(conn, analyze(read_rows(conn), self.CFG))
+        save_group_correction(conn, 1_000, 5_000, kind="S", label="Whole talk")
+        save_analysis(conn, analyze(read_rows(conn), self.CFG))
+        assert [c["label"] for c in load_corrections(conn)] == ["Whole talk"]
 
     def test_missing_tables_read_as_empty_not_an_error(self, tmp_path):
         # Reviewing a session recorded before this feature existed.

@@ -18,11 +18,13 @@ from stt.coercion import coerce_int
 from stt.service_phase import (
     analyze,
     delete_correction,
+    delete_correction_by_id,
     load_analysis,
     load_corrections,
     read_rows,
     save_analysis,
     save_correction,
+    save_group_correction,
 )
 
 MIN = 60_000
@@ -52,8 +54,8 @@ def make_ns(*, live_db=None, params=None, args=None):
     ns = extract_definitions(
         "speech_to_text.py",
         ["_service_phase_resolve_db", "get_service_phase", "save_service_phase_correction",
-         "delete_service_phase_correction", "_service_phase_first_sunday",
-         "_service_phase_config"],
+         "delete_service_phase_correction", "group_service_phase_blocks",
+         "_service_phase_first_sunday", "_service_phase_config"],
         extra_globals={
             "config": {"service_phase": CFG},
             "request": type("R", (), {
@@ -72,6 +74,8 @@ def make_ns(*, live_db=None, params=None, args=None):
             "_service_phase_corrections": load_corrections,
             "_service_phase_save_correction": save_correction,
             "_service_phase_delete_correction": delete_correction,
+            "_service_phase_delete_correction_by_id": delete_correction_by_id,
+            "_service_phase_save_group": save_group_correction,
             "app": type("A", (), {"route": staticmethod(lambda *a, **k: (lambda f: f))})(),
             "datetime": __import__("datetime").datetime,
         })
@@ -264,6 +268,79 @@ class TestDeleteCorrection:
         save_analysis(conn, analyze(read_rows(conn), CFG))
         assert load_corrections(conn) == []
         conn.close()
+
+
+class TestGroupBlocks:
+    """Several detected blocks recorded as one phase, stored as a span with no block index."""
+
+    def group(self, db, **params):
+        return make_ns(live_db=db, params=params)["group_service_phase_blocks"]()
+
+    def test_stores_the_span_and_returns_the_new_list(self, tmp_path):
+        db = session_db(tmp_path)
+        body = self.group(db, start_ms=1_000, end_ms=5_000, kind="M", label="Worship set")
+        assert body["success"] is True
+        stored = body["corrections"][0]
+        assert stored["block_index"] is None and stored["label"] == "Worship set"
+        assert (stored["start_ms"], stored["end_ms"]) == (1_000, 5_000)
+
+    def test_a_group_needs_a_name(self, tmp_path):
+        db = session_db(tmp_path)
+        body, status = self.group(db, start_ms=1_000, end_ms=5_000, kind="M", label="  ")
+        assert status == 400 and body["success"] is False
+        assert load_corrections(sqlite3.connect(db)) == []
+
+    @pytest.mark.parametrize("span", [
+        {"start_ms": 0, "end_ms": 5_000},        # no start
+        {"start_ms": 5_000, "end_ms": 5_000},    # zero length
+        {"start_ms": 9_000, "end_ms": 5_000},    # backwards
+    ])
+    def test_an_unusable_span_is_rejected(self, tmp_path, span):
+        db = session_db(tmp_path)
+        body, status = self.group(db, label="Worship set", **span)
+        assert status == 400 and body["success"] is False
+
+    def test_regrouping_the_same_span_does_not_stack(self, tmp_path):
+        db = session_db(tmp_path)
+        self.group(db, start_ms=1_000, end_ms=5_000, kind="M", label="Worship set")
+        body = self.group(db, start_ms=1_000, end_ms=5_000, kind="M", label="Opening songs")
+        assert [c["label"] for c in body["corrections"]] == ["Opening songs"]
+
+    def test_long_free_text_is_truncated(self, tmp_path):
+        db = session_db(tmp_path)
+        body = self.group(db, start_ms=1_000, end_ms=5_000, label="x" * 500, note="y" * 5000)
+        assert len(body["corrections"][0]["label"]) <= 120
+        assert len(body["corrections"][0]["note"]) <= 500
+
+    def test_no_running_session_is_a_404(self):
+        _, status = make_ns(live_db=None, params={"start_ms": 1_000, "end_ms": 5_000,
+                                                  "label": "x"})["group_service_phase_blocks"]()
+        assert status == 404
+
+    def test_a_group_is_undone_by_id(self, tmp_path):
+        db = session_db(tmp_path)
+        made = self.group(db, start_ms=1_000, end_ms=5_000, kind="M", label="Worship set")
+        body = make_ns(live_db=db,
+                       params={"id": made["id"]})["delete_service_phase_correction"]()
+        assert body["success"] is True and body["removed"] == 1
+        assert body["corrections"] == []
+
+    def test_an_undo_with_neither_index_nor_id_is_rejected(self, tmp_path):
+        db = session_db(tmp_path)
+        self.group(db, start_ms=1_000, end_ms=5_000, kind="M", label="Worship set")
+        body, status = make_ns(live_db=db, params={})["delete_service_phase_correction"]()
+        assert status == 400 and body["success"] is False
+        assert len(load_corrections(sqlite3.connect(db))) == 1
+
+    def test_an_id_undo_does_not_also_delete_by_block_index(self, tmp_path):
+        # Both fields present: the id wins and block 0's own correction must survive.
+        db = session_db(tmp_path)
+        made = self.group(db, start_ms=1_000, end_ms=5_000, kind="M", label="Worship set")
+        make_ns(live_db=db, params={"block_index": 0, "kind": "M",
+                                    "label": "Other"})["save_service_phase_correction"]()
+        body = make_ns(live_db=db, params={"id": made["id"], "block_index": 0}
+                       )["delete_service_phase_correction"]()
+        assert [c["label"] for c in body["corrections"]] == ["Other"]
 
 
 class TestAccessLogPollingSkip:

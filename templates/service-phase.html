@@ -41,7 +41,7 @@
       }
       .sp-block.corrected { border-color: var(--warning); }
       .sp-block.unusual { border-left: 3px solid var(--warning); }
-      .sp-flag { color: var(--warning); font-size: 0.8em; width: 100%; padding-left: 266px; padding-top: 4px; }
+      .sp-flag { color: var(--warning); font-size: 0.8em; width: 100%; padding-left: 294px; padding-top: 4px; }
       .sp-notes {
         padding: 10px 14px; margin-bottom: 14px; border-radius: var(--radius-sm);
         background: rgba(245,158,11,0.12); border: 1px solid var(--warning);
@@ -54,13 +54,13 @@
         display: flex; gap: 12px; padding: 0 14px 6px;
         font-size: 0.75em; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-muted);
       }
-      .sp-head span:first-child { min-width: 150px; }
+      .sp-head span:nth-child(2) { min-width: 150px; }
       .sp-head span:last-child { min-width: 92px; }
       .sp-label { font-weight: 600; color: var(--text-primary); min-width: 120px; }
       .sp-conf { color: var(--text-muted); font-size: 0.82em; }
       .sp-cues { color: var(--warning); font-size: 0.82em; }
       .sp-fix { margin-left: auto; display: flex; gap: 6px; align-items: center; }
-      .sp-fix select {
+      .sp-fix select, .sp-fix input {
         padding: 4px 8px; border: 1px solid var(--border); border-radius: var(--radius-sm);
         background: var(--bg-base); color: var(--text-primary); font-size: 0.85em;
       }
@@ -75,7 +75,7 @@
       .sp-fix button.sp-undo:hover { background: rgba(245,158,11,0.26); }
       .sp-was {
         font-size: 0.8em; color: var(--warning); width: 100%;
-        padding-left: 266px; padding-top: 4px;
+        padding-left: 294px; padding-top: 4px;
       }
       .sp-toolbar { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-bottom: 14px; }
       .sp-toolbar button {
@@ -83,6 +83,14 @@
         background: var(--bg-card); color: var(--text-primary); font-size: 0.88em;
         cursor: pointer;
       }
+      .sp-toolbar input {
+        padding: 6px 10px; border: 1px solid var(--border); border-radius: var(--radius-sm);
+        background: var(--bg-base); color: var(--text-primary); font-size: 0.88em; min-width: 220px;
+      }
+      .sp-pick { width: 16px; height: 16px; accent-color: var(--accent); flex-shrink: 0; }
+      .sp-pick-gap { width: 16px; flex-shrink: 0; }
+      .sp-custom, .sp-note-in { min-width: 120px; }
+      .sp-block.sp-group { border-left: 3px solid var(--accent); }
       .sp-note { color: var(--text-secondary); font-size: 0.86em; line-height: 1.5; margin-bottom: 14px; }
 {% endblock %}
 
@@ -101,6 +109,13 @@
   <span id="sp-status" style="color: var(--text-secondary); font-size: 0.86em;"></span>
 </div>
 
+<div class="sp-toolbar">
+  <input type="text" id="sp-group-label" placeholder="name for the grouped phase">
+  <input type="text" id="sp-group-note" placeholder="note (optional)">
+  <button type="button" id="sp-group" onclick="groupPicked()">Group selected</button>
+  <span id="sp-pick-count" style="color: var(--text-secondary); font-size: 0.86em;"></span>
+</div>
+
 <div class="sp-now">
   <span class="sp-now-label" id="sp-now-label">—</span>
   <span class="sp-now-kind sp-kind-_" id="sp-now-kind">—</span>
@@ -111,7 +126,7 @@
 
 <div class="sp-strip" id="sp-strip"></div>
 
-<div class="sp-head"><span>clock</span><span>into service</span></div>
+<div class="sp-head"><span class="sp-pick-gap"></span><span>clock</span><span>into service</span></div>
 
 <div id="sp-blocks"></div>
 {% endblock %}
@@ -126,6 +141,18 @@
   const SP_KINDS = { 'M': 'Songs', 'S': 'Speaking', '_': 'Quiet' };
 
   let spData = { blocks: [], bins: [], corrections: [] };
+
+  // Which rows are ticked for grouping. Held outside the DOM because the socket tick
+  // re-renders the list every 20 seconds and would otherwise clear the operator's selection
+  // mid-decision.
+  const picked = new Set();
+
+  // Operator text goes through innerHTML, so it is escaped on the way out. The labels are
+  // free-form now: a stray < in a note should not be able to rewrite the page.
+  function esc(s) {
+    return String(s === null || s === undefined ? '' : s).replace(/[&<>"']/g, c => (
+      { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  }
 
   function fmtClock(ms, base) {
     const s = Math.max(0, Math.round((ms - base) / 1000));
@@ -151,7 +178,20 @@
     return (fix && fix.label) ? fix.label : b.label;
   }
 
+  // Corrections with no block_index are groups: one phase covering several detected blocks,
+  // identified by their span rather than by any one block.
+  function groups() {
+    return spData.corrections.filter(c => c.block_index === null && c.start_ms && c.end_ms)
+      .sort((a, b) => a.start_ms - b.start_ms);
+  }
+
+  function groupCovering(b) {
+    return groups().find(g => b.start_ms >= g.start_ms && b.end_ms <= g.end_ms) || null;
+  }
+
   function serviceStartMs() {
+    const named = groups().find(g => g.label === 'Opening');
+    if (named) return named.start_ms;
     const opening = spData.blocks.find(b => effectiveLabel(b) === 'Opening');
     return opening ? opening.start_ms : null;
   }
@@ -169,7 +209,8 @@
       if (b.kind !== 'M' || !b.label) return;
       // A corrected block shows what the operator typed and takes no number with it.
       // Without this, marking a music block Opening leaves the count starting at Songs 2.
-      if (correctionFor(b.index)) return;
+      // A grouped block is absorbed into the group's own name, so it takes none either.
+      if (correctionFor(b.index) || groupCovering(b)) return;
       if (b.start_ms < anchor) out[b.index] = 'Music';
       else if (b.minutes >= songsMin) out[b.index] = 'Songs ' + (++n);
     });
@@ -233,7 +274,18 @@
     }
     const anchor = serviceStartMs();
     const songs = songNumbering(anchor);
+    const drawn = new Set();
     spData.blocks.forEach(b => {
+      const group = groupCovering(b);
+      if (group) {
+        // The blocks under a group are absorbed into it: one row for the phase the operator
+        // says was one thing, drawn once at the first block it covers.
+        if (!drawn.has(group.id)) {
+          drawn.add(group.id);
+          host.appendChild(groupRow(group, anchor));
+        }
+        return;
+      }
       const fix = correctionFor(b.index);
       const shown = fix && fix.label ? fix.label : (songs[b.index] || b.label);
       const row = document.createElement('div');
@@ -254,22 +306,51 @@
         : '—';
 
       row.innerHTML =
+        '<input type="checkbox" class="sp-pick" id="sp-pick-' + b.index + '"' +
+          (picked.has(b.index) ? ' checked' : '') +
+          ' onchange="togglePick(' + b.index + ', this.checked)">' +
         '<span class="sp-time">' + fmtWall(b.start_ms) + ' – ' + fmtWall(b.end_ms) + '</span>' +
         '<span class="sp-time sp-since">' + into + '</span>' +
         '<span class="sp-now-kind sp-kind-' + b.kind + '">' + (SP_KINDS[b.kind] || b.kind) + '</span>' +
-        '<span class="sp-label">' + (shown || '—') + '</span>' +
+        '<span class="sp-label">' + esc(shown || '—') + '</span>' +
         '<span class="sp-conf">' + b.minutes + ' min · ' + Math.round((b.confidence || 0) * 100) + '%</span>' +
         '<span class="sp-cues">' + cues + '</span>' +
         '<span class="sp-fix">' +
           '<select id="sp-sel-' + b.index + '">' + opts + '</select>' +
+          '<input type="text" id="sp-txt-' + b.index + '" class="sp-custom" placeholder="or type a name">' +
+          '<input type="text" id="sp-note-' + b.index + '" class="sp-note-in" placeholder="note (optional)">' +
           '<button type="button" onclick="correctBlock(' + b.index + ', \'' + b.kind + '\')">Correct</button>' +
           (fix ? '<button type="button" class="sp-undo" onclick="undoCorrection(' + b.index + ')">Undo</button>' : '') +
         '</span>' +
         (flags.length ? '<span class="sp-flag">&#9888; ' + flags.join(' · ') + '</span>' : '') +
-        (fix ? '<span class="sp-was">corrected to "' + fix.label + '"' +
-               (fix.corrected_at ? ' at ' + fix.corrected_at : '') + '</span>' : '');
+        (fix ? '<span class="sp-was">corrected to "' + esc(fix.label) + '"' +
+               (fix.note ? ' — ' + esc(fix.note) : '') +
+               (fix.corrected_at ? ' at ' + esc(fix.corrected_at) : '') + '</span>' : '');
       host.appendChild(row);
     });
+  }
+
+  // One row standing in for every block the operator grouped, spanning their whole range.
+  function groupRow(g, anchor) {
+    const row = document.createElement('div');
+    row.className = 'sp-block corrected sp-group';
+    const into = (anchor !== null && g.start_ms >= anchor)
+      ? fmtClock(g.start_ms, anchor) + ' – ' + fmtClock(g.end_ms, anchor)
+      : '—';
+    const covered = spData.blocks.filter(b => b.start_ms >= g.start_ms && b.end_ms <= g.end_ms);
+    row.innerHTML =
+      '<span class="sp-pick-gap"></span>' +
+      '<span class="sp-time">' + fmtWall(g.start_ms) + ' – ' + fmtWall(g.end_ms) + '</span>' +
+      '<span class="sp-time sp-since">' + into + '</span>' +
+      '<span class="sp-now-kind sp-kind-' + (g.kind || '_') + '">grouped</span>' +
+      '<span class="sp-label">' + esc(g.label) + '</span>' +
+      '<span class="sp-conf">' + Math.round((g.end_ms - g.start_ms) / 60000) + ' min · '
+        + covered.length + ' blocks</span>' +
+      '<span class="sp-fix">' +
+        '<button type="button" class="sp-undo" onclick="ungroup(' + g.id + ')">Ungroup</button>' +
+      '</span>' +
+      (g.note ? '<span class="sp-was">' + esc(g.note) + '</span>' : '');
+    return row;
   }
 
   function renderNotes() {
@@ -290,11 +371,16 @@
   async function correctBlock(index, kind) {
     const sel = document.getElementById('sp-sel-' + index);
     if (!sel) return;
+    // Typed text wins over the dropdown: the operator only fills it in to say something the
+    // vocabulary cannot. Blank falls back to the selected label, which is the common case.
+    const typed = (document.getElementById('sp-txt-' + index) || {}).value || '';
+    const note = (document.getElementById('sp-note-' + index) || {}).value || '';
     try {
       const resp = await fetch('/api/service-phase/correct', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ block_index: index, kind: kind, label: sel.value })
+        body: JSON.stringify({ block_index: index, kind: kind,
+                               label: typed.trim() || sel.value, note: note.trim() })
       });
       const data = await resp.json();
       if (data.success) {
@@ -314,23 +400,94 @@
   // the detector's own answer. Re-renders from the server's list: an undo can move the
   // service anchor, so every row's "into service" column may change, not just this one.
   async function undoCorrection(index) {
+    await withdraw({ block_index: index }, 'Correction removed.');
+  }
+
+  // A group has no block index to name it by, so it is withdrawn by the row id the page
+  // already holds. The blocks underneath reappear as the detector found them.
+  async function ungroup(id) {
+    await withdraw({ id: id }, 'Group removed.');
+  }
+
+  async function withdraw(body, ok) {
     try {
       const resp = await fetch('/api/service-phase/uncorrect', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ block_index: index })
+        body: JSON.stringify(body)
       });
       const data = await resp.json();
       if (data.success) {
         spData.corrections = data.corrections || [];
         renderBlocks();
         renderNow();
-        showAlert('Correction removed.', 'success');
+        showAlert(ok, 'success');
       } else {
         showAlert('Could not undo: ' + data.error, 'error');
       }
     } catch (e) {
       showAlert('Could not undo: ' + e, 'error');
+    }
+  }
+
+  function togglePick(index, on) {
+    if (on) picked.add(index); else picked.delete(index);
+    refreshPickCount();
+  }
+
+  function refreshPickCount() {
+    document.getElementById('sp-pick-count').textContent =
+      picked.size ? picked.size + ' selected' : '';
+  }
+
+  // Contiguity is checked here rather than server-side because it is a statement about the
+  // detector's block list, which only the page holds — the stored group is just a span.
+  async function groupPicked() {
+    const chosen = spData.blocks.filter(b => picked.has(b.index))
+      .sort((a, b) => a.start_ms - b.start_ms);
+    if (chosen.length < 2) {
+      showAlert('Tick at least two rows to group them.', 'error');
+      return;
+    }
+    const first = spData.blocks.indexOf(chosen[0]);
+    const contiguous = chosen.every((b, i) => spData.blocks[first + i] === b);
+    if (!contiguous) {
+      showAlert('Only neighbouring rows can be one phase.', 'error');
+      return;
+    }
+    const label = (document.getElementById('sp-group-label').value || '').trim();
+    if (!label) {
+      showAlert('Give the group a name first.', 'error');
+      return;
+    }
+    const kinds = new Set(chosen.map(b => b.kind));
+    try {
+      const resp = await fetch('/api/service-phase/group', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          start_ms: chosen[0].start_ms,
+          end_ms: chosen[chosen.length - 1].end_ms,
+          kind: kinds.size === 1 ? chosen[0].kind : '',
+          label: label,
+          note: (document.getElementById('sp-group-note').value || '').trim()
+        })
+      });
+      const data = await resp.json();
+      if (data.success) {
+        spData.corrections = data.corrections || [];
+        picked.clear();
+        refreshPickCount();
+        document.getElementById('sp-group-label').value = '';
+        document.getElementById('sp-group-note').value = '';
+        renderBlocks();
+        renderNow();
+        showAlert('Grouped ' + chosen.length + ' blocks.', 'success');
+      } else {
+        showAlert('Could not group: ' + data.error, 'error');
+      }
+    } catch (e) {
+      showAlert('Could not group: ' + e, 'error');
     }
   }
 

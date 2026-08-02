@@ -842,12 +842,14 @@ from stt.llm_translate import (
 from stt.service_phase import (
     analyze as _service_phase_analyze,
     delete_correction as _service_phase_delete_correction,
+    delete_correction_by_id as _service_phase_delete_correction_by_id,
     ensure_tables as _service_phase_ensure_tables,
     load_analysis as _service_phase_load,
     load_corrections as _service_phase_corrections,
     read_rows as _service_phase_rows,
     save_analysis as _service_phase_save,
     save_correction as _service_phase_save_correction,
+    save_group_correction as _service_phase_save_group,
 )
 from stt.db_maintenance import (
     checkpoint_and_release as _db_checkpoint_and_release,
@@ -4731,15 +4733,26 @@ def delete_service_phase_correction():
     if err:
         return err
 
+    # A group spans several blocks and so has no block_index; the page undoes it by the row
+    # id it already holds. One or the other, never both.
+    row_id = data.get("id")
     block_index = data.get("block_index")
-    if block_index in (None, "", "null"):
-        return jsonify({"success": False, "error": "An undo needs a block index."}), 400
-    block_index = coerce_int(block_index, 0, lo=0, hi=10000)
+    if row_id not in (None, "", "null"):
+        row_id = coerce_int(row_id, 0, lo=1, hi=2 ** 62)
+        block_index = None
+    elif block_index not in (None, "", "null"):
+        row_id = None
+        block_index = coerce_int(block_index, 0, lo=0, hi=10000)
+    else:
+        return jsonify({"success": False, "error": "An undo needs a block index or a row id."}), 400
 
     try:
         conn = sqlite3.connect(db_path, timeout=5)
         try:
-            removed = _service_phase_delete_correction(conn, block_index)
+            if row_id is not None:
+                removed = _service_phase_delete_correction_by_id(conn, row_id)
+            else:
+                removed = _service_phase_delete_correction(conn, block_index)
             corrections = _service_phase_corrections(conn)
         finally:
             conn.close()
@@ -4747,6 +4760,42 @@ def delete_service_phase_correction():
         return jsonify({"success": False, "error": f"{type(e).__name__}: {e}"}), 500
 
     return jsonify({"success": True, "removed": removed, "corrections": corrections})
+
+
+@app.route("/api/service-phase/group", methods=["POST"])
+def group_service_phase_blocks():
+    """Record several detected blocks as one phase, spanning their whole time range."""
+    if not check_ip_whitelist():
+        return jsonify({"success": False, "error": "Access denied"}), 403
+
+    data = _control_params(keep_blank=True)
+    db_path, err = _service_phase_resolve_db()
+    if err:
+        return err
+
+    start_ms = coerce_int(data.get("start_ms"), 0, lo=0, hi=2 ** 62)
+    end_ms = coerce_int(data.get("end_ms"), 0, lo=0, hi=2 ** 62)
+    label = (data.get("label") or "").strip()[:120]
+    kind = (data.get("kind") or "").strip()[:8]
+    note = (data.get("note") or "").strip()[:500]
+    if not label:
+        return jsonify({"success": False, "error": "A group needs a name."}), 400
+    if not start_ms or end_ms <= start_ms:
+        return jsonify({"success": False, "error": "A group needs a time range."}), 400
+
+    try:
+        conn = sqlite3.connect(db_path, timeout=5)
+        try:
+            row_id = _service_phase_save_group(
+                conn, start_ms, end_ms, kind=kind or None, label=label,
+                note=note, corrected_at=datetime.now().isoformat(timespec="seconds"))
+            corrections = _service_phase_corrections(conn)
+        finally:
+            conn.close()
+    except Exception as e:
+        return jsonify({"success": False, "error": f"{type(e).__name__}: {e}"}), 500
+
+    return jsonify({"success": True, "id": row_id, "corrections": corrections})
 
 
 @app.route("/corrections")

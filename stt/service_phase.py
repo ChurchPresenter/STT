@@ -619,16 +619,51 @@ def save_correction(conn: "sqlite3.Connection", block_index: Optional[int], *,
     return int(cur.lastrowid or 0)
 
 
+def save_group_correction(conn: "sqlite3.Connection", start_ms: int, end_ms: int, *,
+                          kind: Optional[str], label: Optional[str],
+                          note: str = "", corrected_at: str = "") -> int:
+    """Record one phase spanning several detected blocks, replacing any group on that span.
+
+    The detector breaks a block wherever the audio kind changes, so a worship set with a
+    word between the songs arrives as three blocks and one sermon interrupted by a cough
+    arrives as two. This is how an operator says they were one thing. The row carries no
+    block_index — it deliberately does not belong to any single block — and the span is
+    what identifies it, so re-grouping the same range corrects it instead of stacking a
+    second claim on top.
+    """
+    ensure_tables(conn)
+    conn.execute("DELETE FROM service_phase_corrections WHERE block_index IS NULL "
+                 "AND start_ms = ? AND end_ms = ?", (start_ms, end_ms))
+    cur = conn.execute(
+        "INSERT INTO service_phase_corrections (block_index, start_ms, end_ms, kind, label, "
+        "note, corrected_at) VALUES (NULL, ?, ?, ?, ?, ?, ?)",
+        (start_ms, end_ms, kind, label, note, corrected_at))
+    conn.commit()
+    return int(cur.lastrowid or 0)
+
+
 def delete_correction(conn: "sqlite3.Connection", block_index: int) -> int:
     """Drop the correction for one block, returning how many rows went.
 
     The counterpart to save_correction: a reviewer who mislabels a block should be able to
-    withdraw the claim entirely, not just overwrite it with another guess. Only corrections
-    tied to a block are removable this way — a correction with no block_index describes a
-    boundary the detector never produced, so there is no row on the page to undo it from.
+    withdraw the claim entirely, not just overwrite it with another guess. Corrections with
+    no block_index are groups spanning several blocks; delete_correction_by_id reaches those.
     """
     ensure_tables(conn)
     cur = conn.execute("DELETE FROM service_phase_corrections WHERE block_index = ?", (block_index,))
+    conn.commit()
+    return int(cur.rowcount or 0)
+
+
+def delete_correction_by_id(conn: "sqlite3.Connection", row_id: int) -> int:
+    """Drop one correction by row id, returning how many rows went.
+
+    A group has no block_index to name it by, so undoing one needs the id the page already
+    holds from load_corrections. Ungrouping is exactly this: remove the span and the blocks
+    underneath it reappear as the detector found them.
+    """
+    ensure_tables(conn)
+    cur = conn.execute("DELETE FROM service_phase_corrections WHERE id = ?", (row_id,))
     conn.commit()
     return int(cur.rowcount or 0)
 
