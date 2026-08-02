@@ -53,3 +53,8 @@ MARKETING.md
 
 # Coverage tooling artifact (pytest --cov)
 .coverage
+
+# Real service captions used as test fixtures. Verbatim congregation speech and its
+# translations: kept on the machine that recorded it, never in a public repository.
+# tests/ skips the cases that need it when the file is absent, so CI stays green.
+tests/fixtures/real_captions.json

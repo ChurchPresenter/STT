@@ -4,6 +4,7 @@ The rejection fixtures are verbatim outputs observed while measuring candidate m
 against real captions — not invented cases.
 """
 
+import json
 import os
 
 import pytest
@@ -24,6 +25,7 @@ from stt.llm_translate import (
     resolve_gpu_layers,
     scan_gguf_models,
     uses_local_llm,
+    numbers_survived,
     validate_translation,
 )
 
@@ -249,6 +251,121 @@ class TestValidateRejects:
                                     "en") == "The shield of faith."
         assert validate_translation("Let us pray together now.", "Помолимся вместе.",
                                     "en") is not None
+
+
+class TestScriptureReferences:
+    """The two ways an LLM fails on a scripture reference.
+
+    Asked for a *reference* it answers with the passage it remembers; asked for a verse
+    *range* it counts the range out. Both are fluent, correctly-scripted output of plausible
+    length, so every other check here waves them through. What moves in both cases is the
+    figures — a recited passage drops the chapter and verse, an enumeration invents numbers
+    nobody said.
+
+    The cases below are constructed to that shape. The observed originals are congregation
+    speech and are not kept in this repository; TestRealServiceCaptions runs against them
+    where they exist.
+    """
+
+    RECITED = [
+        # A reference, answered with a passage: the chapter and verse vanish.
+        ("Послание к Римлянам, 8 глава, 28 стих.",
+         "And we know that all things work together for good to them that love God."),
+        # The passage is quoted correctly but the reference in front of it is dropped.
+        ("Мы читаем в 5 главе, 14 стихе, что вы свет мира.",
+         "You are the light of the world."),
+    ]
+
+    @pytest.mark.parametrize("source,output", RECITED)
+    def test_a_recited_passage_is_refused(self, source, output):
+        assert validate_translation(output, source, "en") is None
+
+    def test_a_counted_out_verse_range_is_refused(self):
+        # A range answered with its own contents. This passed the older checks because a
+        # five-word source buys a fifteen-word budget and the list is thirteen tokens, and
+        # because it uses single newlines rather than the blank lines the document check
+        # looks for.
+        assert validate_translation("2\n3\n4\n5\n6\n7\n8\n9",
+                                    "с 2 по 9 стихи.", "en") is None
+
+    def test_a_reference_translated_as_a_reference_passes(self):
+        # Most references are handled correctly and must keep passing.
+        for source, output in [
+            ("Евангелие от Иоанна, 3 глава, 14 стих.", "The Gospel of John, chapter 3, verse 14."),
+            ("В Евреям, 9 глава, 22 стих.", "Hebrews, chapter 9, verse 22."),
+            ("Мы прочитаем об этом в 1 главе, 9 стихе.",
+             "We will read about this in chapter 1, verse 9."),
+        ]:
+            assert validate_translation(output, source, "en") == output
+
+    def test_a_number_spelled_out_is_not_a_dropped_number(self):
+        assert validate_translation("chapter three, verse sixteen is where we are",
+                                    "3 глава, 16 стих", "en") is None
+        assert validate_translation("the third chapter", "3 глава", "en") == "the third chapter"
+
+    def test_one_invented_number_is_tolerated(self):
+        # A translation may write in figures what the source wrote in words. That is not
+        # the enumeration failure, and rejecting it would be noisier than the fault.
+        assert validate_translation("We sang 2 hymns before the sermon.",
+                                    "Мы спели два гимна перед проповедью.", "en") is not None
+
+    def test_prose_with_no_numbers_is_unaffected(self):
+        assert validate_translation("This is an ordinary sentence with no numbers.",
+                                    "Это обычное предложение без чисел.", "en") is not None
+
+
+class TestRealServiceCaptions:
+    """The validator against whole services, where the fixtures for them exist locally.
+
+    Every caption a service produced is a far better test than any case anyone invents —
+    it is the only way to know a new rule is not quietly rejecting good translations at
+    scale. But those captions are verbatim congregation speech, so the file holding them is
+    gitignored and generated on the machine that recorded the session. Absent, these skip:
+    CI checks the constructed cases above, and this pair of assertions is the extra
+    confidence available to whoever has the recordings.
+    """
+
+    PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                        "fixtures", "real_captions.json")
+
+    @pytest.fixture
+    def captions(self):
+        if not os.path.exists(self.PATH):
+            pytest.skip("no local caption fixtures; see .gitignore")
+        with open(self.PATH, "r", encoding="utf-8") as f:
+            return json.load(f)
+
+    def test_every_known_bad_caption_is_refused(self, captions):
+        survived = [(src, out) for src, out in captions["must_reject"]
+                    if validate_translation(out, src, "en") is not None]
+        assert not survived, "a known-bad caption passed validation"
+
+    def test_the_good_captions_are_not_rejected(self, captions):
+        # The rule has to be precise, not merely strict: rejecting sound translations
+        # costs the LLM's quality on every one of them.
+        rejected = [(src, out) for src, out in captions["must_accept"]
+                    if validate_translation(out, src, "en") is None]
+        assert not rejected, f"{len(rejected)} good captions would now fall back to NMT"
+
+
+class TestNumbersSurvived:
+    def test_a_missing_figure_fails(self):
+        assert not numbers_survived("в 4 главе, с 12 стиха", "in the epistle", "en")
+
+    def test_all_figures_present_passes(self):
+        assert numbers_survived("4 глава, 12 стих", "chapter 4, verse 12", "en")
+
+    def test_a_crowd_of_invented_figures_fails(self):
+        assert not numbers_survived("с 2 по 9 стихи", "1 2 3 4 5 6 7 8 9 10 11 12 13", "en")
+
+    def test_no_figures_either_side_is_fine(self):
+        assert numbers_survived("Помолимся.", "Let us pray.", "en")
+
+    def test_an_unknown_target_language_compares_digits_only(self):
+        # The safe direction: without a numeral table, a spelled-out form reads as missing
+        # rather than being waved through.
+        assert not numbers_survived("3 глава", "kolmas luku", "fi")
+        assert numbers_survived("3 глава", "luku 3", "fi")
 
 
 class TestLocalModelPath:
