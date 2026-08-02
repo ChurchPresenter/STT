@@ -38,13 +38,13 @@ flowchart TD
     WD["<b>Watchdog</b> — supervisor process<br/>crash recovery · auto-update · headless<br/><i>optional: start_server.sh runs P1 directly</i>"]
     WEB["<b>P1</b> — Flask + Socket.IO<br/>web pages · translation · TTS<br/><i>never touches audio</i>"]
     WK["<b>P2</b> — Transcription worker<br/>capture · VAD · PANNs · Whisper<br/><i>spawned, not forked</i>"]
-    MG[/"<b>P3</b> — Manager dict<br/>29 shared keys: levels, live text, status"/]
+    MG[/"<b>P3</b> — Manager dict<br/>26 declared keys, a few more added at runtime"/]
     DB[("Session database<br/>SQLite, WAL")]
 
     WD -->|spawns / restarts| WEB
     WEB -.->|control_queue: start / stop<br/>config_queue: hot reload| WK
     WK -->|writes every row| DB
-    DB -->|read back every 0.5 s| WEB
+    DB -->|read back, cached 1 s| WEB
     WK --> MG
     MG --> WEB
 
@@ -76,7 +76,7 @@ flowchart TD
     HOLD["Hold the audio<br/>force finalise at 2 s silence"]
     WSP["<b>Whisper</b> — faster-whisper CT2<br/>beam 3 · temp 0.0 forced<br/>prompt = last 5 saved rows, 200 chars"]
     P2["<b>Whisper pass 2</b><br/><i>whisper_translate modes only</i><br/>decodes straight to the target language"]
-    FIN{"<b>Stopped changing?</b><br/>similarity 0.85 · 7 agreeing passes"}
+    FIN{"<b>Last segment stopped changing?</b><br/>7 repeats at a hardcoded 0.85<br/><i>earlier segments commit at once</i>"}
     LIVE["<b>Live line → screen</b><br/>LocalAgreement-2<br/><i>never saved as a row</i>"]
     SPL["<b>Split into sentences</b><br/>fragment held back<br/>release at 30 words or 10 s"]
     FLT{"<b>Six filters</b><br/>CJK → hallucination → music<br/>→ profanity → short → duplicate"}
@@ -104,8 +104,14 @@ flowchart TD
     P2 --> DB
 ```
 
-**Music always wins.** A confident music reading forces the gate to accept, so singing is always
-transcribed; `transcribe_detected_music` decides only whether the row is *shown*.
+**Music overrides the gate — once the model is present.** The CNN14 checkpoint is a separate
+~327 MB download, not shipped with the source. Until it is downloaded `music_prob` stays `None`,
+nothing overrides VAD, and singing that fails energy + Silero is dropped rather than
+transcribed. With it, a confident reading forces the gate to accept, and
+`transcribe_detected_music` then decides only whether the row is *shown*.
+
+When the two disagree: the gate override tests the **raw** probability, while the `Music` label —
+and therefore the `music:` deny — uses the **smoothed** average over the window.
 
 **Both detectors can be switched off**, and PANNs degrades quietly. With `vad.enabled` false the
 energy gate alone decides. If the PANNs checkpoint is missing the detector falls back to an
@@ -134,12 +140,17 @@ running the full filter chain independently:
 
 ## Why a row was hidden
 
-Nothing is deleted. A rejected row is written with a reason so the corrections page can restore
-it. `denied_reason` is the complete vocabulary — the first rule to fire wins.
+A rejected row is written with a reason so the corrections page can restore it. `denied_reason`
+is the complete vocabulary.
+
+**Evaluation order and reason precedence are not the same.** CJK, hallucination and music are all
+evaluated, then a fixed precedence decides which reason is recorded: **hallucination beats CJK
+beats music**. A line that is both CJK-only and a known artefact stem is filed as
+`hallucination`. `short` and `dup` are only reachable for a row that survived all three.
 
 | Order | `denied_reason` | Fires when |
 |-------|-----------------|------------|
-| 1 | `cjk` | CJK characters in a non-CJK session — a classic Whisper artefact |
+| 1 | `cjk` | Any CJK characters, in **any** session — the language is never consulted. Transcribing Chinese, Japanese or Korean means turning `cjk_filter_enabled` off, or every row is stripped empty and denied |
 | 1b | `cjk_shadow` | Partial strip: the cleaned text is saved *and* the original kept beside it |
 | 2 | `hallucination` | Substring match against known artefact stems (subtitle credits, "thank you for watching") |
 | 3 | `music:0.5` | Tagged Music while `transcribe_detected_music` is off. The threshold is baked into the reason so the corrections page can compare against the row's own value |
@@ -164,7 +175,9 @@ flowchart LR
     BYP["Audio diverted<br/><i>skip_transcription = true</i>"]
     PASS(["Raw audio passthrough<br/>keeps running"])
 
-    ST --> S1 --> S2 --> AN
+    ST --> S1
+    S1 -->|operator starts step 2| S2
+    S2 --> AN
     S1 -.-> BYP
     S2 -.-> BYP
     BYP -.-> PASS
@@ -197,6 +210,10 @@ flowchart TD
     MP -->|no| CPUD
 ```
 
+**The default Whisper backend has no MPS rung.** faster-whisper (CTranslate2) picks CUDA or CPU
+only, so on Apple Silicon it runs int8 on CPU and never touches the GPU. The three-rung ladder
+above applies to the NMT model and to the HuggingFace / openai-whisper backends.
+
 PANNs is pinned to CPU by its own `device` setting regardless, and TTS defaults to cloud
 Edge-TTS, so neither ever competes for the accelerator.
 
@@ -209,7 +226,7 @@ backend are opt-in.
 
 ```mermaid
 flowchart TD
-    WSPM["<b>Whisper</b><br/>loaded on first chunk, no warm-up"]
+    WSPM["<b>Whisper</b><br/>loaded at session start, before capture"]
     NMT["<b>NMT</b> — NLLB / MADLAD<br/>warmed at start when translation is on"]
     LLM["<b>LLM</b> — GGUF<br/><i>only under translation_method: llm</i>"]
     VRAM[/"<b>VRAM</b>"/]
@@ -253,7 +270,7 @@ flowchart TD
         L4["TTS loop<br/>buffers to a sentence end,<br/>or flushes after 4.0 s<br/><i>tts.enabled — default off</i>"]
         SYN["Edge-TTS or Piper<br/>→ mp3 / wav, base64"]
         L3["Audio loop<br/>PCM passthrough"]
-        SP["Service phase<br/>own tick, every 20 s"]
+        SP["Service phase<br/>runs inside the transcript loop,<br/>self-throttled to 20 s"]
         DLY{"Output delay?<br/><i>output_delay.enabled — default off</i><br/>when on: 2–30 s, default 7 s"}
         SIO["Socket.IO broadcast"]
     end
@@ -290,6 +307,12 @@ flowchart TD
     class L4,SYN,C4,C3 optin;
 ```
 
+**The loops do not all tick at the same rate.** The transcript loop runs at
+`web_server.update_interval` (0.5 s) and its database read is cached for 1 s, so it queries at
+most once a second. The translation loop halves to 1 s when translation is disabled and bypasses
+that cache, so it really does read every 0.5 s. The TTS loop uses a fixed 0.5 s, 1 s when idle.
+The audio loop is not timed at all — it blocks on the queue and emits as chunks arrive.
+
 **Speech output and the output delay are both off by default.** With stock settings this
 diagram is just: rows → transcript loop → broadcast → caption screen.
 
@@ -298,14 +321,18 @@ until the joined string ends on sentence punctuation, and only then synthesises,
 does not stutter one fragment at a time. Enabling it mid-session skips history rather than
 replaying it.
 
-**Raw audio never enters transcription.** It forks straight off the capture and rides its own
-bounded queue, so a slow browser drops frames instead of delaying a caption.
+**Raw audio never enters transcription**, and is not even enqueued until a client asks for it —
+the first `join_audio_stream` latches it on, and the latch is never cleared on leave, so once
+anyone has listened the worker keeps filling the queue for the life of the process. A slow
+browser drops frames rather than delaying a caption.
 
 **Rooms** mean audio and speech only reach clients that explicitly joined — a caption screen is
 never sent audio it will not play.
 
 **Output delay** holds captions so an operator can correct a row before the audience ever sees
-it; released rows are back-dated to their real time.
+it. A row that simply ages out of the window keeps its original timestamp; only a row the
+operator *approves* is rewritten — to `now − (delay + 1) s`, a synthetic time chosen to clear the
+window, not the moment it was actually spoken.
 
 **The bare host is not neutral.** Opening `/` with no query parameters redirects to whichever
 display profile is marked active, and `/profile/<name>` expands a saved profile into URL
@@ -362,7 +389,7 @@ front of a congregation is worse than a slower one.
 flowchart TD
     IN(["A finalised row"])
     G1{"Offload configured?<br/><i>remote.enabled AND remote.endpoint</i><br/><b>default: no</b>"}
-    RM["<b>Remote</b> — paired machine over HTTP<br/>timeout 15 s · cap 8000 chars"]
+    RM["<b>Remote</b> — paired machine over HTTP<br/>timeout 15 s · B rejects over 8000 chars"]
     G2{"translation_method<br/><b>default: nllb</b>"}
     LM["<b>LLM</b> — local GGUF or OpenAI-compatible<br/>temp 0.0 · n_ctx 2048"]
     NM["<b>NMT</b> — NLLB or MADLAD<br/>truncates at 1024 tokens · beams 2"]
@@ -404,8 +431,8 @@ process only reads the result.
 | It narrates — *"Okay, let's…"*, *"Here's the translation:"* | Reasoning models ignore instructions to stop |
 | Cyrillic survives into a Latin-script target | The source leaked through untranslated |
 | The output is multi-paragraph | A caption is one utterance; a document is a recitation |
-| It runs past `min(3 × source words, source + 24)` | Commentary and recited scripture present as length |
-| The input would not fit the context window | Checked *before* generating, so an overflow is a decline and never a crash |
+| It runs past `min(max(8, 3 × source words), source + 24)` | Commentary and recited scripture present as length. The floor of 8 stops a two-word caption getting a two-word budget |
+| The input would not fit the context window | Checked *before* generating, so an overflow is a decline and never a crash — but **only on `provider: local`**. `n_ctx` sizes the in-process GGUF; an OpenAI-compatible endpoint, the shipped default, is not pre-checked |
 
 Each caption is an independent two-message call — nothing accumulates between sentences, so
 there is no context to clear.
@@ -439,7 +466,7 @@ flowchart TD
     A -->|1 · pair request| B
     B -.->|6-digit code, shown to the operator<br/>expires in 300 s · 5 attempts| A
     A -->|2 · confirm the code| B
-    A -->|3 · heartbeat every 20 s| B
+    A -->|3 · heartbeat every 20 s, while transcribing| B
     A -->|4 · translate · 15 s timeout · 8000 char cap| B
     A -->|5 · push target language, glossary,<br/>model and precision| B
     A -->|6 · unload when finished| B
@@ -548,7 +575,7 @@ Instrumentation runs in both processes and is wrapped so it can never break a ca
 | `queue_depth` | worker | The **raw-audio passthrough** queue, max 10 — *not* a transcription backlog |
 | local / remote translate ms | web | Comparing the two isolates network overhead from model time |
 | TTS synthesis ms | web | |
-| Access log | web | Every request and every Socket.IO action, capped at 50,000 rows |
+| Access log | web | Every request except static assets, socket transport, and the dashboard polling endpoints (skipped by default); plus every Socket.IO action. Capped at 50,000 rows |
 
 Real-time factor above `1.0` reads as degraded and above `1.5` as an error. All live metrics are
 nulled when transcription is not running, so an idle machine never shows stale green.
@@ -604,10 +631,45 @@ portable file rather than a database plus sidecars.
 
 ## Where each stage lives
 
-| Stage | Reference |
-|-------|-----------|
+Symbols rather than line numbers — line numbers in a document go stale the first time anyone
+edits the file, and these did. Search for the name.
+
+| Stage | Where |
+|-------|-------|
+| Process split — why spawn, not fork | `thread1_function` · `thread2_function` |
+| Shared state proxy | `transcription_state` |
+| ffmpeg capture loop | `stt/audio_capture.py` — `FFmpegAudioCapture._capture_loop` |
+| Rolling buffer / clip rule | `WhisperLiveTranscriber.add_frames` |
+| VAD + music bypass | `has_speech` (nested in the transcribe loop) |
+| PANNs detector thread | `MusicDetector` · `compute_music_prob` · `stt/segments.py` — `panns_label_from_prob` |
+| Whisper decode params | `LIVE_TRANSCRIPTION_PARAMS` · `ModelFactory.transcribe` |
+| Finalisation rule | `WhisperLiveTranscriber.update_segments` |
+| Live-line stabiliser | `stt/hypothesis_buffer.py` — `LocalAgreementBuffer.stabilize` |
+| Sentence split + pending buffer | `stt/text_utils.py` — `split_into_sentences`, `remove_overlapping_prefix` |
+| Filters | `stt/text_utils.py` — `filter_hallucinated_text`, `is_whisper_hallucination`, `is_fuzzy_duplicate`, `apply_profanity_filter` |
+| Emit loops | `emit_new_entries` · `emit_translated_entries` · `emit_audio_stream` · `emit_tts_audio` |
+| Translation dispatcher | `translate_live_text` |
+| Remote / LLM / NMT legs | `_translate_via_remote` · `_translate_via_llm` · `translate_text` |
+| LLM validation | `stt/llm_translate.py` — `validate_translation` |
+| Model load / unload | `ModelFactory.load_model` · `get_live_translation_model` · `get_local_llm` · `unload_local_llm` |
+| Device ladder | `ModelFactory.load_model` (CUDA → MPS → CPU) · `_load_faster_whisper` (CUDA → CPU only) |
+| Calibration | `/api/calibration/start` · `stt/calibration.py` — `analyze_calibration_data` |
+| Auth gate | `check_ip_whitelist` · `_socket_auth_ok` |
+| Output delay / staging | `_backdate_staged_rows` · `handle_approve_staged` · `handle_discard_staged` |
+| Review queue · mark · deny | `get_review_queue` · `handle_set_segment_marked` · `handle_set_segment_denied` |
+| Remote pairing + heartbeat | `/api/translate/pair/*` · `_remote_heartbeat_loop` |
+| Session provenance | `stt/session_meta.py` · `_current_session_meta` |
+| Service phase detector | `stt/service_phase.py` · `_service_phase_tick` |
+| Metrics + access log | `stt/metrics.py` · `stt/request_log.py` · `_access_log_record` |
+| Watchdog + self-update | `stt/watchdog.py` — `CrashRecoveryThread`, `AutoUpdater` · `stt/self_update.py` |
+| Batch file path | `process_file_transcription` |
+| Teardown / exports | `stt/formatting.py` — `convert_db_to_srt` · `stt/file_mover.py` |
+| TTS | `synthesize_tts` · `emit_tts_audio` |
+| Timezone resolution | `stt/config_utils.py` — `resolve_timezone` · `get_configured_timezone` |
+
+-------|-----------|
 | Process split — why spawn, not fork | `speech_to_text.py:2986-3000` |
-| Shared state proxy (29 keys) | `speech_to_text.py:3023` |
+| Shared state proxy (26 declared keys) | `speech_to_text.py:3023` |
 | ffmpeg capture loop | `stt/audio_capture.py:151` · `:284` |
 | Rolling buffer / clip rule | `speech_to_text.py:2706-2723` |
 | VAD + music bypass | `speech_to_text.py:16266` · `:16901` |
