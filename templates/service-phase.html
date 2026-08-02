@@ -41,14 +41,21 @@
       }
       .sp-block.corrected { border-color: var(--warning); }
       .sp-block.unusual { border-left: 3px solid var(--warning); }
-      .sp-flag { color: var(--warning); font-size: 0.8em; width: 100%; padding-left: 120px; padding-top: 4px; }
+      .sp-flag { color: var(--warning); font-size: 0.8em; width: 100%; padding-left: 266px; padding-top: 4px; }
       .sp-notes {
         padding: 10px 14px; margin-bottom: 14px; border-radius: var(--radius-sm);
         background: rgba(245,158,11,0.12); border: 1px solid var(--warning);
         color: var(--warning); font-size: 0.88em;
       }
       .sp-block.ongoing { border-color: var(--success); }
-      .sp-time { font-variant-numeric: tabular-nums; color: var(--text-secondary); min-width: 108px; font-size: 0.9em; }
+      .sp-time { font-variant-numeric: tabular-nums; color: var(--text-secondary); min-width: 150px; font-size: 0.9em; }
+      .sp-since { color: var(--text-muted); min-width: 92px; }
+      .sp-head {
+        display: flex; gap: 12px; padding: 0 14px 6px;
+        font-size: 0.75em; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-muted);
+      }
+      .sp-head span:first-child { min-width: 150px; }
+      .sp-head span:last-child { min-width: 92px; }
       .sp-label { font-weight: 600; color: var(--text-primary); min-width: 120px; }
       .sp-conf { color: var(--text-muted); font-size: 0.82em; }
       .sp-cues { color: var(--warning); font-size: 0.82em; }
@@ -64,7 +71,7 @@
       .sp-fix button:hover { background: rgba(41,121,255,0.28); }
       .sp-was {
         font-size: 0.8em; color: var(--warning); width: 100%;
-        padding-left: 120px; padding-top: 4px;
+        padding-left: 266px; padding-top: 4px;
       }
       .sp-toolbar { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-bottom: 14px; }
       .sp-toolbar button {
@@ -100,6 +107,8 @@
 
 <div class="sp-strip" id="sp-strip"></div>
 
+<div class="sp-head"><span>clock</span><span>into service</span></div>
+
 <div id="sp-blocks"></div>
 {% endblock %}
 
@@ -120,8 +129,27 @@
     return (h ? h + 'h' : '') + String(m).padStart(h ? 2 : 1, '0') + 'm';
   }
 
+  function fmtWall(ms) {
+    // hour12 pinned rather than left to the locale, to match server-settings.html and to
+    // keep the column a predictable width.
+    return new Date(ms).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: true });
+  }
+
   function correctionFor(idx) {
     return spData.corrections.find(c => c.block_index === idx) || null;
+  }
+
+  // A correction outranks the detector, so the anchor moves when an operator names a
+  // different block Opening. That is the only override: the detector's own Opening is a
+  // guess from duration and ordering, not from anything said.
+  function effectiveLabel(b) {
+    const fix = correctionFor(b.index);
+    return (fix && fix.label) ? fix.label : b.label;
+  }
+
+  function serviceStartMs() {
+    const opening = spData.blocks.find(b => effectiveLabel(b) === 'Opening');
+    return opening ? opening.start_ms : null;
   }
 
   function renderNow() {
@@ -140,8 +168,11 @@
     kind.textContent = SP_KINDS[cur.kind] || cur.kind;
     kind.className = 'sp-now-kind sp-kind-' + cur.kind;
     const conf = Math.round((cur.confidence || 0) * 100);
+    const anchor = serviceStartMs();
+    const into = (anchor !== null && cur.start_ms >= anchor)
+      ? ' · ' + fmtClock(cur.start_ms, anchor) + ' into the service' : '';
     meta.textContent = cur.minutes + ' min' + (cur.ongoing ? ' and running' : '')
-      + ' · confidence ' + conf + '%'
+      + ' · confidence ' + conf + '%' + into
       + (spData.first_sunday ? ' · first Sunday' : '');
   }
 
@@ -174,7 +205,7 @@
       host.innerHTML = '<div class="sp-note">Nothing detected yet.</div>';
       return;
     }
-    const base = spData.bins.length ? spData.bins[0].start_ms : 0;
+    const anchor = serviceStartMs();
     spData.blocks.forEach(b => {
       const fix = correctionFor(b.index);
       const row = document.createElement('div');
@@ -187,8 +218,13 @@
         '<option value="' + l + '"' + (l === (fix ? fix.label : b.label) ? ' selected' : '') + '>' + l + '</option>'
       ).join('');
 
+      const into = (anchor !== null && b.start_ms >= anchor)
+        ? fmtClock(b.start_ms, anchor) + ' – ' + fmtClock(b.end_ms, anchor)
+        : '—';
+
       row.innerHTML =
-        '<span class="sp-time">' + fmtClock(b.start_ms, base) + ' – ' + fmtClock(b.end_ms, base) + '</span>' +
+        '<span class="sp-time">' + fmtWall(b.start_ms) + ' – ' + fmtWall(b.end_ms) + '</span>' +
+        '<span class="sp-time sp-since">' + into + '</span>' +
         '<span class="sp-now-kind sp-kind-' + b.kind + '">' + (SP_KINDS[b.kind] || b.kind) + '</span>' +
         '<span class="sp-label">' + (b.label || '—') + '</span>' +
         '<span class="sp-conf">' + b.minutes + ' min · ' + Math.round((b.confidence || 0) * 100) + '%</span>' +
