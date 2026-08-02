@@ -31,7 +31,7 @@ import re
 import sqlite3
 from typing import Dict, List, Optional, Sequence, Tuple
 
-from stt.phase_rules import apply_rules
+from stt.phase_rules import Span, apply_rules
 
 # Structural classes. Deliberately three, matching the PANNs vocabulary the pipeline
 # already produces (stt/segments.py:panns_label_from_prob) rather than inventing a
@@ -475,7 +475,7 @@ def analyze(rows: Sequence[Tuple], cfg: Optional[dict] = None, *,
         enter_minutes=int(cfg.get("enter_minutes", 2)),
         exit_minutes=int(cfg.get("exit_minutes", 3)),
     )
-    spans: List = []
+    spans: List[Span] = []
     if rules:
         for b in blocks:
             b.cues = sum_cues(bins, b)
@@ -494,7 +494,7 @@ def analyze(rows: Sequence[Tuple], cfg: Optional[dict] = None, *,
     }
 
 
-def _span_dict(span, blocks: Sequence[Block]) -> dict:
+def _span_dict(span: Span, blocks: Sequence[Block]) -> dict:
     """A span in the same shape the page already renders an operator's group in."""
     first, last = blocks[span.start_index], blocks[span.end_index]
     return {
