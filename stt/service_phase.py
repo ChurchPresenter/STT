@@ -273,15 +273,16 @@ def flag_unusual(blocks: Sequence[Block], cfg: Optional[dict] = None) -> List[st
     the service as a whole. Returns the service-level notes.
 
     Duration is genuinely informative — a song set does not run for an hour — but it is
-    used to *flag*, never to relabel. The bands below come from ten ordinary services, and
-    ordinary is the only thing they can describe: the exceptions the operator named happen
-    a few times a year, so none is in the sample. On a music-heavy service or a Christmas
-    play, the long block is real, and a rule that "corrected" it would mislabel precisely
-    the service most worth labelling. So the audio still decides what a block *is*; an
-    implausible duration only lowers confidence and asks the operator to look.
+    used to *flag*, never to relabel. On a music-heavy service or a Christmas play the long
+    block is real, and a rule that "corrected" it would mislabel precisely the service most
+    worth labelling. So the audio still decides what a block *is*; an implausible duration
+    only lowers confidence and asks the operator to look.
 
-    Observed over 44 music and 38 speaking blocks: music p50 7 min, p95 21, longest 27;
-    speaking p50 12, p95 44, longest 54. Music share of a service ran 27%-61%.
+    Every message quotes the threshold it actually applied, rather than a figure measured
+    somewhere else. The shipped defaults were taken from one congregation's archive, and a
+    message that says "nothing exceeds 27" while comparing against a tuned 45 is worse than
+    no message: it reads as evidence when it is a leftover. What is typical here is whatever
+    this installation has configured, and the learner moves it.
     """
     cfg = cfg or {}
     music_max = int(cfg.get("typical_music_max_minutes", 30))
@@ -296,9 +297,11 @@ def flag_unusual(blocks: Sequence[Block], cfg: Optional[dict] = None) -> List[st
         # untrue — and a sermon that has already overrun is exactly what an operator
         # wants flagged while it is still happening rather than afterwards.
         if b.kind == MUSIC and b.minutes > music_max:
-            b.unusual.append(f"music runs {b.minutes} min; nothing in the archive exceeds 27")
+            b.unusual.append(f"music runs {b.minutes} min; longer than the {music_max} min "
+                             f"this installation treats as usual")
         elif b.kind == SPEECH and b.minutes > speech_max:
-            b.unusual.append(f"speaking runs {b.minutes} min; nothing in the archive exceeds 54")
+            b.unusual.append(f"speaking runs {b.minutes} min; longer than the {speech_max} min "
+                             f"this installation treats as usual")
         if b.unusual:
             # Structure is still trusted; only the name becomes a weaker claim.
             b.confidence = min(b.confidence, 0.3)
@@ -308,12 +311,12 @@ def flag_unusual(blocks: Sequence[Block], cfg: Optional[dict] = None) -> List[st
     speech = sum(b.minutes for b in blocks if b.kind == SPEECH)
     if music + speech >= 30:  # too short to characterise before that
         share = music / float(music + speech)
+        band = f"configured band is {share_lo:.0%}-{share_hi:.0%}"
         if share > share_hi:
-            notes.append(f"More musical than usual ({share:.0%} of the service; "
-                         f"typical is 27-61%) — a music service or a play would look like this.")
+            notes.append(f"More musical than usual ({share:.0%} of the service; {band}) "
+                         f"— a music service or a play would look like this.")
         elif share < share_lo:
-            notes.append(f"Less musical than usual ({share:.0%} of the service; "
-                         f"typical is 27-61%).")
+            notes.append(f"Less musical than usual ({share:.0%} of the service; {band}).")
     return notes
 
 

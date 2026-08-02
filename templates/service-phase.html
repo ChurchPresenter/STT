@@ -116,6 +116,13 @@
   <span id="sp-pick-count" style="color: var(--text-secondary); font-size: 0.86em;"></span>
 </div>
 
+<div class="sp-toolbar">
+  <button type="button" id="sp-learn" onclick="loadProposals()">What do my services say?</button>
+  <span id="sp-learn-status" style="color: var(--text-secondary); font-size: 0.86em;"></span>
+</div>
+
+<div id="sp-proposals"></div>
+
 <div class="sp-now">
   <span class="sp-now-label" id="sp-now-label">—</span>
   <span class="sp-now-kind sp-kind-_" id="sp-now-kind">—</span>
@@ -471,6 +478,68 @@
       }
     } catch (e) {
       showAlert('Could not confirm: ' + e, 'error');
+    }
+  }
+
+  // The proposals panel. Nothing here changes a setting until Apply is clicked, and every
+  // row shows what it was measured from — a suggestion with no evidence beside it is just
+  // another hardcoded number with extra steps.
+  async function loadProposals() {
+    const status = document.getElementById('sp-learn-status');
+    status.textContent = 'Reading the archive…';
+    try {
+      const resp = await fetch('/api/service-phase/learn', { method: 'POST' });
+      const data = await resp.json();
+      if (!data.success) {
+        status.textContent = data.error || 'Could not read the archive.';
+        return;
+      }
+      status.textContent = data.corrections + ' corrections across ' + data.sessions
+        + ' sessions · ' + data.actionable + ' worth changing';
+      renderProposals(data);
+    } catch (e) {
+      status.textContent = 'Could not read the archive: ' + e;
+    }
+  }
+
+  function renderProposals(data) {
+    const host = document.getElementById('sp-proposals');
+    host.innerHTML = '';
+    if (!data.proposals.length) return;
+    data.proposals.forEach(p => {
+      const row = document.createElement('div');
+      row.className = 'sp-block' + (p.actionable ? ' corrected' : '');
+      const shown = Array.isArray(p.suggested) ? p.suggested.join(' · ') : p.suggested;
+      row.innerHTML =
+        '<span class="sp-label" style="min-width: 220px;">' + esc(p.key) + '</span>' +
+        '<span class="sp-conf">baseline ' + esc(p.baseline) + ' · now ' + esc(p.current) + '</span>' +
+        '<span class="sp-label">' + (p.actionable ? '&rarr; ' + esc(shown) : '—') + '</span>' +
+        '<span class="sp-cues" style="color: var(--text-muted);">' + esc(p.evidence) + '</span>' +
+        (p.actionable
+          ? '<span class="sp-fix"><button type="button" onclick="applyProposal(\'' +
+            esc(p.key) + '\')">Apply</button></span>'
+          : '<span class="sp-fix"><span class="sp-conf">' + p.samples + '/' +
+            data.min_samples + ' samples</span></span>');
+      host.appendChild(row);
+    });
+  }
+
+  async function applyProposal(key) {
+    try {
+      const resp = await fetch('/api/service-phase/learn/apply', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ keys: [key] })
+      });
+      const data = await resp.json();
+      if (data.success) {
+        showAlert('Applied ' + key + '. Re-run the detector to see it.', 'success');
+        loadProposals();
+      } else {
+        showAlert('Could not apply: ' + data.error, 'error');
+      }
+    } catch (e) {
+      showAlert('Could not apply: ' + e, 'error');
     }
   }
 

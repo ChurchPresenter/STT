@@ -852,9 +852,15 @@ from stt.service_phase import (
     save_group_correction as _service_phase_save_group,
 )
 from stt.phase_rules import load_rules as _phase_rules_load
+from stt.phase_learn import (
+    apply_proposals as _phase_learn_apply,
+    collect as _phase_learn_collect,
+    propose_all as _phase_learn_propose,
+)
 from stt.db_maintenance import (
     checkpoint_and_release as _db_checkpoint_and_release,
     sweep_orphaned_sidecars as _db_sweep_sidecars,
+    _iter_databases as _db_iter_databases,
 )
 from stt.session_meta import (
     append_changes as _session_meta_append,
@@ -4799,6 +4805,81 @@ def group_service_phase_blocks():
         return jsonify({"success": False, "error": f"{type(e).__name__}: {e}"}), 500
 
     return jsonify({"success": True, "id": row_id, "corrections": corrections})
+
+
+def _service_phase_learn_scan(limit=200):
+    """Corrected phases across the archive, newest sessions first.
+
+    Read-only and opened one at a time: the archive is on the same disk a service may be
+    recording to, and a learner is never worth competing with the writer for it.
+    """
+    paths = sorted(_db_iter_databases(_sidecar_sweep_dirs()), reverse=True)[:limit]
+    phases = []
+    for path in paths:
+        try:
+            conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+        except sqlite3.Error:
+            continue
+        try:
+            phases.extend(_phase_learn_collect([(os.path.basename(path), conn)], with_text=True))
+        except Exception:
+            continue   # one unreadable session must not stop the sweep
+        finally:
+            conn.close()
+    return phases
+
+
+@app.route("/api/service-phase/learn", methods=["POST"])
+def learn_service_phase_settings():
+    """What this installation's own corrected services say the settings should be."""
+    if not check_ip_whitelist():
+        return jsonify({"success": False, "error": "Access denied"}), 403
+
+    try:
+        with open(CONFIG_TEMPLATE_FILE, "r", encoding="utf-8") as f:
+            baseline = (json.load(f).get("service_phase") or {})
+    except Exception:
+        baseline = {}
+
+    try:
+        result = _phase_learn_propose(_service_phase_learn_scan(), _service_phase_config(),
+                                      baseline)
+    except Exception as e:
+        return jsonify({"success": False, "error": f"{type(e).__name__}: {e}"}), 500
+
+    result["success"] = True
+    return jsonify(result)
+
+
+@app.route("/api/service-phase/learn/apply", methods=["POST"])
+def apply_service_phase_settings():
+    """Take the proposals the operator ticked. Nothing is ever applied without this call."""
+    if not check_ip_whitelist():
+        return jsonify({"success": False, "error": "Access denied"}), 403
+
+    data = _control_params(keep_blank=True)
+    keys = data.get("keys")
+    if not isinstance(keys, list) or not keys:
+        return jsonify({"success": False, "error": "Nothing selected to apply."}), 400
+
+    try:
+        with open(CONFIG_TEMPLATE_FILE, "r", encoding="utf-8") as f:
+            baseline = (json.load(f).get("service_phase") or {})
+    except Exception:
+        baseline = {}
+
+    try:
+        # Re-derived here rather than taken from the request: a proposal is a claim about
+        # the archive, and the archive is what should decide it, not a posted number.
+        fresh = _phase_learn_propose(_service_phase_learn_scan(), _service_phase_config(),
+                                     baseline)
+        updated = _phase_learn_apply(_service_phase_config(), fresh["proposals"], keys)
+        config["service_phase"] = updated
+        save_config(config)
+    except Exception as e:
+        return jsonify({"success": False, "error": f"{type(e).__name__}: {e}"}), 500
+
+    return jsonify({"success": True, "applied": keys, "service_phase": updated})
 
 
 @app.route("/corrections")
