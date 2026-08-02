@@ -382,6 +382,34 @@ def label_blocks(blocks: List[Block], bins: Sequence[Bin], cfg: Optional[dict] =
         # An ongoing block may still grow into a sermon; say so rather than commit.
         if b.ongoing and b.label in ("Speaking", "Opening"):
             b.confidence = min(b.confidence, 0.3)
+
+    return number_songs_from_opening(blocks, songs_min=songs_min)
+
+
+def number_songs_from_opening(blocks: List[Block], *, songs_min: int) -> List[Block]:
+    """Restart the Songs count at the opening, leaving earlier music unnumbered.
+
+    Music before the opening is the band rehearsing to an empty room, not the first song of
+    the service: numbering it put Songs 1 half an hour before anyone arrived and left the
+    real first song called Songs 3. Rehearsal keeps the plain "Music" name the detector
+    already gives short music, so no new category enters the vocabulary.
+
+    A no-op when nothing was labelled Opening — a session with no detected opening keeps
+    counting from the first music block, which is the best available guess.
+    """
+    opening_at = next((b.index for b in blocks if b.label == "Opening"), None)
+    if opening_at is None:
+        return blocks
+
+    songs_n = 0
+    for b in blocks:
+        if b.kind != MUSIC or b.label is None:
+            continue
+        if b.index < opening_at:
+            b.label, b.confidence = "Music", 0.4
+        elif b.minutes >= songs_min:
+            songs_n += 1
+            b.label, b.confidence = f"Songs {songs_n}", 0.7
     return blocks
 
 

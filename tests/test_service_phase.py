@@ -239,6 +239,37 @@ class TestLabelBlocks:
         labels = [b.label for b in self.labelled(spec) if b.kind == SPEECH]
         assert labels == ["Opening", "Sermon 1"]
 
+    def test_the_song_count_starts_at_the_opening_not_the_recording(self):
+        # The shape of a real Sunday: the band rehearses to an empty room long before the
+        # service starts, so the first song of the service must not be called Songs 3.
+        spec = "M" * 6 + "_" * 4 + "M" * 5 + "_" * 4 + "S" * 4 + "M" * 6 + "S" * 12
+        blocks = self.labelled(spec)
+        assert [b.label for b in blocks if b.kind == MUSIC] == ["Music", "Music", "Songs 1"]
+        assert [b.label for b in blocks if b.kind == SPEECH] == ["Opening", "Sermon 1"]
+
+    def test_rehearsal_keeps_the_plain_music_name_and_its_confidence(self):
+        # Deliberately no new category: "Music" is what the detector already calls music it
+        # will not number, and the page offers it in the correction dropdown.
+        spec = "M" * 6 + "_" * 4 + "S" * 4 + "M" * 6 + "S" * 12
+        rehearsal = next(b for b in self.labelled(spec) if b.kind == MUSIC)
+        assert rehearsal.label == "Music" and rehearsal.confidence == 0.4
+
+    def test_with_no_opening_the_count_still_starts_at_the_first_song(self):
+        # No anchor to work from, so counting from the recording is the best guess left.
+        spec = "M" * 5 + "S" * 12 + "M" * 5
+        assert [b.label for b in self.labelled(spec) if b.kind == MUSIC] == ["Songs 1", "Songs 2"]
+
+    def test_music_after_the_opening_is_numbered_even_when_short_music_precedes_it(self):
+        spec = "M" * 3 + "_" * 4 + "S" * 4 + "M" * 6 + "_" * 4 + "M" * 6 + "S" * 12
+        assert [b.label for b in self.labelled(spec) if b.kind == MUSIC] == [
+            "Music", "Songs 1", "Songs 2"]
+
+    def test_short_music_after_the_opening_is_still_not_a_song_set(self):
+        # The songs_min threshold keeps applying past the anchor; only the count restarts.
+        spec = "M" * 6 + "_" * 4 + "S" * 4 + "M" * 2 + "_" * 4 + "M" * 6 + "S" * 12
+        assert [b.label for b in self.labelled(spec) if b.kind == MUSIC] == [
+            "Music", "Music", "Songs 1"]
+
     def test_quiet_blocks_are_never_named(self):
         spec = "S" * 10 + "_" * 6 + "S" * 10
         for b in self.labelled(spec):

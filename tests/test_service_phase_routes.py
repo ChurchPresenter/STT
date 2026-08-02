@@ -108,6 +108,12 @@ class TestGetServicePhase:
         assert body["current"]["kind"] == "S"
         assert body["session_id"] == "2026-03-01_093218.db"
 
+    def test_it_reports_the_songs_threshold_the_page_renumbers_with(self, tmp_path):
+        # The page redoes the song numbering when a correction moves the opening, so it
+        # needs the detector's own threshold rather than a hardcoded guess.
+        body = make_ns(live_db=session_db(tmp_path))["get_service_phase"]()
+        assert body["songs_min_minutes"] == CFG["songs_min_minutes"]
+
     def test_no_running_session_is_a_404_not_a_crash(self):
         body, status = make_ns(live_db=None)["get_service_phase"]()
         assert status == 404 and body["success"] is False

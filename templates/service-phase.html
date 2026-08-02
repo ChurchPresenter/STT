@@ -156,6 +156,26 @@
     return opening ? opening.start_ms : null;
   }
 
+  // Mirrors number_songs_from_opening() in stt/service_phase.py, because a correction that
+  // moves the opening has to move the song numbers with it and the detector will not re-run
+  // until the next tick — and would not read the correction if it did. Returns a map of
+  // block index to label, so a row can be renamed without touching the stored data.
+  function songNumbering(anchor) {
+    const out = {};
+    if (anchor === null) return out;
+    const songsMin = spData.songs_min_minutes || 3;
+    let n = 0;
+    spData.blocks.forEach(b => {
+      if (b.kind !== 'M' || !b.label) return;
+      // A corrected block shows what the operator typed and takes no number with it.
+      // Without this, marking a music block Opening leaves the count starting at Songs 2.
+      if (correctionFor(b.index)) return;
+      if (b.start_ms < anchor) out[b.index] = 'Music';
+      else if (b.minutes >= songsMin) out[b.index] = 'Songs ' + (++n);
+    });
+    return out;
+  }
+
   function renderNow() {
     const cur = spData.current;
     const label = document.getElementById('sp-now-label');
@@ -169,7 +189,9 @@
       return;
     }
     const anchor = serviceStartMs();
-    label.textContent = cur.label || SP_KINDS[cur.kind] || '—';
+    const renumbered = songNumbering(anchor)[cur.index];
+    label.textContent = (correctionFor(cur.index) || {}).label
+      || renumbered || cur.label || SP_KINDS[cur.kind] || '—';
     kind.textContent = SP_KINDS[cur.kind] || cur.kind;
     kind.className = 'sp-now-kind sp-kind-' + cur.kind;
     const conf = Math.round((cur.confidence || 0) * 100);
@@ -210,16 +232,21 @@
       return;
     }
     const anchor = serviceStartMs();
+    const songs = songNumbering(anchor);
     spData.blocks.forEach(b => {
       const fix = correctionFor(b.index);
+      const shown = fix && fix.label ? fix.label : (songs[b.index] || b.label);
       const row = document.createElement('div');
       const flags = b.unusual || [];
       row.className = 'sp-block' + (fix ? ' corrected' : '') + (b.ongoing ? ' ongoing' : '')
         + (flags.length ? ' unusual' : '');
 
       const cues = Object.entries(b.cues || {}).map(([k, v]) => k + '×' + v).join(' ');
+      // "Songs 2" is not in the vocabulary but "Songs" is; without this the dropdown falls
+      // back to its first entry and a stray Correct click relabels the block Opening.
+      const base = (shown || '').replace(/ \d+$/, '');
       const opts = SP_LABELS.map(l =>
-        '<option value="' + l + '"' + (l === (fix ? fix.label : b.label) ? ' selected' : '') + '>' + l + '</option>'
+        '<option value="' + l + '"' + (l === shown || l === base ? ' selected' : '') + '>' + l + '</option>'
       ).join('');
 
       const into = (anchor !== null && b.start_ms >= anchor)
@@ -230,7 +257,7 @@
         '<span class="sp-time">' + fmtWall(b.start_ms) + ' – ' + fmtWall(b.end_ms) + '</span>' +
         '<span class="sp-time sp-since">' + into + '</span>' +
         '<span class="sp-now-kind sp-kind-' + b.kind + '">' + (SP_KINDS[b.kind] || b.kind) + '</span>' +
-        '<span class="sp-label">' + (b.label || '—') + '</span>' +
+        '<span class="sp-label">' + (shown || '—') + '</span>' +
         '<span class="sp-conf">' + b.minutes + ' min · ' + Math.round((b.confidence || 0) * 100) + '%</span>' +
         '<span class="sp-cues">' + cues + '</span>' +
         '<span class="sp-fix">' +

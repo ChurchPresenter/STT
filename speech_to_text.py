@@ -4672,6 +4672,9 @@ def get_service_phase():
         "session_id": os.path.basename(db_path),
         "recomputed": recompute,
         "enabled": bool(cfg.get("enabled", True)),
+        # The page renumbers the songs itself when a correction moves the opening, so it
+        # needs the same threshold the detector used to decide what counts as a song.
+        "songs_min_minutes": int(cfg.get("songs_min_minutes", 3)),
         "first_sunday": _service_phase_first_sunday(db_path),
         "current": result.get("current"),
         "blocks": result.get("blocks", []),
