@@ -13920,8 +13920,10 @@ def _backdate_staged_rows(seg_id=None):
     """Publish staged row(s) immediately by backdating their timestamp past
     the delay window. seg_id None = all rows still inside the window."""
     delay_seconds = config.get("corrections", {}).get("output_delay", {}).get("delay_seconds", 7)
-    # Match the emit-time age check, which compares against datetime.now()
-    backdated = (datetime.now() - timedelta(seconds=delay_seconds + 1)).strftime("%Y-%m-%d %H:%M:%S")
+    # Match the emit-time age check, which is taken in configured_timezone — the same
+    # zone the rows were stamped in.
+    backdated = (datetime.now(configured_timezone)
+                 - timedelta(seconds=delay_seconds + 1)).strftime("%Y-%m-%d %H:%M:%S")
     try:
         with _db_lock:
             conn = _open_db_writer()
@@ -13931,7 +13933,8 @@ def _backdate_staged_rows(seg_id=None):
                 if seg_id is not None:
                     conn.execute("UPDATE transcriptions SET timestamp = ? WHERE id = ?", (backdated, int(seg_id)))
                 else:
-                    cutoff = (datetime.now() - timedelta(seconds=delay_seconds)).strftime("%Y-%m-%d %H:%M:%S")
+                    cutoff = (datetime.now(configured_timezone)
+                              - timedelta(seconds=delay_seconds)).strftime("%Y-%m-%d %H:%M:%S")
                     conn.execute("UPDATE transcriptions SET timestamp = ? WHERE timestamp > ?", (backdated, cutoff))
                 conn.commit()
             finally:
@@ -14351,7 +14354,11 @@ def emit_new_entries():
         staged_segments = []
 
         if delay_enabled and segments:
-            now_ts = datetime.now()
+            # Rows are stamped with datetime.now(configured_timezone), so the age check
+            # has to be taken in that same zone. Comparing a configured-zone string
+            # against system-local now() puts every row either instantly live or
+            # permanently staged, by exactly the offset between the two.
+            now_ts = datetime.now(configured_timezone).replace(tzinfo=None)
             live_segments = []
             for seg in segments:
                 # Parse segment timestamp to check age
