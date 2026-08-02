@@ -630,7 +630,9 @@ class TestArchiveHeadroom:
     at the maximum context_window of 5.
     """
 
-    WORST_STACKED = "Да будет мир Твой, Господи, с нами всегда, " * 36  # ~1800 ch
+    # Built to the measured size rather than by repeat count, so the figure that matters
+    # is stated once and a change to the filler sentence cannot quietly shrink it.
+    WORST_STACKED = ("Да будет мир Твой, Господи, с нами всегда, " * 45)[:1800]
 
     def test_the_worst_real_input_fits_the_shipped_defaults(self):
         assert len(self.WORST_STACKED) > 1750
