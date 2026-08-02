@@ -69,3 +69,31 @@ def test_linux_git_is_usable_without_clt_check(monkeypatch):
     calls = _patch(monkeypatch, platform="linux", which="/usr/bin/git")
     assert watchdog._git_usable() is True
     assert calls == []
+
+
+class TestHaveGitCheckout:
+    """The updater must gate on _git_usable(), not shutil.which: MinGit lives
+    on the augmented PATH only, and the macOS shim answers shutil.which but
+    cannot run a fetch/reset."""
+
+    def _source(self, monkeypatch, tmp_path, *, dot_git):
+        monkeypatch.setattr(watchdog, "SOURCE_DIR", str(tmp_path))
+        if dot_git:
+            (tmp_path / ".git").mkdir()
+
+    def test_usable_git_and_checkout(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(watchdog, "_git_usable", lambda: True)
+        self._source(monkeypatch, tmp_path, dot_git=True)
+        assert watchdog._have_git_checkout() is True
+
+    def test_checkout_without_usable_git(self, monkeypatch, tmp_path):
+        # macOS shim over a checkout git once made: must fall back to archives
+        # rather than run a reset that the shim fails.
+        monkeypatch.setattr(watchdog, "_git_usable", lambda: False)
+        self._source(monkeypatch, tmp_path, dot_git=True)
+        assert watchdog._have_git_checkout() is False
+
+    def test_usable_git_without_checkout(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(watchdog, "_git_usable", lambda: True)
+        self._source(monkeypatch, tmp_path, dot_git=False)
+        assert watchdog._have_git_checkout() is False

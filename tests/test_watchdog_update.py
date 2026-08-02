@@ -315,3 +315,110 @@ def test_provisioning_failure_is_captured_to_sentry(monkeypatch):
 def test_sentry_capture_without_sdk_does_not_raise(monkeypatch):
     monkeypatch.setitem(sys.modules, "sentry_sdk", None)  # import raises ImportError
     watchdog._sentry_capture(Exception("x"))  # must be a silent no-op
+
+
+# --- git-less installs: the default 'main' channel must still update ---------
+# A zipball-provisioned SOURCE (no .git) used to log "Main channel needs a git
+# checkout" forever, so a headless box that cannot have git silently froze on
+# the version it was installed with.
+
+
+def test_gitless_main_channel_falls_back_to_releases(updater, monkeypatch):
+    upd, source_dir = updater  # fixture SOURCE_DIR has no .git
+    upd._pending_update = None
+    (source_dir / "VERSION").write_text("1.0.0\n")
+    monkeypatch.setattr(watchdog, "load_config",
+                        lambda: {"watchdog": {"update_channel": "main"}})
+    monkeypatch.setattr(upd, "_check_for_branch_update",
+                        lambda: pytest.fail("branch tracking needs a git checkout"))
+    seen = {}
+
+    def fake_release(channel):
+        seen["channel"] = channel
+        return "v1.2.3", "https://example.invalid/z.zip", {}
+
+    monkeypatch.setattr(upd, "get_latest_release", fake_release)
+
+    upd.check_for_update()
+
+    assert seen["channel"] == "stable"
+    assert upd._pending_update == ("1.2.3", "https://example.invalid/z.zip", {})
+
+
+def test_gitless_main_channel_applies_the_release(updater, tmp_path, monkeypatch):
+    upd, source_dir = updater
+    upd._pending_update = None
+    (source_dir / "VERSION").write_text("1.0.0\n")
+    url = make_zipball(tmp_path / "u.zip", {"old.txt": "updated", "VERSION": "1.2.3\n"})
+    monkeypatch.setattr(watchdog, "load_config",
+                        lambda: {"watchdog": {"update_channel": "main"}})
+    monkeypatch.setattr(upd, "get_latest_release", lambda channel: ("v1.2.3", url, {}))
+
+    upd.check_and_update()
+
+    assert (source_dir / "old.txt").read_text(encoding="utf-8") == "updated"
+    assert watchdog.read_version() == "1.2.3"
+    assert upd.pm.calls == ["stop", "start"]
+
+
+@needs_git
+def test_main_channel_keeps_branch_tracking_with_a_checkout(git_updater, monkeypatch):
+    upd, seed, _clone = git_updater
+    monkeypatch.setattr(watchdog, "load_config",
+                        lambda: {"watchdog": {"update_channel": "main"}})
+    monkeypatch.setattr(upd, "get_latest_release",
+                        lambda channel: pytest.fail("must not call the Releases API"))
+    _advance_origin(seed)
+
+    upd.check_for_update()
+
+    assert upd._pending_update == (watchdog.AutoUpdater._BRANCH_TARGET, None, {})
+
+
+# --- archive updates must refresh config templates --------------------------
+# config/ is never swapped wholesale (live settings live in DATA_DIR, and a
+# source install may keep files here), but its tracked *.default.json templates
+# have to move forward or new settings never get their defaults.
+
+
+def test_archive_update_refreshes_config_templates(updater, tmp_path):
+    upd, source_dir = updater
+    cfg = source_dir / "config"
+    cfg.mkdir()
+    (cfg / "config.default.json").write_text('{"old": true}')
+    (cfg / "config.json").write_text('{"user": "settings"}')
+    url = make_zipball(tmp_path / "u.zip", {
+        "config/config.default.json": '{"new": true}',
+        "config/service_phases.default.json": '{"added": true}',
+        "a.txt": "a",
+    })
+
+    upd._apply_update("9.9.9", url)
+
+    assert (cfg / "config.default.json").read_text(encoding="utf-8") == '{"new": true}'
+    assert (cfg / "service_phases.default.json").read_text(encoding="utf-8") == '{"added": true}'
+    assert (cfg / "config.json").read_text(encoding="utf-8") == '{"user": "settings"}', \
+        "anything not a template must survive the swap"
+    assert watchdog.read_version() == "9.9.9"
+
+
+def test_config_template_rollback_on_failed_update(updater, tmp_path, monkeypatch):
+    upd, source_dir = updater
+    cfg = source_dir / "config"
+    cfg.mkdir()
+    (cfg / "config.default.json").write_text('{"old": true}')
+    url = make_zipball(tmp_path / "u.zip", {
+        "config/config.default.json": '{"new": true}',
+        "old.txt": "updated",
+    })
+
+    def boom(self, log=None):
+        raise watchdog.ProvisionError("uv exploded")
+
+    monkeypatch.setattr(watchdog.Provisioner, "install_deps_only", boom)
+
+    upd._apply_update("9.9.9", url)
+
+    assert (cfg / "config.default.json").read_text(encoding="utf-8") == '{"old": true}'
+    assert (source_dir / "old.txt").read_text(encoding="utf-8") == "old content"
+    assert watchdog.read_version() != "9.9.9"

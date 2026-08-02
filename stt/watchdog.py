@@ -154,11 +154,14 @@ STABLE_RUN_THRESHOLD = 30        # seconds of uptime before resetting crash coun
 UPDATE_HOUR = 1                  # hour (24h) at which daily update check fires
 STARTUP_UPDATE_DELAY_S = 120     # grace after boot before a startup catch-up apply
 
-# Files/dirs inside SOURCE never discarded by the zipball-fallback update path.
-# "config" holds gitignored live user settings next to tracked *.default.json
-# templates — replacing it with the zipball's copy (defaults only) would drop
-# the user's settings. Zip-updated installs keep stale templates as the price;
-# git-based updates refresh templates while leaving the gitignored files alone.
+# Files/dirs inside SOURCE never replaced wholesale by the zipball-fallback
+# update path. "config" is never swapped as a directory — live user settings
+# live in DATA_DIR/config, but anything a source install left here must survive,
+# so the archive contributes only its tracked *.default.json templates, file by
+# file (see _iter_update_items). Without that, an archive-updated install would
+# keep the templates it was first installed with forever: new settings would
+# never get their defaults and corrupt-config recovery would restore a stale
+# template.
 _UPDATE_PRESERVE = frozenset({".venv", "config"})
 
 
@@ -732,6 +735,34 @@ def _git_usable():
         except OSError:
             return False
     return True
+
+
+def _iter_update_items(src_root):
+    """Yield SOURCE-relative paths to swap in from an update archive.
+
+    Top-level entries as a whole, minus _UPDATE_PRESERVE, plus the archive's
+    config/*.default.json templates individually so archive-updated installs
+    still receive new defaults."""
+    for item in sorted(os.listdir(src_root)):
+        if item == "config":
+            cfg_src = os.path.join(src_root, item)
+            if not os.path.isdir(cfg_src):
+                continue
+            for name in sorted(os.listdir(cfg_src)):
+                if name.endswith(".default.json"):
+                    yield os.path.join(item, name)
+        elif item not in _UPDATE_PRESERVE:
+            yield item
+
+
+def _have_git_checkout():
+    """True when the managed source can actually be updated with git.
+
+    Both halves matter: _git_usable() over _which() sees a MinGit installed
+    after this process started and rejects the macOS xcode-select shim, and a
+    zipball-provisioned SOURCE has no .git at all. Callers fall back to the
+    source-archive update path when this is False."""
+    return _git_usable() and os.path.isdir(os.path.join(SOURCE_DIR, ".git"))
 
 
 def _requirements_need_git(text):
@@ -1643,9 +1674,20 @@ class AutoUpdater:
         logging.info(f"[AU] Checking for updates (channel: {channel})...")
 
         if channel == "main":
-            self._check_for_branch_update()
-            return
+            if _have_git_checkout():
+                self._check_for_branch_update()
+                return
+            # Archive-provisioned install (no usable git): branch tracking has
+            # no archive equivalent, so follow tagged releases rather than never
+            # updating at all — the default channel is 'main', and a headless
+            # box has nobody to notice it has gone stale.
+            logging.info("[AU] no git checkout; main channel following stable releases")
+            channel = "stable"
 
+        self._check_for_release_update(channel)
+
+    def _check_for_release_update(self, channel):
+        """Release-pinned check: latest GitHub release vs the local version."""
         try:
             tag, zipball_url, assets = self.get_latest_release(channel)
         except Exception as e:
@@ -1679,7 +1721,9 @@ class AutoUpdater:
 
         Pure git — no GitHub REST call, so no API quota. Requires the managed
         source to be a git checkout (the normal provisioned state)."""
-        if not (shutil.which("git") and os.path.isdir(os.path.join(SOURCE_DIR, ".git"))):
+        if not _have_git_checkout():
+            # Safety net: check_for_update routes git-less installs to the
+            # release path before reaching here.
             result = "Main channel needs a git checkout; switch update_channel to 'stable' or reprovision"
             logging.warning(f"[AU] {result}")
             self.state.set(last_update_result=result)
@@ -1732,8 +1776,7 @@ class AutoUpdater:
     def _apply_git_update(self, remote, zipball_url):
         """Update the managed checkout: git fetch + reset to the release, reinstall
         dependencies (deps may have changed), then restart. Data dir is untouched."""
-        have_git = bool(shutil.which("git")) and os.path.isdir(os.path.join(SOURCE_DIR, ".git"))
-        if not have_git:
+        if not _have_git_checkout():
             if remote == self._BRANCH_TARGET:
                 # Branch tracking has no archive equivalent (no zipball URL).
                 result = "Main-channel update needs a git checkout; skipped"
@@ -1868,15 +1911,16 @@ class AutoUpdater:
 
         try:
             try:
-                for item in os.listdir(src_root):
-                    if item in _UPDATE_PRESERVE:
-                        continue
+                for item in _iter_update_items(src_root):
                     src = os.path.join(src_root, item)
                     dst = os.path.join(SOURCE_DIR, item)
+                    bak = os.path.join(backup_dir, item)
                     had_backup = os.path.lexists(dst)
                     if had_backup:
-                        shutil.move(dst, os.path.join(backup_dir, item))
+                        os.makedirs(os.path.dirname(bak), exist_ok=True)
+                        shutil.move(dst, bak)
                     moved.append((item, had_backup))
+                    os.makedirs(os.path.dirname(dst), exist_ok=True)
                     shutil.move(src, dst)
 
                 logging.info("[AU] Reinstalling dependencies...")
