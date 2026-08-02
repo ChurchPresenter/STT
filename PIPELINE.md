@@ -13,7 +13,7 @@ from `config/config.default.json`.
 - [Three ways a row gets written](#three-ways-a-row-gets-written)
 - [Why a row was hidden](#why-a-row-was-hidden)
 - [Calibration — the other thing that stops transcription](#calibration--the-other-thing-that-stops-transcription)
-- [Who holds the VRAM](#who-holds-the-vram)
+- [Where the models actually run](#where-the-models-actually-run)
 - [Delivery](#delivery)
 - [Who can reach what](#who-can-reach-what)
 - [Translation](#translation)
@@ -174,38 +174,58 @@ Raw audio passthrough is unaffected, so an operator monitoring the feed still he
 
 ---
 
-## Who holds the VRAM
+## Where the models actually run
 
-Four models can want the GPU at once, and the order they load in decides whether the one you
-chose actually runs. This is the least visible part of the system and the easiest to get wrong.
+`use_gpu` is a **request, not a guarantee**. Each model walks the same ladder and silently takes
+the first rung available, so the same config runs on three different devices depending on the
+machine — and on a CPU-only box the whole contention story below simply does not apply.
+
+```mermaid
+flowchart TD
+    REQ{"use_gpu<br/><i>default true — a request</i>"}
+    CU{"CUDA available?"}
+    MP{"MPS available?<br/><i>Apple Silicon</i>"}
+    GPU[/"<b>CUDA</b> — discrete VRAM<br/>where contention actually bites"/]
+    MPS[/"<b>MPS</b> — unified memory<br/>shared with the system"/]
+    CPUD[/"<b>CPU</b><br/>Whisper falls back to int8"/]
+
+    REQ -->|true| CU
+    REQ -->|false| CPUD
+    CU -->|yes| GPU
+    CU -->|no| MP
+    MP -->|yes| MPS
+    MP -->|no| CPUD
+```
+
+PANNs is pinned to CPU by its own `device` setting regardless, and TTS defaults to cloud
+Edge-TTS, so neither ever competes for the accelerator.
+
+Precision follows the same pattern — asked for, not assumed. Whisper picks its own compute type
+(`float16` on modern CUDA, `int8` on CPU), while the translation model ships at full precision:
+`use_fp16` is `false` and `use_ctranslate2` is `false`, so both the half-precision and the CT2
+backend are opt-in.
+
+### What contends, when there is a CUDA card
 
 ```mermaid
 flowchart TD
     WSPM["<b>Whisper</b><br/>loaded on first chunk, no warm-up"]
     NMT["<b>NMT</b> — NLLB / MADLAD<br/>warmed at start when translation is on"]
     LLM["<b>LLM</b> — GGUF<br/><i>only under translation_method: llm</i>"]
-    GPU[/"<b>GPU memory</b> — where contention happens"/]
-    PANNSM["PANNs CNN14<br/><i>speech_type_detection.device: cpu</i>"]
-    TTSM["TTS — Edge (cloud) by default<br/><i>Piper is local, and only if enabled</i>"]
-    CPU[/"CPU / not resident"/]
+    VRAM[/"<b>VRAM</b>"/]
 
-    WSPM --> GPU
-    NMT --> GPU
-    LLM --> GPU
-    PANNSM --> CPU
-    TTSM --> CPU
+    WSPM --> VRAM
+    NMT --> VRAM
+    LLM --> VRAM
 
     classDef optin stroke-dasharray:5 4;
-    class LLM,TTSM optin;
+    class LLM optin;
 ```
 
-**As shipped, only Whisper and the NMT model are on the GPU.** PANNs runs on CPU and TTS is off
-and cloud-based when enabled, so neither competes — which is why the interesting contention is
-only ever between Whisper, NMT and the LLM.
-
 **With `translation_method: llm` the NMT fallback is deliberately not preloaded.** Measured on a
-10 GB card: Whisper took 4202 MiB and NMT 3558 MiB, leaving 1976 MiB — the LLM never fit, so
-every caption fell back to NMT forever. The LLM's warm-up call carries its own long timeout for
+10 GB CUDA card: Whisper took 4202 MiB and NMT 3558 MiB, leaving 1976 MiB — the LLM never fit,
+so every caption fell back to NMT forever. Those figures are CUDA-specific; under MPS the models
+share system memory and the arithmetic is different, and on CPU nothing contends at all. The LLM's warm-up call carries its own long timeout for
 the same reason: if it times out, NMT loads instead and takes the memory the LLM needed.
 
 Unloading is triggered by a session stop, an explicit unload command, disabling translation,
@@ -608,6 +628,7 @@ portable file rather than a database plus sidecars.
 | Teardown / exports | `speech_to_text.py:17955-18030` · `stt/file_mover.py:445` |
 | Calibration | `speech_to_text.py:5064` · `:16662` · `stt/calibration.py:35` |
 | Model load / unload | `speech_to_text.py:1679` · `:2057` · `:15663` · `:10166` |
+| Device ladder — CUDA → MPS → CPU | `speech_to_text.py:2087-2092` · `:997-1010` |
 | Auth gate | `speech_to_text.py:4248` · socket gate `:13476` |
 | Display profiles | `speech_to_text.py:4174` · `:5519` |
 | Review queue · mark · deny · stage | `:10441` · `:13994` · `:13952` · `:13890-13948` |
