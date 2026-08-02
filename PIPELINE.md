@@ -634,8 +634,8 @@ portable file rather than a database plus sidecars.
 <details>
 <summary>Symbol reference — expand when you are in the code</summary>
 
-Symbols rather than line numbers — line numbers in a document go stale the first time anyone
-edits the file, and these did. Search for the name.
+Symbols rather than line numbers: line numbers in a document go stale the first time
+anyone edits the file, and these did. Search for the name.
 
 | Stage | Where |
 |-------|-------|
@@ -669,39 +669,9 @@ edits the file, and these did. Search for the name.
 | Teardown / exports | `stt/formatting.py` — `convert_db_to_srt` · `stt/file_mover.py` |
 | TTS | `synthesize_tts` · `emit_tts_audio` |
 | Timezone resolution | `stt/config_utils.py` — `resolve_timezone` · `get_configured_timezone` |
-
--------|-----------|
-| Process split — why spawn, not fork | `speech_to_text.py:2986-3000` |
-| Shared state proxy (26 declared keys) | `speech_to_text.py:3023` |
-| ffmpeg capture loop | `stt/audio_capture.py:151` · `:284` |
-| Rolling buffer / clip rule | `speech_to_text.py:2706-2723` |
-| VAD + music bypass | `speech_to_text.py:16266` · `:16901` |
-| PANNs detector thread | `speech_to_text.py:3354-3432` · `stt/segments.py:8` |
-| Whisper decode params | `speech_to_text.py:316` · `:17013` |
-| Loudness normalisation (off by default) | `speech_to_text.py:16938-16955` |
-| Context prompt from saved rows | `speech_to_text.py:16983-17007` |
-| Overlap de-duplication | `stt/text_utils.py:333` |
-| Finalisation rule | `speech_to_text.py:2758-2918` |
-| Live-line stabiliser | `stt/hypothesis_buffer.py:34` |
-| Sentence split + pending buffer | `stt/text_utils.py:152` · `speech_to_text.py:17180` |
-| Filters | `speech_to_text.py:17214-17244` |
-| Row insert + partials | `speech_to_text.py:17208` · `:17670` |
-| Emit loops | `speech_to_text.py:14243` · `:14826` |
-| Translation dispatcher | `speech_to_text.py:14735` |
-| LLM validation | `stt/llm_translate.py:335` |
-| Service phase detector | `stt/service_phase.py` · `speech_to_text.py:14184` |
-| Teardown / exports | `speech_to_text.py:17955-18030` · `stt/file_mover.py:445` |
-| Calibration | `speech_to_text.py:5064` · `:16662` · `stt/calibration.py:35` |
-| Model load / unload | `speech_to_text.py:1679` · `:2057` · `:15663` · `:10166` |
-| Device ladder — CUDA → MPS → CPU | `speech_to_text.py:2087-2092` · `:997-1010` |
-| Auth gate | `speech_to_text.py:4248` · socket gate `:13476` |
-| Display profiles | `speech_to_text.py:4174` · `:5519` |
-| Review queue · mark · deny · stage | `:10441` · `:13994` · `:13952` · `:13890-13948` |
-| Remote pairing + heartbeat | `speech_to_text.py:7154-7434` · `:6483` |
-| Session provenance | `stt/session_meta.py` · `speech_to_text.py:1082` · `:3739` |
-| Metrics + access log | `stt/metrics.py` · `stt/request_log.py` · `:3915` |
-| Watchdog + self-update | `stt/watchdog.py:1505` · `:1884` · `stt/self_update.py` |
-| Batch file path | `speech_to_text.py:8390` |
+| Overlap de-duplication | `stt/text_utils.py` — `remove_overlapping_prefix` |
+| Live-line stabiliser | `stt/hypothesis_buffer.py` — `LocalAgreementBuffer.stabilize` |
+| LLM validation | `stt/llm_translate.py` — `validate_translation` |
 
 </details>
 
