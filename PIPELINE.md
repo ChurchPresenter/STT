@@ -3,6 +3,11 @@
 How one second of audio becomes a caption on screen. Every number here is the shipped default
 from `config/config.default.json`.
 
+> **Dashed nodes are off unless you turn them on.** Each names the setting that enables it, so a
+> box can be checked against your own config without leaving the diagram. On a stock install the
+> solid path is the whole system: microphone → Whisper → SQLite → browser, translated locally by
+> the NMT model. No second machine, no LLM, no speech output, no file move.
+
 - [Four processes, not one](#four-processes-not-one)
 - [Live audio to a saved row](#live-audio-to-a-saved-row)
 - [Three ways a row gets written](#three-ways-a-row-gets-written)
@@ -30,7 +35,7 @@ through a `multiprocessing.Manager` dict and the session database.
 
 ```mermaid
 flowchart TD
-    WD["<b>Watchdog</b> — supervisor process<br/>crash recovery · auto-update · headless"]
+    WD["<b>Watchdog</b> — supervisor process<br/>crash recovery · auto-update · headless<br/><i>optional: start_server.sh runs P1 directly</i>"]
     WEB["<b>P1</b> — Flask + Socket.IO<br/>web pages · translation · TTS<br/><i>never touches audio</i>"]
     WK["<b>P2</b> — Transcription worker<br/>capture · VAD · PANNs · Whisper<br/><i>spawned, not forked</i>"]
     MG[/"<b>P3</b> — Manager dict<br/>29 shared keys: levels, live text, status"/]
@@ -42,7 +47,14 @@ flowchart TD
     DB -->|read back every 0.5 s| WEB
     WK --> MG
     MG --> WEB
+
+    classDef optin stroke-dasharray:5 4;
+    class WD optin;
 ```
+
+**The watchdog is a deployment choice, not a requirement.** `start_server.sh` launches the
+server directly; the watchdog exists for unattended installs that need crash recovery and
+auto-update. Everything below happens either way.
 
 **Why spawn, not fork.** A forked child inherits the parent's CUDA context and dies on
 `Cannot re-initialize CUDA in forked subprocess`, so the start method is forced to `spawn` and
@@ -94,6 +106,11 @@ flowchart TD
 
 **Music always wins.** A confident music reading forces the gate to accept, so singing is always
 transcribed; `transcribe_detected_music` decides only whether the row is *shown*.
+
+**Both detectors can be switched off**, and PANNs degrades quietly. With `vad.enabled` false the
+energy gate alone decides. If the PANNs checkpoint is missing the detector falls back to an
+energy heuristic that reports only `Speaking` or `Quiet` — it **never claims `Music`** without
+the real model, which is the answer to "why is nothing being tagged as music".
 
 **Loudness normalisation** (off by default) boosts quiet audio toward `-20 dBFS`, capped so it
 can never clip, and only on the copy handed to Whisper — the buffer, the energy gate and
@@ -164,19 +181,27 @@ chose actually runs. This is the least visible part of the system and the easies
 
 ```mermaid
 flowchart TD
-    WSPM["Whisper<br/>loaded on first chunk, no warm-up"]
-    NMT["NMT — NLLB / MADLAD<br/>warmed at start if enabled"]
-    LLM["LLM — GGUF<br/>warm-up gets its own long timeout"]
-    PANNSM["PANNs CNN14<br/>cpu by default"]
-    TTSM["TTS — Piper<br/>only if local backend"]
-    GPU[/"GPU memory"/]
+    WSPM["<b>Whisper</b><br/>loaded on first chunk, no warm-up"]
+    NMT["<b>NMT</b> — NLLB / MADLAD<br/>warmed at start when translation is on"]
+    LLM["<b>LLM</b> — GGUF<br/><i>only under translation_method: llm</i>"]
+    GPU[/"<b>GPU memory</b> — where contention happens"/]
+    PANNSM["PANNs CNN14<br/><i>speech_type_detection.device: cpu</i>"]
+    TTSM["TTS — Edge (cloud) by default<br/><i>Piper is local, and only if enabled</i>"]
+    CPU[/"CPU / not resident"/]
 
     WSPM --> GPU
     NMT --> GPU
     LLM --> GPU
-    PANNSM --> GPU
-    TTSM --> GPU
+    PANNSM --> CPU
+    TTSM --> CPU
+
+    classDef optin stroke-dasharray:5 4;
+    class LLM,TTSM optin;
 ```
+
+**As shipped, only Whisper and the NMT model are on the GPU.** PANNs runs on CPU and TTS is off
+and cloud-based when enabled, so neither competes — which is why the interesting contention is
+only ever between Whisper, NMT and the LLM.
 
 **With `translation_method: llm` the NMT fallback is deliberately not preloaded.** Measured on a
 10 GB card: Whisper took 4202 MiB and NMT 3558 MiB, leaving 1976 MiB — the LLM never fit, so
@@ -205,11 +230,11 @@ flowchart TD
         L1["Transcript loop"]
         L2["Translation loop<br/>max 3 fresh / cycle<br/>newest 2 + oldest 1"]
         TC[/"Translation cache<br/>keyed by segment id"/]
-        L4["TTS loop<br/>buffers to a sentence end,<br/>or flushes after 4.0 s"]
+        L4["TTS loop<br/>buffers to a sentence end,<br/>or flushes after 4.0 s<br/><i>tts.enabled — default off</i>"]
         SYN["Edge-TTS or Piper<br/>→ mp3 / wav, base64"]
         L3["Audio loop<br/>PCM passthrough"]
         SP["Service phase<br/>own tick, every 20 s"]
-        DLY{"Output delay?<br/>off, or 2–30 s<br/>default 7 s"}
+        DLY{"Output delay?<br/><i>output_delay.enabled — default off</i><br/>when on: 2–30 s, default 7 s"}
         SIO["Socket.IO broadcast"]
     end
 
@@ -240,7 +265,13 @@ flowchart TD
     SIO --> C3
     SIO --> C4
     R1 -->|rows flagged needs_review| C5
+
+    classDef optin stroke-dasharray:5 4;
+    class L4,SYN,C4,C3 optin;
 ```
+
+**Speech output and the output delay are both off by default.** With stock settings this
+diagram is just: rows → transcript loop → broadcast → caption screen.
 
 **TTS is fed by the translation cache, not by rows** — it waits for translated text, buffers it
 until the joined string ends on sentence punctuation, and only then synthesises, so the voice
@@ -270,7 +301,7 @@ means *allow all*; localhost is always allowed.
 ```mermaid
 flowchart TD
     REQ(["Incoming request"])
-    K{"?key= access token<br/><i>constant-time compare</i>"}
+    K{"?key= access token<br/><i>web_server.access_token — blank, so off</i>"}
     S{"Session cookie<br/><i>bound to the issuing IP</i>"}
     W{"IP whitelist<br/><i>exact or CIDR</i>"}
     OK(["Allowed"])
@@ -284,7 +315,13 @@ flowchart TD
     S -->|no| W
     W -->|listed| OK
     W -->|not listed| NO
+
+    classDef optin stroke-dasharray:5 4;
+    class K,MINT optin;
 ```
+
+The access token ships blank, so by default the first gate is skipped and access is decided by
+a password session or the IP whitelist.
 
 Display surfaces are intentionally open — `/`, `/profile/<name>`, and the live status endpoint.
 Everything that changes state is gated, including every mutating Socket.IO handler, which fails
@@ -302,21 +339,38 @@ Four paths, one dispatcher. Declining is an ordinary outcome, not an error — a
 front of a congregation is worse than a slower one.
 
 ```mermaid
-flowchart LR
+flowchart TD
     IN(["A finalised row"])
-    RM{"<b>Remote</b><br/>paired machine over HTTP<br/>timeout 15 s · cap 8000 chars"}
-    LM{"<b>LLM</b><br/>local GGUF or OpenAI-compatible<br/>temp 0.0 · n_ctx 2048"}
-    NM["<b>NMT</b><br/>NLLB or MADLAD<br/>truncates at 1024 tokens · beams 2"]
+    G1{"Offload configured?<br/><i>remote.enabled AND remote.endpoint</i><br/><b>default: no</b>"}
+    RM["<b>Remote</b> — paired machine over HTTP<br/>timeout 15 s · cap 8000 chars"]
+    G2{"translation_method<br/><b>default: nllb</b>"}
+    LM["<b>LLM</b> — local GGUF or OpenAI-compatible<br/>temp 0.0 · n_ctx 2048"]
+    NM["<b>NMT</b> — NLLB or MADLAD<br/>truncates at 1024 tokens · beams 2"]
     OUT(["Caption"])
+    SRC(["Source text, untranslated"])
 
-    IN --> RM
+    IN --> G1
+    G1 -->|no — the default| G2
+    G1 -->|yes| RM
     RM -->|success| OUT
-    RM -->|unreachable<br/>fallback = skip| SRC(["Source text, untranslated"])
-    RM -->|unreachable<br/>fallback = local| LM
+    RM -->|unreachable · fallback = skip| SRC
+    RM -->|unreachable · fallback = local| G2
+    G2 -->|llm| LM
+    G2 -->|nllb / madlad — the default| NM
     LM -->|accepted| OUT
     LM -->|declines validation| NM
     NM --> OUT
+
+    classDef optin stroke-dasharray:5 4;
+    class RM,LM optin;
 ```
+
+**On shipped defaults a caption never leaves the machine and never meets an LLM.** Offload is
+opt-in and requires pairing; the LLM is opt-in and requires changing `translation_method`. Both
+gates fail closed, so the everyday path is `row → NMT → caption`.
+
+A machine that is *serving* a paired machine's request forces local translation, so a box acting
+as both client and server cannot chain an offload onward.
 
 **The fourth path skips all three.** In `whisper_translate` modes the translation is produced in
 the worker by decoding the audio a second time, so it never reaches this dispatcher — the web
@@ -349,8 +403,13 @@ up mixed; the per-row `translation_language` column records which row went where
 
 ## Two machines
 
-Offload is not a stateless HTTP call. Machine A transcribes; Machine B owns the translation
-model — and A pushes settings into B, so a paired B is not running its own configuration.
+**Offload is off by default and this whole section is optional** — it exists for when the
+transcribing box has no capacity to translate as well. Nothing here happens unless
+`remote.enabled` is set and the two machines have been paired.
+
+When it is on, offload is not a stateless HTTP call. Machine A transcribes; Machine B owns the
+translation model — and A pushes settings into B, so a paired B is not running its own
+configuration.
 
 ```mermaid
 flowchart TD
@@ -512,7 +571,10 @@ flowchart LR
     A --> W["Retire the write-ahead log"]
     B --> W
     C --> W
-    W --> M["SMB / NAS move<br/>after a 10 s pause for handles"]
+    W --> M["SMB / NAS move<br/>after a 10 s pause for handles<br/><i>move_on_transcription_stop — default off</i>"]
+
+    classDef optin stroke-dasharray:5 4;
+    class M optin;
 ```
 
 The write-ahead log is retired *before* anything is moved, so what leaves the machine is a single
