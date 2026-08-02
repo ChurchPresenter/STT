@@ -578,6 +578,29 @@
       "amen": ["amen"],
       "communion": ["communion", "lord'?s supper", "breaking of bread", "the bread", "the cup", "body of christ", "blood of christ"],
       "opening": ["welcome", "dear brothers", "peace be (?:with|unto) you", "greet\\w*"]
+    },
+    "cue_fragments": {
+      "_comment": "Set phrases whose separate LINES matter, grouped as {group: {fragment: [regex, ...]}}. A rule can then ask how many DIFFERENT fragments of a group appeared, which is what tells a formula being read aloud apart from a topic being discussed: a sermon about communion says 'the cup' many times but never reads the whole institution. Fragments are counted exactly like cue_phrases and stored the same way, under the name 'group:fragment'.",
+      "_communion_verse_comment": "The words of institution (1 Cor 11:23-26), which open communion in most traditions. Write them as the RECOGNISER hears them, not as the printed text: word order moves, and the model normalises toward modern speech — a recogniser will not reproduce the Synodal wording, and the exact form it does produce differs by model and by language. Short distinctive fragments survive that; long verbatim quotes do not. Replace these for your language and tradition, or correct a few services and let the learner propose them.",
+      "communion_verse": {
+        "night_betrayed": ["в ту ночь", "котор[уюый]{1,2} предан", "предан был"],
+        "took_bread": ["взял хлеб", "преломил", "благословив"],
+        "this_is_my_body": ["сие есть тело", "это мо[её] тело", "тело мо[её]"],
+        "cup_after_supper": ["после вечери", "взял чашу", "также и чашу"],
+        "new_covenant": ["новый завет в мо[её]й крови", "чаша есть новый завет"],
+        "until_he_comes": ["доколе он придет", "возвещаете смерть"]
+      }
+    },
+    "cue_fragments_translated": {
+      "_comment": "The same fragment groups against the TRANSLATION. Same shape, same counting.",
+      "communion_verse": {
+        "night_betrayed": ["the night (?:in which |when )?he was betrayed", "was betrayed"],
+        "took_bread": ["took bread", "broke it", "had given thanks"],
+        "this_is_my_body": ["this is my body"],
+        "cup_after_supper": ["after supper", "took the cup"],
+        "new_covenant": ["new (?:covenant|testament) in my blood"],
+        "until_he_comes": ["until he comes?", "proclaim the lord'?s death"]
+      }
     }
   },
   "timezone": {

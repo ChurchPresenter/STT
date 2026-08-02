@@ -742,8 +742,8 @@ class TestWriteChurn:
     def test_an_unchanged_analysis_writes_nothing(self, tmp_path):
         conn = self.db(tmp_path)
         a = analyze(rows("M" * 6 + "S" * 12), self.CFG)
-        assert save_analysis(conn, a) == {"bins": 18, "blocks": 2}
-        assert save_analysis(conn, a) == {"bins": 0, "blocks": 0}
+        assert save_analysis(conn, a) == {"bins": 18, "blocks": 2, "spans": 0}
+        assert save_analysis(conn, a) == {"bins": 0, "blocks": 0, "spans": 0}
 
     def test_only_the_changed_bin_is_written(self, tmp_path):
         conn = self.db(tmp_path)

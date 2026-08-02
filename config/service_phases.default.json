@@ -1,0 +1,69 @@
+{
+  "_comment": "How the detector NAMES the blocks it finds. The structure it finds — songs, speaking, quiet — comes from audio and is not configured here; this file only decides what to call each part. Copy any rule into config/service_phases.json to change it for this installation; that file is yours and is never overwritten by an update. Rules are tried in order and the first one that matches wins, so put the specific ones above the general ones.",
+  "_baseline_comment": "These defaults are deliberately plain. They describe a service with songs, one or more sermons, and an optional communion — not any particular congregation's running order. The numbers below are starting points, not measurements of your church: correct a few services on /service-phase and let the learner propose values from what you actually do.",
+
+  "_match_comment": "A match clause may test: kind ('M' music, 'S' speaking, '_' quiet) or kinds (a list), min_minutes / max_minutes (both inclusive), cues ({group: minimum total hits}), cue_fragments ({group: minimum number of DIFFERENT fragments seen}), before_first / after_first (a phase name, for ordering), and is_last_named (the final block that can carry a name).",
+  "_span_comment": "A rule with a span swallows the blocks after the one it matched: extend_while_kinds lists what may be absorbed, max_inner_block_minutes caps how long an absorbed block may be, and ends_on_kind_minutes ends the span when a block of that kind reaches that length. Use it for a phase that is not one continuous stretch of audio.",
+
+  "phases": [
+    {
+      "_comment": "A read liturgical formula is much stronger evidence than a keyword count, and unlike a keyword it says WHERE the phase begins. Requiring two different fragments is what separates the formula being read from a word being used: a sermon may say 'the cup' twenty times and still never read the institution. not_when keeps a sermon that quotes the passage from becoming a communion — the reading opens a quiet distribution, a sermon keeps talking.",
+      "name": "Communion",
+      "confidence": 0.7,
+      "confidence_first_sunday": 0.85,
+      "match": { "cue_fragments": { "communion_verse": 2 } },
+      "not_when": { "kind": "S", "min_minutes": 8 },
+      "span": {
+        "extend_while_kinds": ["_", "M", "S"],
+        "max_inner_block_minutes": 15,
+        "ends_on_kind_minutes": { "S": 8, "M": 4 }
+      }
+    },
+    {
+      "_comment": "The older, weaker communion signal, kept for services where the formula is not read aloud or the phrase list has not caught up with the words used. Volume rather than position: a sermon can discuss communion at length without being one, so this needs a lot of hits in a single block.",
+      "name": "Communion",
+      "confidence": 0.6,
+      "confidence_first_sunday": 0.8,
+      "match": { "kind": "S", "cues": { "communion": 12 } }
+    },
+    {
+      "_comment": "A speaking block long enough to be the address. Everything shorter that comes before the first one is the opening, and everything shorter after it is either the closing or just speaking — so this threshold is the only length the speaking rules need.",
+      "name": "Sermon",
+      "number": true,
+      "confidence": 0.7,
+      "match": { "kind": "S", "min_minutes": 8 }
+    },
+    {
+      "name": "Opening",
+      "confidence": 0.5,
+      "ongoing_confidence_max": 0.3,
+      "match": { "kind": "S", "before_first": "Sermon" }
+    },
+    {
+      "name": "Closing",
+      "confidence": 0.5,
+      "match": { "kind": "S", "max_minutes": 6, "is_last_named": true }
+    },
+    {
+      "name": "Speaking",
+      "confidence": 0.3,
+      "ongoing_confidence_max": 0.3,
+      "match": { "kind": "S" }
+    },
+    {
+      "_comment": "number_from restarts the count at the named phase, so music before the service opens — a band rehearsing to an empty room — is not counted as the first song set. Music before that point falls back to the plain 'Music' name below.",
+      "name": "Songs",
+      "number": true,
+      "number_from": "Opening",
+      "confidence": 0.7,
+      "match": { "kind": "M", "min_minutes": 3 }
+    },
+    {
+      "name": "Music",
+      "confidence": 0.4,
+      "match": { "kind": "M" }
+    }
+  ],
+
+  "_quiet_comment": "There is deliberately no rule for kind '_'. A block nothing matches keeps no name, which is how the page shows the gaps between the parts. A quiet stretch can still be named by a span above it — that is how communion covers its distribution — or by an operator's correction."
+}

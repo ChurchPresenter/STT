@@ -31,6 +31,8 @@ import re
 import sqlite3
 from typing import Dict, List, Optional, Sequence, Tuple
 
+from stt.phase_rules import apply_rules
+
 # Structural classes. Deliberately three, matching the PANNs vocabulary the pipeline
 # already produces (stt/segments.py:panns_label_from_prob) rather than inventing a
 # parallel one.
@@ -315,7 +317,7 @@ def flag_unusual(blocks: Sequence[Block], cfg: Optional[dict] = None) -> List[st
     return notes
 
 
-def _sum_cues(bins: Sequence[Bin], block: Block) -> Dict[str, int]:
+def sum_cues(bins: Sequence[Bin], block: Block) -> Dict[str, int]:
     out: Dict[str, int] = {}
     for b in bins[block.start_bin:block.end_bin + 1]:
         for name, n in b.cues.items():
@@ -345,7 +347,7 @@ def label_blocks(blocks: List[Block], bins: Sequence[Bin], cfg: Optional[dict] =
     seen_sermon = False
 
     for b in blocks:
-        b.cues = _sum_cues(bins, b)
+        b.cues = sum_cues(bins, b)
         if b.kind in _UNNAMED_KINDS:
             b.label, b.confidence = None, 0.0
             continue
@@ -413,24 +415,56 @@ def number_songs_from_opening(blocks: List[Block], *, songs_min: int) -> List[Bl
     return blocks
 
 
+def compile_fragment_cues(groups: Optional[Dict[str, Dict[str, Sequence[str]]]]
+                          ) -> Dict[str, "re.Pattern[str]"]:
+    """Compile grouped fragments into ordinary cues named ``group:fragment``.
+
+    A liturgical formula is several distinct lines, and how many *different* ones appear is
+    the signal — a sermon may say "the cup" twenty times without ever reading the words of
+    institution. Flattening each fragment into its own cue name means the existing per-bin
+    counting, the summing onto blocks and the stored cues_json all carry it with no schema
+    change; a rule then asks for a count of distinct ``group:`` keys.
+    """
+    out: Dict[str, "re.Pattern[str]"] = {}
+    for group, fragments in (groups or {}).items():
+        if group.startswith("_") or not isinstance(fragments, dict):
+            continue
+        for fragment, phrases in fragments.items():
+            if fragment.startswith("_"):
+                continue
+            compiled = compile_cues({fragment: phrases})
+            if fragment in compiled:
+                out["%s:%s" % (group, fragment)] = compiled[fragment]
+    return out
+
+
 def analyze(rows: Sequence[Tuple], cfg: Optional[dict] = None, *,
-            first_sunday: bool = False) -> dict:
+            first_sunday: bool = False, rules: Optional[Sequence] = None) -> dict:
     """Full pass: rows in, current phase and block timeline out.
 
     Re-run from scratch on every tick rather than updated incrementally. A three-hour
     service is ~180 bins, so the cost is nothing, and it means a mid-service restart loses
     no state and cannot drift from what a replay would produce.
+
+    ``rules`` are parsed phase rules (stt/phase_rules). When given they name the blocks and
+    may return spans — a phase covering several blocks, which is what communion looks like.
+    Without them the built-in labeller runs, so a caller that has no rule file still works.
     """
     cfg = cfg or {}
+    cues = dict(compile_cues(cfg.get("cue_phrases", {})))
+    cues.update(compile_fragment_cues(cfg.get("cue_fragments")))
+    cues_translated = dict(compile_cues(cfg.get("cue_phrases_translated", {})))
+    cues_translated.update(compile_fragment_cues(cfg.get("cue_fragments_translated")))
     bins = bin_rows(
         rows,
         bin_seconds=int(cfg.get("bin_seconds", 60)),
         music_prob_threshold=float(cfg.get("music_prob_threshold", 0.5)),
-        cues=compile_cues(cfg.get("cue_phrases", {})),
-        cues_translated=compile_cues(cfg.get("cue_phrases_translated", {})),
+        cues=cues,
+        cues_translated=cues_translated,
     )
     if not bins:
-        return {"current": None, "blocks": [], "bins": [], "classes": "", "notes": []}
+        return {"current": None, "blocks": [], "bins": [], "classes": "", "notes": [],
+                "spans": []}
 
     classes = [classify_bin(b, dominance=float(cfg.get("dominance", 0.35))) for b in bins]
     blocks = track_blocks(
@@ -438,7 +472,13 @@ def analyze(rows: Sequence[Tuple], cfg: Optional[dict] = None, *,
         enter_minutes=int(cfg.get("enter_minutes", 2)),
         exit_minutes=int(cfg.get("exit_minutes", 3)),
     )
-    label_blocks(blocks, bins, cfg, first_sunday=first_sunday)
+    spans: List = []
+    if rules:
+        for b in blocks:
+            b.cues = sum_cues(bins, b)
+        spans = apply_rules(blocks, rules, first_sunday=first_sunday)
+    else:
+        label_blocks(blocks, bins, cfg, first_sunday=first_sunday)
     notes = flag_unusual(blocks, cfg)
     current = blocks[-1] if blocks else None
     return {
@@ -447,6 +487,18 @@ def analyze(rows: Sequence[Tuple], cfg: Optional[dict] = None, *,
         "bins": [b.to_dict() for b in bins],
         "classes": "".join(classes),
         "notes": notes,
+        "spans": [_span_dict(s, blocks) for s in spans],
+    }
+
+
+def _span_dict(span, blocks: Sequence[Block]) -> dict:
+    """A span in the same shape the page already renders an operator's group in."""
+    first, last = blocks[span.start_index], blocks[span.end_index]
+    return {
+        "label": span.label, "confidence": round(span.confidence, 2),
+        "start_index": span.start_index, "end_index": span.end_index,
+        "start_ms": first.start_ms, "end_ms": last.end_ms,
+        "minutes": last.end_bin - first.start_bin + 1,
     }
 
 
@@ -466,6 +518,10 @@ _DDL = (
         block_index INTEGER PRIMARY KEY, kind TEXT, start_bin INTEGER, end_bin INTEGER,
         start_ms INTEGER, end_ms INTEGER, minutes INTEGER, label TEXT,
         confidence REAL, cues_json TEXT, ongoing INTEGER, unusual_json TEXT)""",
+    """CREATE TABLE IF NOT EXISTS service_phase_spans (
+        span_index INTEGER PRIMARY KEY, label TEXT, confidence REAL,
+        start_index INTEGER, end_index INTEGER, start_ms INTEGER, end_ms INTEGER,
+        minutes INTEGER)""",
     """CREATE TABLE IF NOT EXISTS service_phase_corrections (
         id INTEGER PRIMARY KEY AUTOINCREMENT, block_index INTEGER, start_ms INTEGER,
         end_ms INTEGER, kind TEXT, label TEXT, note TEXT, corrected_at TEXT)""",
@@ -537,7 +593,7 @@ def save_analysis(conn: "sqlite3.Connection", analysis: dict) -> Dict[str, int]:
     Only the detector's own tables are touched; corrections are never in scope here.
     """
     ensure_tables(conn)
-    written = {"bins": 0, "blocks": 0}
+    written = {"bins": 0, "blocks": 0, "spans": 0}
 
     bins = analysis.get("bins", [])
     # cues_json is part of the comparison, not just the payload. Translation lands via a
@@ -593,7 +649,27 @@ def save_analysis(conn: "sqlite3.Connection", analysis: dict) -> Dict[str, int]:
         conn.execute("DELETE FROM service_phase_blocks WHERE block_index >= ?", (len(block_rows),))
         written["blocks"] += 1
 
-    if written["bins"] or written["blocks"]:
+    span_rows = [
+        (i, s["label"], s["confidence"], s["start_index"], s["end_index"],
+         s["start_ms"], s["end_ms"], s["minutes"])
+        for i, s in enumerate(analysis.get("spans", []))
+    ]
+    # A span is a claim about a range of blocks, so it moves whenever the blocks under it
+    # do. There are a handful per service, and they renumber together, so the diffing the
+    # bins need would cost more than it saves.
+    stored_spans = [tuple(r) for r in conn.execute(
+        "SELECT span_index, label, confidence, start_index, end_index, start_ms, end_ms, "
+        "minutes FROM service_phase_spans ORDER BY span_index")]
+    if stored_spans != span_rows:
+        conn.execute("DELETE FROM service_phase_spans")
+        if span_rows:
+            conn.executemany(
+                "INSERT INTO service_phase_spans (span_index, label, confidence, start_index, "
+                "end_index, start_ms, end_ms, minutes) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                span_rows)
+        written["spans"] = len(span_rows)
+
+    if written["bins"] or written["blocks"] or written.get("spans"):
         conn.commit()
     return written
 
@@ -691,7 +767,14 @@ def load_analysis(conn: "sqlite3.Connection") -> dict:
             "confidence, cues_json, ongoing, unusual_json "
             "FROM service_phase_blocks ORDER BY block_index").fetchall()
     except sqlite3.Error:
-        return {"current": None, "blocks": [], "bins": [], "classes": "", "notes": []}
+        return {"current": None, "blocks": [], "bins": [], "classes": "", "notes": [],
+                "spans": []}
+    try:
+        spans = conn.execute(
+            "SELECT label, confidence, start_index, end_index, start_ms, end_ms, minutes "
+            "FROM service_phase_spans ORDER BY span_index").fetchall()
+    except sqlite3.Error:
+        spans = []   # a session recorded before spans existed simply has none
 
     def _cues(raw: Optional[str]) -> dict:
         try:
@@ -715,5 +798,7 @@ def load_analysis(conn: "sqlite3.Connection") -> dict:
     classes = "".join(
         next((b["kind"] for b in out_blocks if b["start_bin"] <= i <= b["end_bin"]), QUIET)
         for i in range(len(out_bins)))
+    out_spans = [{"label": r[0], "confidence": r[1], "start_index": r[2], "end_index": r[3],
+                  "start_ms": r[4], "end_ms": r[5], "minutes": r[6]} for r in spans]
     return {"current": out_blocks[-1] if out_blocks else None,
-            "blocks": out_blocks, "bins": out_bins, "classes": classes}
+            "blocks": out_blocks, "bins": out_bins, "classes": classes, "spans": out_spans}

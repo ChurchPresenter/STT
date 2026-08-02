@@ -851,6 +851,7 @@ from stt.service_phase import (
     save_correction as _service_phase_save_correction,
     save_group_correction as _service_phase_save_group,
 )
+from stt.phase_rules import load_rules as _phase_rules_load
 from stt.db_maintenance import (
     checkpoint_and_release as _db_checkpoint_and_release,
     sweep_orphaned_sidecars as _db_sweep_sidecars,
@@ -4662,7 +4663,8 @@ def get_service_phase():
             if recompute:
                 result = _service_phase_analyze(
                     _service_phase_rows(conn), cfg,
-                    first_sunday=_service_phase_first_sunday(db_path))
+                    first_sunday=_service_phase_first_sunday(db_path),
+                    rules=_service_phase_rules())
             else:
                 result = _service_phase_load(conn)
             corrections = _service_phase_corrections(conn)
@@ -4682,6 +4684,7 @@ def get_service_phase():
         "blocks": result.get("blocks", []),
         "bins": result.get("bins", []),
         "classes": result.get("classes", ""),
+        "spans": result.get("spans", []),
         "corrections": corrections,
     })
 
@@ -14310,6 +14313,23 @@ def _service_phase_config():
     return config.get("service_phase", {}) or {}
 
 
+PHASE_RULES_FILE = os.path.join(CONFIG_DIR, "service_phases.json")
+PHASE_RULES_TEMPLATE_FILE = os.path.join(BUNDLE_DIR, "config", "service_phases.default.json")
+
+
+def _service_phase_rules():
+    """The phase-naming rules, re-read each tick so an edit takes effect without a restart.
+
+    Reading a small JSON file every 20 seconds is nothing next to re-deriving the session,
+    and the alternative — caching — means an operator who fixes a rule mid-service has to
+    restart the server to see it, on the one machine that must not be restarted mid-service.
+    """
+    try:
+        return _phase_rules_load(PHASE_RULES_FILE, PHASE_RULES_TEMPLATE_FILE)
+    except Exception:
+        return []
+
+
 def _service_phase_tick(is_running):
     """Re-run phase detection at most once per interval, then broadcast the result.
 
@@ -14336,7 +14356,8 @@ def _service_phase_tick(is_running):
         try:
             result = _service_phase_analyze(
                 _service_phase_rows(conn), cfg,
-                first_sunday=_service_phase_first_sunday(db_path))
+                first_sunday=_service_phase_first_sunday(db_path),
+                rules=_service_phase_rules())
             _service_phase_save(conn, result)
         finally:
             conn.close()
@@ -14351,6 +14372,7 @@ def _service_phase_tick(is_running):
         socketio.emit("service_phase_update", {
             "current": result.get("current"),
             "blocks": result.get("blocks", []),
+            "spans": result.get("spans", []),
             "session_id": os.path.basename(db_path),
         })
     except Exception:

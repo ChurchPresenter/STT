@@ -9,11 +9,13 @@ confine — the behaviour worth guarding is that they read the running session a
 else, and that a session without the tables reads as empty rather than as an error.
 """
 
+import os
 import sqlite3
 
 import pytest
 
 from conftest import extract_definitions
+from stt.phase_rules import load_rules
 from stt.coercion import coerce_int
 from stt.service_phase import (
     analyze,
@@ -28,6 +30,8 @@ from stt.service_phase import (
 )
 
 MIN = 60_000
+RULES_FILE = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                          "config", "service_phases.default.json")
 CFG = {"enabled": True, "sermon_min_minutes": 8, "songs_min_minutes": 3,
        "cue_phrases": {"amen": [r"амин[ья]"]}}
 
@@ -69,6 +73,8 @@ def make_ns(*, live_db=None, params=None, args=None):
             "_control_params": lambda keep_blank=False: params or {},
             "_service_phase_session_db": lambda: live_db,
             "_service_phase_analyze": analyze,
+            # The real shipped rules, so the routes are exercised the way they run.
+            "_service_phase_rules": lambda: load_rules("", RULES_FILE),
             "_service_phase_load": load_analysis,
             "_service_phase_rows": read_rows,
             "_service_phase_corrections": load_corrections,

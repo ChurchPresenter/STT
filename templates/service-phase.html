@@ -180,9 +180,18 @@
 
   // Corrections with no block_index are groups: one phase covering several detected blocks,
   // identified by their span rather than by any one block.
+  // Two kinds of span render the same way: one the operator drew, and one the detector
+  // found. A communion is several blocks — a reading, then quiet distribution with music
+  // over it — so the rules can return the same shape a group has. The operator's wins where
+  // they overlap, because it is the one that was made on purpose.
   function groups() {
-    return spData.corrections.filter(c => c.block_index === null && c.start_ms && c.end_ms)
-      .sort((a, b) => a.start_ms - b.start_ms);
+    const mine = spData.corrections
+      .filter(c => c.block_index === null && c.start_ms && c.end_ms)
+      .map(c => Object.assign({ detected: false }, c));
+    const found = (spData.spans || [])
+      .filter(s => !mine.some(g => s.start_ms < g.end_ms && g.start_ms < s.end_ms))
+      .map((s, i) => Object.assign({ id: 'span-' + i, detected: true, note: '' }, s));
+    return mine.concat(found).sort((a, b) => a.start_ms - b.start_ms);
   }
 
   function groupCovering(b) {
@@ -342,12 +351,17 @@
       '<span class="sp-pick-gap"></span>' +
       '<span class="sp-time">' + fmtWall(g.start_ms) + ' – ' + fmtWall(g.end_ms) + '</span>' +
       '<span class="sp-time sp-since">' + into + '</span>' +
-      '<span class="sp-now-kind sp-kind-' + (g.kind || '_') + '">grouped</span>' +
+      '<span class="sp-now-kind sp-kind-' + (g.kind || '_') + '">' +
+        (g.detected ? 'detected' : 'grouped') + '</span>' +
       '<span class="sp-label">' + esc(g.label) + '</span>' +
       '<span class="sp-conf">' + Math.round((g.end_ms - g.start_ms) / 60000) + ' min · '
-        + covered.length + ' blocks</span>' +
+        + covered.length + ' blocks'
+        + (g.detected ? ' · ' + Math.round((g.confidence || 0) * 100) + '%' : '') + '</span>' +
       '<span class="sp-fix">' +
-        '<button type="button" class="sp-undo" onclick="ungroup(' + g.id + ')">Ungroup</button>' +
+        (g.detected
+          ? '<input type="text" id="sp-span-' + esc(g.id) + '" class="sp-custom" placeholder="rename">'
+            + '<button type="button" onclick="acceptSpan(\'' + esc(g.id) + '\')">Correct</button>'
+          : '<button type="button" class="sp-undo" onclick="ungroup(' + g.id + ')">Ungroup</button>') +
       '</span>' +
       (g.note ? '<span class="sp-was">' + esc(g.note) + '</span>' : '');
     return row;
@@ -427,6 +441,36 @@
       }
     } catch (e) {
       showAlert('Could not undo: ' + e, 'error');
+    }
+  }
+
+  // Confirming a detected span turns it into an operator group over the same minutes: the
+  // detector's guess becomes ground truth, which is what the learner reads back. Renaming
+  // is the same act, so the text box is optional rather than a second control.
+  async function acceptSpan(id) {
+    const span = groups().find(g => String(g.id) === String(id));
+    if (!span) return;
+    const typed = (document.getElementById('sp-span-' + id) || {}).value || '';
+    try {
+      const resp = await fetch('/api/service-phase/group', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          start_ms: span.start_ms, end_ms: span.end_ms, kind: span.kind || '',
+          label: typed.trim() || span.label, note: ''
+        })
+      });
+      const data = await resp.json();
+      if (data.success) {
+        spData.corrections = data.corrections || [];
+        renderBlocks();
+        renderNow();
+        showAlert('Confirmed.', 'success');
+      } else {
+        showAlert('Could not confirm: ' + data.error, 'error');
+      }
+    } catch (e) {
+      showAlert('Could not confirm: ' + e, 'error');
     }
   }
 
@@ -515,6 +559,7 @@
   socket.on('service_phase_update', function (data) {
     spData.current = data.current;
     spData.blocks = data.blocks || [];
+    spData.spans = data.spans || [];
     renderNow();
     renderBlocks();
   });
