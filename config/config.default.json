@@ -644,7 +644,9 @@
   },
   "auto_update": {
     "enabled": true,
-    "_enabled_comment": "When running the server directly (not under the watchdog), fast-forward the git checkout to its upstream branch and restart. Non-destructive: skipped if the working tree is dirty or the branch has unpushed/diverged commits, so developer work is never discarded. Ignored under the watchdog, which has its own updater.",
+    "_enabled_comment": "When running the server directly (not under the watchdog), fast-forward the git checkout to its upstream branch and restart. Skipped whenever the working tree is dirty, so uncommitted work is never discarded. Ignored under the watchdog, which has its own updater.",
+    "reset_on_diverged_upstream": true,
+    "_reset_on_diverged_upstream_comment": "When the checkout has diverged from its upstream (normally because the remote branch was force-pushed or rebased), hard-reset onto the upstream instead of skipping the update. Default true: without it one force push freezes a box on its current version until someone resets it by hand, and a machine that silently stops updating is the worse failure. A dirty working tree is still never touched, and the pre-reset commit is logged (and kept in the reflog) so unpushed work can be restored. Set false on a developer checkout that carries local commits on the same branch.",
     "update_hour": 1,
     "_update_hour_comment": "Local hour of day (0-23) when the running server checks for updates each night; default 1 (1am) so a live box updates during off-hours instead of restarting hourly. It also checks once at startup. Updates only apply while transcription is not running. (Supersedes the old check_interval_hours setting.)"
   }

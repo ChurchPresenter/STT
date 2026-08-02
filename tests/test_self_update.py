@@ -103,8 +103,9 @@ def test_dirty_worktree_is_left_untouched(repos):
     assert (clone / "file.txt").read_text(encoding="utf-8") == "my local edits\n"  # not discarded
 
 
-def test_unpushed_commits_are_not_clobbered(repos):
-    """A branch ahead of origin (unpushed commits) must not be reset/lost."""
+def test_unpushed_commits_are_not_clobbered_with_reset_off(repos):
+    """allow_reset=False keeps the strict contract: a branch ahead of origin
+    (unpushed commits) is never reset."""
     _, seed, clone = repos
     _advance_origin(seed)  # origin advances (diverging)
     # local, unpushed commit on the clone
@@ -113,12 +114,102 @@ def test_unpushed_commits_are_not_clobbered(repos):
     _git(clone, "commit", "-m", "local wip")
     local_head = _head(clone)
 
-    updated, reason = self_update.git_self_update(str(clone))
+    updated, reason = self_update.git_self_update(str(clone), allow_reset=False)
 
     assert updated is False
     assert reason == "not-fast-forwardable"
     assert _head(clone) == local_head           # local commit still HEAD
     assert (clone / "local.txt").exists()       # local work intact
+
+
+# --- recovery from a rewritten upstream (force push) ------------------------
+# A force-pushed remote leaves every checkout diverged, and --ff-only then fails
+# forever: the box runs old code until someone SSHes in. By default that case
+# now resets onto the upstream.
+
+
+def _force_push_rewrite(seed, content="rewritten\n"):
+    """Rewrite the tip of origin/main, as a force push (or rebase) would."""
+    (seed / "file.txt").write_text(content)
+    _git(seed, "commit", "-a", "--amend", "-m", "rewritten")
+    _git(seed, "push", "--force", "origin", "main")
+    return _head(seed)
+
+
+def test_force_pushed_upstream_is_recovered_by_default(repos):
+    _, seed, clone = repos
+    _advance_origin(seed)
+    self_update.git_self_update(str(clone))     # clone now holds the pre-rewrite commit
+    rewritten = _force_push_rewrite(seed)
+
+    updated, reason = self_update.git_self_update(str(clone))
+
+    assert updated is True
+    assert reason == "reset-to-upstream"
+    assert _head(clone) == rewritten
+    assert (clone / "file.txt").read_text(encoding="utf-8") == "rewritten\n"
+
+
+def test_force_pushed_upstream_is_skipped_with_reset_off(repos):
+    _, seed, clone = repos
+    _advance_origin(seed)
+    self_update.git_self_update(str(clone))
+    before = _head(clone)
+    _force_push_rewrite(seed)
+
+    updated, reason = self_update.git_self_update(str(clone), allow_reset=False)
+
+    assert updated is False
+    assert reason == "not-fast-forwardable"
+    assert _head(clone) == before
+
+
+def test_reset_leaves_a_dirty_worktree_alone(repos):
+    """The dirty-tree refusal outranks recovery: uncommitted work is never lost."""
+    _, seed, clone = repos
+    _advance_origin(seed)
+    self_update.git_self_update(str(clone))
+    _force_push_rewrite(seed)
+    (clone / "file.txt").write_text("my local edits\n")
+    before = _head(clone)
+
+    updated, reason = self_update.git_self_update(str(clone))
+
+    assert updated is False
+    assert reason == "dirty-worktree"
+    assert _head(clone) == before
+    assert (clone / "file.txt").read_text(encoding="utf-8") == "my local edits\n"
+
+
+def test_reset_keeps_unpushed_commits_recoverable(repos):
+    """The accepted trade-off: a diverged branch is reset, but the discarded
+    commit stays in the object store so the logged SHA really does restore it."""
+    _, seed, clone = repos
+    _advance_origin(seed)
+    (clone / "local.txt").write_text("wip\n")
+    _git(clone, "add", "local.txt")
+    _git(clone, "commit", "-m", "local wip")
+    local_head = _head(clone)
+
+    updated, reason = self_update.git_self_update(str(clone))
+
+    assert updated is True
+    assert reason == "reset-to-upstream"
+    assert _head(clone) != local_head
+    # `git reset --hard <sha>` from the log line must still work
+    _git(clone, "cat-file", "-e", local_head)
+    _git(clone, "reset", "--hard", local_head)
+    assert (clone / "local.txt").read_text(encoding="utf-8") == "wip\n"
+
+
+def test_up_to_date_clone_is_not_reset(repos):
+    _, _, clone = repos
+    before = _head(clone)
+
+    updated, reason = self_update.git_self_update(str(clone))
+
+    assert (updated, reason) == (False, "up-to-date")
+    assert _head(clone) == before
 
 
 def test_not_a_git_checkout(tmp_path):

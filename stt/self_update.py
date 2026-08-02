@@ -5,15 +5,15 @@ plain ``python speech_to_text.py``) the watchdog's updater is not in play, so th
 module fast-forwards the checkout to its upstream branch instead.
 
 Unlike the watchdog (which does a destructive ``git reset --hard`` + ``git clean``),
-this path is deliberately non-destructive so developers who run from their own
-checkout never lose work:
+this path leaves the working tree alone: it refuses to touch a **dirty** checkout,
+so uncommitted work is never discarded and the developer can commit and push normally.
 
-  * it refuses to touch a **dirty** working tree, and
-  * it uses ``git pull --ff-only``, which refuses to run when the branch has
-    diverged or is **ahead** (unpushed local commits).
-
-In both cases it simply skips — nothing is discarded, and the developer can still
-commit and push normally.
+Updates use ``git pull --ff-only``, which refuses to run when the branch has diverged
+or is **ahead**. A force-pushed (or rebased) upstream leaves every checkout diverged,
+and a box that answers "not-fast-forwardable" forever is stuck on old code until
+someone SSHes in — so by default that case then hard-resets onto the upstream, logging
+the previous HEAD (which also survives in the reflog) so unpushed commits can be
+restored. Pass ``allow_reset=False`` for the strict, never-move-HEAD-sideways behavior.
 """
 
 import hashlib
@@ -146,15 +146,54 @@ def _sync_deps_if_needed(repo_dir: str) -> None:
             log.warning("[self-update] could not write sync marker: %s", e)
 
 
-def git_self_update(repo_dir: str) -> Tuple[bool, str]:
-    """Fast-forward ``repo_dir`` to its upstream branch, non-destructively.
+def _reset_to_upstream(repo_dir: str, before_sha: str) -> Tuple[bool, str]:
+    """Hard-reset a diverged (force-pushed) checkout onto its upstream.
+
+    Called only with a clean tree. The rewritten line may not be in the object
+    store yet, hence the forced fetch. No ``git clean``: untracked files are not
+    ours to delete, and the caller already established there are no tracked
+    changes to lose.
+    """
+    fetch = _git(repo_dir, "fetch", "--tags", "--force", "origin")
+    if fetch.returncode != 0:
+        log.warning("[self-update] fetch before reset failed: %s", fetch.stderr.strip())
+        return False, "error"
+
+    upstream = _git(repo_dir, "rev-parse", "--verify", "--quiet", "@{u}")
+    if upstream.returncode != 0 or not upstream.stdout.strip():
+        return False, "not-fast-forwardable"  # no upstream to reset onto
+    target = upstream.stdout.strip()
+    if target == before_sha:
+        return False, "up-to-date"  # nothing to move to (a local-only divergence)
+
+    # Log before moving: unpushed commits stay in the reflog, and this line is
+    # what makes them findable months later.
+    log.warning("[self-update] branch diverged from upstream (force push?); resetting to %s. "
+                "Previous HEAD %s — `git reset --hard %s` restores it.",
+                target[:9], before_sha[:9], before_sha)
+    reset = _git(repo_dir, "reset", "--hard", target)
+    if reset.returncode != 0:
+        log.warning("[self-update] reset failed: %s", reset.stderr.strip())
+        return False, "error"
+    _sync_deps_if_needed(repo_dir)
+    log.info("[self-update] reset %s -> %s", before_sha[:9], target[:9])
+    return True, "reset-to-upstream"
+
+
+def git_self_update(repo_dir: str, *, allow_reset: bool = True) -> Tuple[bool, str]:
+    """Advance ``repo_dir`` to its upstream branch without touching a dirty tree.
+
+    ``allow_reset`` (the default) recovers a diverged branch by resetting onto the
+    upstream — the state a force-pushed remote leaves every checkout in.
 
     Returns ``(updated, reason)``:
       * ``(True,  "fast-forwarded")``      HEAD advanced; caller should restart.
+      * ``(True,  "reset-to-upstream")``   diverged branch reset onto upstream; restart.
       * ``(False, "up-to-date")``          already current.
       * ``(False, "not-a-git-checkout")``  git missing or no ``.git``.
       * ``(False, "dirty-worktree")``      uncommitted/untracked changes present.
-      * ``(False, "not-fast-forwardable")``diverged or ahead (unpushed commits).
+      * ``(False, "not-fast-forwardable")``diverged or ahead, and ``allow_reset`` is off
+                                           (or the branch tracks no upstream).
       * ``(False, "error")``               a git command failed unexpectedly.
     """
     try:
@@ -190,7 +229,9 @@ def git_self_update(repo_dir: str) -> Tuple[bool, str]:
         # HEAD unchanged: either already current, or the pull was rejected
         # (diverged/ahead). Distinguish the two by the pull's exit status.
         if pull.returncode != 0:
-            return False, "not-fast-forwardable"
+            if not allow_reset:
+                return False, "not-fast-forwardable"
+            return _reset_to_upstream(repo_dir, before_sha)
         # Heal dependency drift even with nothing to pull, so a box that
         # missed a sync doesn't stay broken until the next requirements commit.
         _sync_deps_if_needed(repo_dir)

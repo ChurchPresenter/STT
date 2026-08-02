@@ -18509,6 +18509,11 @@ def _self_update_enabled():
     return bool(config.get("auto_update", {}).get("enabled", True))
 
 
+def _self_update_allow_reset():
+    """Recover a diverged checkout (force-pushed upstream) by resetting onto it."""
+    return bool(config.get("auto_update", {}).get("reset_on_diverged_upstream", True))
+
+
 def _restart_for_update():
     """Restart the server process to load the pulled update.
 
@@ -18527,7 +18532,7 @@ def _run_startup_self_update():
         return
     try:
         from stt.self_update import git_self_update, restart_via_execv
-        updated, reason = git_self_update(BUNDLE_DIR)
+        updated, reason = git_self_update(BUNDLE_DIR, allow_reset=_self_update_allow_reset())
         if updated:
             print("[AUTO-UPDATE] Update pulled at startup; restarting...")
             restart_via_execv()  # no worker yet -> clean re-exec
@@ -18560,7 +18565,12 @@ def _self_update_loop():
         try:
             if _ts_get("running"):
                 continue  # idle-gate: never restart mid-transcription
-            updated, _reason = git_self_update(BUNDLE_DIR)
+            updated, reason = git_self_update(BUNDLE_DIR, allow_reset=_self_update_allow_reset())
+            if not updated and reason == "not-fast-forwardable":
+                # Otherwise the only trace is one startup line, and a box can sit
+                # frozen on old code for weeks with nothing in the log saying why.
+                print("[AUTO-UPDATE] Checkout diverged from upstream; not updating. Set "
+                      "auto_update.reset_on_diverged_upstream, or reset the checkout by hand.")
             if updated:
                 # git_self_update does a network pull that can take many
                 # seconds; re-check the idle-gate afterwards so a session that
