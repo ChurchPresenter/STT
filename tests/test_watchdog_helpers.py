@@ -539,10 +539,51 @@ class TestRunResolvesAugmentedPath:
         assert seen["cmd"][0] == "nonexistent-tool"
 
 
+class TestRequirementsNeedGit:
+    """uv shells out to the git CLI for VCS requirements. The detection must
+    read requirement lines only: a heavily commented requirements.txt that
+    merely mentions a git+ URL once stranded provisioning on a git-less Mac."""
+
+    def test_bare_vcs_line(self):
+        assert watchdog._requirements_need_git(
+            "numpy\ngit+https://github.com/openai/whisper.git\n")
+
+    def test_pep508_direct_reference(self):
+        assert watchdog._requirements_need_git(
+            "whisper @ git+https://github.com/openai/whisper.git\n")
+
+    def test_git_protocol_scheme(self):
+        assert watchdog._requirements_need_git("git://example.com/pkg.git\n")
+
+    def test_plain_requirements(self):
+        assert not watchdog._requirements_need_git(
+            "numpy<2.0.0\nopenai-whisper==20250625\nfaster-whisper==1.2.1\n")
+
+    def test_commented_out_vcs_line(self):
+        assert not watchdog._requirements_need_git(
+            "numpy\n# pip install git+https://github.com/openai/whisper.git\n")
+
+    def test_prose_comment_mentioning_a_git_url(self):
+        assert not watchdog._requirements_need_git(
+            "# was git+https://github.com/openai/whisper.git, now from PyPI\n"
+            "openai-whisper==20250625\n")
+
+    def test_inline_comment_is_trimmed(self):
+        assert not watchdog._requirements_need_git(
+            "openai-whisper==20250625  # replaces git+https://...whisper.git\n")
+
+    def test_shipped_requirements_need_no_git(self):
+        # Regression: the git dependency must not come back silently — it
+        # dead-looped setup on machines with no git and no way to install it.
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        with open(os.path.join(root, "requirements.txt"), encoding="utf-8") as f:
+            assert not watchdog._requirements_need_git(f.read())
+
+
 class TestStepDepsGitGuard:
-    """requirements.txt pins whisper to a git URL; uv needs a git executable
-    for it. When git could not be provisioned, _step_deps must fail up front
-    with instructions, not let uv die mid-install (seen in the field)."""
+    """A VCS requirement needs a git executable uv can shell out to. When git
+    could not be provisioned, _step_deps must fail up front with instructions,
+    not let uv die mid-install (seen in the field)."""
 
     def _provisioner(self, run_impl):
         p = watchdog.Provisioner(log=lambda m: None)
@@ -591,6 +632,22 @@ class TestStepDepsGitGuard:
 
         p = self._provisioner(fake_run)
         p._step_deps()  # git-less installs stay fine without VCS requirements
+        assert "pip" in seen["cmd"]
+
+    def test_comment_mentioning_git_does_not_block(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(watchdog, "SOURCE_DIR", str(tmp_path))
+        monkeypatch.setattr(watchdog, "_git_usable", lambda: False)
+        (tmp_path / "requirements.txt").write_text(
+            "# whisper used to be git+https://github.com/openai/whisper.git\n"
+            "openai-whisper==20250625\n")
+        seen = {}
+
+        def fake_run(cmd, desc=None, check=True, timeout=3600, extra_env=None):
+            seen["cmd"] = list(cmd)
+            return 0
+
+        p = self._provisioner(fake_run)
+        p._step_deps()
         assert "pip" in seen["cmd"]
 
 

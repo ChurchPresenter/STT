@@ -15,7 +15,10 @@ torchaudio==2.8.0
 
 # Core ML dependencies
 numpy<2.0.0
-git+https://github.com/openai/whisper.git
+# The reference implementation, from PyPI — not the GitHub URL it used to be:
+# uv shells out to the git CLI for VCS requirements, which stranded setup on
+# machines without git (headless Macs with no Command Line Tools and no brew).
+openai-whisper==20250625
 faster-whisper==1.2.1
 ctranslate2==4.7.1
 transformers>=4.35.0

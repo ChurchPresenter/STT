@@ -77,7 +77,7 @@ function Install-SystemDeps {
             Refresh-Path
         } else {
             Print-Warning "Git not found. Install from https://git-scm.com/download/win"
-            Print-Warning "Git is required for installing the OpenAI Whisper package."
+            Print-Warning "Not required to install: auto-updates fall back to archive downloads."
         }
     }
 

@@ -734,6 +734,29 @@ def _git_usable():
     return True
 
 
+def _requirements_need_git(text):
+    """True when a requirements file holds a VCS requirement needing the git CLI.
+
+    `uv pip install` has no bundled git and shells out for VCS requirements, so
+    provisioning checks this before it starts. Requirement lines only: the file
+    is heavily commented, and prose mentioning a git+ URL must not strand an
+    install that has no real VCS dependency. Matches a bare `git+https://...`
+    line and the PEP 508 direct reference `name @ git+https://...`.
+    """
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        head, sep, _ = line.partition(" #")   # inline comment, as pip parses it
+        if sep:
+            line = head.strip()
+        _, at, target = line.partition("@")
+        candidate = target.strip() if at else line
+        if candidate.lower().startswith(("git+", "git:")):
+            return True
+    return False
+
+
 _PROGRESS_SPINNER = {"-", "\\", "|", "/"}
 
 
@@ -1259,14 +1282,14 @@ class Provisioner:
 
     def _step_deps(self):
         req = os.path.join(SOURCE_DIR, "requirements.txt")
-        # uv shells out to git for VCS requirements (whisper is pinned to a
-        # GitHub URL). When git could not be provisioned at all, fail up front
-        # with instructions instead of uv's mid-install "Git executable not
-        # found" — _step_git only warns, because a git-less install is fine
-        # for everything except these requirements.
+        # uv shells out to git for VCS requirements. The shipped requirements
+        # have none (whisper comes from PyPI), so this is a guard for anyone
+        # adding one back: fail up front with instructions instead of uv's
+        # mid-install "Git executable not found" — _step_git only warns,
+        # because a git-less install is fine for everything else.
         try:
             with open(req, encoding="utf-8") as f:
-                needs_git = "git+" in f.read()
+                needs_git = _requirements_need_git(f.read())
         except OSError:
             needs_git = False  # let uv report the missing/broken file itself
         if needs_git and not _git_usable():
