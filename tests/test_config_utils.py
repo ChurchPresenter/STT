@@ -139,6 +139,23 @@ class TestComputeDisplayVersion:
         assert compute_display_version("26.1.3-1-gaaaa111", "", "x") == "26.1.4-aaaa111"
 
 
+def _has_tz_database() -> bool:
+    """Whether this machine can load an IANA zone name at all.
+
+    Windows ships no system tz database, so zoneinfo needs the `tzdata` package
+    (in requirements.txt for runtime and requirements-dev.txt for CI). Without it
+    the feature genuinely cannot work, and these assertions would fail for an
+    environment reason rather than a code one — so say that plainly instead.
+    """
+    return is_known_timezone("America/New_York")
+
+
+needs_tzdata = pytest.mark.skipif(
+    not _has_tz_database(),
+    reason="no IANA tz database on this machine; install tzdata",
+)
+
+
 class TestResolveTimezone:
     """The timezone the transcript is stamped in.
 
@@ -161,6 +178,7 @@ class TestResolveTimezone:
             tz, note = resolve_timezone(cfg, self.FIXED)
             assert tz is self.FIXED and note is None
 
+    @needs_tzdata
     def test_a_named_zone_is_actually_used(self):
         # The whole point: a configured zone must reach the returned tzinfo.
         tz, note = resolve_timezone({"mode": "manual", "value": "America/New_York"}, self.FIXED)
@@ -168,6 +186,7 @@ class TestResolveTimezone:
         assert tz is not self.FIXED
         assert "New_York" in str(tz)
 
+    @needs_tzdata
     def test_the_zone_changes_the_wall_clock(self):
         # Proves it resolves to a real zone rather than a label.
         moment = datetime.datetime(2026, 7, 1, 12, 0, tzinfo=self.UTC)
@@ -176,6 +195,7 @@ class TestResolveTimezone:
         assert moment.astimezone(ny).hour != moment.astimezone(tokyo).hour
 
     def test_an_unknown_zone_falls_back_and_explains(self):
+        # Holds with or without a tz database — the point is that it never raises.
         # Timestamps are written on every row; a typo must not stop a service.
         tz, note = resolve_timezone({"mode": "manual", "value": "Mars/Olympus_Mons"}, self.FIXED)
         assert tz is self.FIXED
@@ -190,6 +210,7 @@ class TestResolveTimezone:
         tz, note = resolve_timezone({"mode": "  AUTO  "}, self.FIXED)
         assert tz is self.FIXED and note is None
 
+    @needs_tzdata
     def test_a_value_is_trimmed(self):
         tz, note = resolve_timezone({"mode": "manual", "value": "  Asia/Tokyo  "}, self.FIXED)
         assert note is None and "Tokyo" in str(tz)
@@ -203,6 +224,7 @@ class TestResolveTimezone:
 class TestIsKnownTimezone:
     """Guards the save endpoint so a bad name is rejected, not silently ignored."""
 
+    @needs_tzdata
     def test_real_zones(self):
         for z in ("America/New_York", "Europe/Kyiv", "UTC", "Asia/Tokyo"):
             assert is_known_timezone(z)
@@ -215,6 +237,7 @@ class TestIsKnownTimezone:
         for z in ("", "   ", None):
             assert not is_known_timezone(z)
 
+    @needs_tzdata
     def test_whitespace_is_trimmed_before_checking(self):
         assert is_known_timezone("  America/New_York  ")
 

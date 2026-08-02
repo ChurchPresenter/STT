@@ -43,6 +43,10 @@ piper-tts>=1.2.0
 
 # Utilities
 pytz>=2023.3
+# IANA timezone database for stdlib zoneinfo. Required on Windows, which ships no
+# system tz database — without it a configured timezone.value silently falls back to
+# the machine's own zone. Pure data, no code.
+tzdata>=2024.1
 silero-vad>=4.0.0
 smbprotocol>=1.10.0
 # Live CPU/RAM metrics for the health dashboard (optional — degrades to "n/a" if absent)

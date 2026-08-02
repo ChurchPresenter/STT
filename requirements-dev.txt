@@ -3,3 +3,7 @@ pytest>=8.0
 pytest-cov>=5.0
 ruff>=0.4
 mypy>=1.10
+
+# IANA timezone database — CI runs on windows-2022, which has no system tz database,
+# so the timezone resolution tests cannot load a zone name without it.
+tzdata>=2024.1
