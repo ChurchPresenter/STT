@@ -417,7 +417,7 @@
 
                 <div id="nllb_settings_group">
                 <div class="form-group" id="local_model_settings">
-                    <label for="translation_model">Translation Model</label>
+                    <label for="translation_model" id="translation_model_label">Translation Model</label>
                     <select id="translation_model">
                         <!-- Populated dynamically from downloaded NLLB models -->
                     </select>
@@ -785,16 +785,20 @@
                 const modelHint = document.getElementById('model_hint');
                 modelSelect.innerHTML = '';
 
+                // "None" is a real choice: on an LLM box this model only covers
+                // captions the LLM declines, and it is several GB resident — the
+                // room a larger LLM needs on a memory-bound machine.
+                const noneOption = document.createElement('option');
+                noneOption.value = '';
+                noneOption.textContent = 'None — no fallback model';
+                modelSelect.appendChild(noneOption);
+
                 if (data.success && data.models) {
                     // Filter only downloaded models
                     const downloadedModels = data.models.filter(m => m.downloaded);
 
                     if (downloadedModels.length === 0) {
-                        const option = document.createElement('option');
-                        option.value = '';
-                        option.textContent = 'No ' + label + ' models downloaded';
-                        option.disabled = true;
-                        modelSelect.appendChild(option);
+                        noneOption.textContent = 'None — no ' + label + ' models downloaded';
                         modelHint.textContent = 'Download ' + label + ' models from the Model Manager page';
                         modelHint.style.color = 'var(--danger)';
                     } else {
@@ -869,7 +873,9 @@
                     // and re-select the saved model within it.
                     const translationMethod = currentSettings.translation_method || 'nllb';
                     document.getElementById('translation_method').value = translationMethod;
-                    const modelValue = currentSettings.translation_model || 'facebook/nllb-200-distilled-600M';
+                    // '' means "None — no fallback model"; only an ABSENT key takes the default.
+                const modelValue = currentSettings.translation_model === undefined
+                    ? 'facebook/nllb-200-distilled-600M' : currentSettings.translation_model;
                     await loadNLLBModels(translationMethod, modelValue);
                     onTranslationMethodChange();
 
@@ -1195,6 +1201,14 @@
                         indicator.className = 'status-indicator enabled';
                         statusDot.className = 'status-dot';
                         statusText.textContent = 'Enabled';
+                    } else if (data.enabled && !data.model_loaded && !data.translation_model
+                               && (data.translation_method === 'nllb' || data.translation_method === 'madlad')) {
+                        // No model chosen, on an engine that needs one. That is a
+                        // configuration to finish, not a load to wait for — the pill
+                        // sat at "Initializing..." forever.
+                        indicator.className = 'status-indicator disabled';
+                        statusDot.className = 'status-dot';
+                        statusText.textContent = 'No model selected';
                     } else if (data.enabled && !data.model_loaded) {
                         indicator.className = 'status-indicator loading';
                         statusDot.className = 'status-dot loading';
@@ -1207,8 +1221,11 @@
 
                     // Update other status info
                     document.getElementById('current_language').textContent = data.target_language_name || '-';
-                    const modelId = data.translation_model || '-';
-                    document.getElementById('current_model').textContent = modelId.split('/').pop() || modelId;
+                    // An empty model is a choice ("None"), not a missing answer, so it
+                    // is named rather than shown as a dash.
+                    const modelId = data.translation_model || '';
+                    document.getElementById('current_model').textContent =
+                        modelId ? (modelId.split('/').pop() || modelId) : 'None (no fallback)';
                     // Label the engine that is actually running. This read
                     // "anything that isn't NLLB is Whisper", so MADLAD sessions
                     // have been labelled "Whisper Model", and an LLM session
@@ -1234,9 +1251,13 @@
                     const lfw = document.getElementById('local_fallback_warning');
                     if (lfw) {
                         if (data.local_fallback_ready === false) {
-                            lfw.textContent = '⚠️ No local translation model is downloaded, so this ' +
-                                'would show the original text instead. Download one in the Model Manager, ' +
-                                'or choose "Skip translation" so the behaviour matches the setting.';
+                            lfw.textContent = data.translation_model
+                                ? '⚠️ The local translation model is not downloaded, so this would show the ' +
+                                  'original text instead. Download it in the Model Manager, or choose ' +
+                                  '"Skip translation" so the behaviour matches the setting.'
+                                : 'ℹ️ No fallback model is selected, so this behaves the same as ' +
+                                  '"Skip translation" — captions stay in the source language while ' +
+                                  'Machine B is unreachable.';
                             lfw.style.display = 'block';
                         } else {
                             lfw.style.display = 'none';
@@ -1364,6 +1385,27 @@
             }
         }
 
+        // On an LLM session this model does not translate — it covers captions the
+        // LLM declines. Left as "Translation Model" it read as the model doing the
+        // work, so a box captioning through a GGUF appeared to be running NLLB.
+        // Same wording as the Model Manager, so the two pages agree.
+        function setModelLabel(method) {
+            const label = document.getElementById('translation_model_label');
+            const hint = document.getElementById('model_hint');
+            if (!label) return;
+            if (method === 'llm') {
+                label.textContent = 'Fallback model (NLLB/MADLAD)';
+                if (hint) {
+                    hint.textContent = 'Runs only when the LLM times out or returns a caption that ' +
+                        'fails validation. Choose None to keep no fallback weights in memory — those ' +
+                        'captions then stay in the source language, and the memory is free for a larger LLM.';
+                    hint.style.color = 'var(--text-muted)';
+                }
+            } else {
+                label.textContent = 'Translation Model';
+            }
+        }
+
         function onTranslationMethodChange() {
             const method = document.getElementById('translation_method').value;
             // Show the engine's own language set (NLLB ~200, MADLAD ~400, LLM ~28).
@@ -1380,9 +1422,15 @@
 
             if (method === 'llm') {
                 nllbRemoteSection.style.display = '';
-                nllbSettingsGroup.style.display = 'none';
+                // Shown, not hidden. An LLM session still loads this model — it
+                // covers captions the LLM declines — and hiding it meant a box had
+                // a fallback model resident that could not be seen or changed from
+                // this page, including to switch it off.
+                nllbSettingsGroup.style.display = '';
                 whisperTransWarn.style.display = 'none';
                 whisperForcedWarn.style.display = 'none';
+                loadNLLBModels('nllb', document.getElementById('translation_model').value);
+                setModelLabel('llm');
                 onLlmProviderChange();
             } else if (method === 'nllb' || method === 'madlad') {
                 nllbRemoteSection.style.display = '';
@@ -1392,6 +1440,7 @@
                 // Repopulate the model dropdown for the selected engine, keeping
                 // the current selection if it exists in the new engine's list.
                 loadNLLBModels(method, document.getElementById('translation_model').value);
+                setModelLabel(method);
                 // MADLAD can loop: reflect its anti-repetition defaults in the
                 // sliders when they're left neutral (matches what the backend
                 // applies). Programmatic value set → no spurious "unsaved" flag.

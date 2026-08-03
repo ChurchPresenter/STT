@@ -1764,12 +1764,38 @@ def _warmup_translation_model(model, tokenizer, device):
         print(f"[LIVE-TRANSLATION] Warmup failed (non-fatal): {e}")
 
 
+# Latched so "no fallback model configured" is said once, not once per caption:
+# this runs on the caption path. Cleared as soon as a model id appears, so a
+# later change back is announced again.
+_no_fallback_model_logged = False
+
+
 def get_live_translation_model(use_gpu=True, model_id=None):
     """Get or load the live translation model (singleton pattern).
     If model_id differs from the currently loaded model, unloads and reloads."""
     global _live_translation_model, _live_translation_tokenizer, _live_translation_model_loaded, _live_translation_model_loading, _live_translation_model_id, _live_translation_model_wanted
 
+    global _no_fallback_model_logged
+
     with _live_translation_lock:
+        # No model configured is a choice, not a failure: the operator selected
+        # "None" so this machine keeps no fallback weights resident — on a
+        # memory-bound box that is the room a larger LLM needs. Guarding here
+        # rather than at each caller covers all five of them at once, including
+        # /api/translate/preload, which an offload client calls on every service
+        # start and which would otherwise load the model the choice was avoiding.
+        #
+        # Without this, an empty id reached load_translation_model(), where ""
+        # joined to MODELS_DIR is a real directory — so it tried to load the
+        # models folder as a model and raised, once per caption.
+        if not (model_id or "").strip():
+            if not _no_fallback_model_logged:
+                print("[LIVE-TRANSLATION] no fallback model configured — captions this "
+                      "engine declines will stay in the source language")
+                _no_fallback_model_logged = True
+            return None, None
+        _no_fallback_model_logged = False
+
         # Don't load model if transcription is actively stopping (to prevent GPU memory leak)
         status = _ts_get("status", "")
         if _live_translation_model is None and status == "stopping":

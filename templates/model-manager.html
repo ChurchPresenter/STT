@@ -1947,10 +1947,20 @@
                 const select = document.getElementById('config_translation_model');
                 select.innerHTML = '';
 
+                // "None" is a real choice, not the absence of one. On an LLM box
+                // this model is only a fallback for captions the LLM declines,
+                // and it is several GB resident — which on a memory-bound machine
+                // is the room a larger LLM needs. Listed first so it is reachable
+                // even when models are downloaded.
+                const none = document.createElement('option');
+                none.value = '';
+                none.textContent = 'None — no fallback model';
+                select.appendChild(none);
+
                 if (data.success && data.models) {
                     const downloaded = data.models.filter(m => m.downloaded);
                     if (downloaded.length === 0) {
-                        select.innerHTML = '<option value="" disabled>No translation models downloaded</option>';
+                        none.textContent = 'None — no translation models downloaded';
                     } else {
                         downloaded.forEach(model => {
                             const option = document.createElement('option');
@@ -1964,7 +1974,7 @@
                     // still has to appear, and stay selected: dropping it meant the
                     // next Save quietly replaced it with a model that happened to
                     // be present.
-                    if (selectedModel && !select.querySelector(`option[value="${selectedModel}"]`)) {
+                    if (selectedModel && !select.querySelector(`option[value="${selectedModel}"]`)) {  // never for "" — that is the None option
                         const missing = document.createElement('option');
                         missing.value = selectedModel;
                         missing.textContent = (selectedModel.split('/').pop() || selectedModel) + ' (not downloaded)';
@@ -1994,7 +2004,10 @@
                 const settings = await settingsResp.json();
 
                 if (settings.success) {
-                    const model = settings.settings.translation_model || 'facebook/nllb-200-distilled-600M';
+                    // '' is a deliberate "no fallback model", so only an ABSENT key falls back to
+                    // the default — ||-defaulting here wrote the model straight back on the next save.
+                    const model = settings.settings.translation_model === undefined
+                        ? 'facebook/nllb-200-distilled-600M' : settings.settings.translation_model;
                     _configuredTranslationModel = model;
                     await populateTranslationModelDropdown(model);
                     const s = settings.settings || {};
@@ -2113,7 +2126,10 @@
                 use_fp16: document.getElementById('config_use_fp16').checked,
                 use_ctranslate2: document.getElementById('config_use_ctranslate2').checked
             };
-            if (model) payload.translation_model = model;
+            // Always sent, including "" — omitting it on a falsy value meant the
+            // key could never be cleared, so choosing None was silently undone by
+            // the next save from this panel.
+            payload.translation_model = model || '';
             if (method === 'llm') {
                 // Only the model selection. The server merges the llm block, so
                 // the prompt, token budget, timeouts and API key set on the

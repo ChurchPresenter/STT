@@ -1264,16 +1264,25 @@ def resolve_translation_model_id(lt_cfg: Optional[Mapping[str, Any]], madlad_def
     configured model isn't a MADLAD model (e.g. a stale NLLB id), fall back to
     ``madlad_default`` so 'madlad' doesn't silently run NLLB weights.
 
+    An **empty** model id is not stale, it is a choice: the operator selected
+    "None" to run without a fallback model, which on a memory-bound box is the
+    room a larger LLM needs. Substituting the default there would resurrect a
+    model nobody chose — and if its weights were absent, download several GB of
+    it. So the substitution applies only to a non-empty id that disagrees with
+    the engine.
+
     The monolith's _resolve_live_translation_model_id() delegates here, and
     session provenance records the result, so the recorded model is the one that
     actually ran rather than the possibly-stale configured string.
     """
     cfg = lt_cfg or {}
     method = cfg.get("translation_method", "nllb")
-    model_id = cfg.get("translation_model")
-    if method == "madlad" and not is_madlad_model(model_id or ""):
+    model_id = (cfg.get("translation_model") or "").strip()
+    if not model_id:
+        return ""
+    if method == "madlad" and not is_madlad_model(model_id):
         return madlad_default
-    return model_id or ""
+    return model_id
 
 
 def _codes_for_method(method: str) -> Dict[str, str]:

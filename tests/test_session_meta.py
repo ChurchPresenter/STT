@@ -1041,3 +1041,23 @@ class TestRowLabelIfChanged:
 
     def test_surrounding_whitespace_is_not_a_change(self):
         assert row_label_if_changed(" m ", "m") is None
+
+
+class TestNoFallbackModelProvenance:
+    """A session with no fallback model must not claim one translated its captions."""
+
+    def test_madlad_with_no_model_records_no_model(self):
+        # resolve_translation_model_id used to substitute the MADLAD default for
+        # an empty id, so a box deliberately running without a fallback recorded
+        # MADLAD-400 as having produced captions it never touched.
+        meta = build({"live_translation": {"translation_method": "madlad",
+                                           "translation_model": ""}})
+        assert meta["mt.model"] == ""
+        assert meta["mt.model_configured"] == ""
+
+    def test_an_llm_session_without_a_fallback_still_names_the_llm(self):
+        meta = build({"live_translation": {
+            "translation_method": "llm", "translation_model": "",
+            "llm": {"provider": "local", "gguf_repo": "r", "gguf_file": "m.gguf"}}})
+        assert meta["mt.model"] == "r/m.gguf"
+        assert meta["mt.model_configured"] == ""

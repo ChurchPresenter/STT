@@ -389,7 +389,7 @@
       "stacked"
     ],
     "translation_model": "facebook/nllb-200-distilled-600M",
-    "_translation_model_comment": "HuggingFace model ID for translation",
+    "_translation_model_comment": "HuggingFace model ID for translation. Empty means no model: on nllb/madlad that leaves captions untranslated, and on an LLM session it means no fallback for the captions the LLM declines — several GB not held in memory, which on a memory-bound machine is the room a larger LLM needs. Selectable as \"None\" on the Translations and Model Manager pages.",
     "use_gpu": true,
     "_use_gpu_comment": "Use GPU for translation model. Disable to run NLLB on CPU and free VRAM for Whisper",
     "warmup": true,

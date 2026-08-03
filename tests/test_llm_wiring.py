@@ -9,6 +9,8 @@ stt/ was fully covered at the time; what broke was the wiring around it, so that
 is what these pin down.
 """
 
+import threading
+
 import pytest
 
 from conftest import extract_definitions
@@ -408,3 +410,55 @@ class TestLocalFallbackReady:
         assert self.ns(cfg, tmp_path)["_local_fallback_ready"]() is True
         cfg["live_translation"]["llm"]["endpoint"] = ""
         assert self.ns(cfg, tmp_path)["_local_fallback_ready"]() is False
+
+
+class TestNoFallbackModelConfigured:
+    """Selecting "None" must be a clean no-op, not an error per caption.
+
+    An empty id used to reach load_translation_model(), where "" joined to
+    MODELS_DIR is a real directory — so it loaded the models folder as a model
+    and raised, once per caption and again on every preload. Guarding inside
+    get_live_translation_model covers all five callers at once, including
+    /api/translate/preload, which an offload client calls on every service start
+    and which would otherwise load the very model the choice was avoiding.
+    """
+
+    def ns(self, model_id, loader_calls, loaded=None):
+        def loader(*args, **kwargs):
+            loader_calls.append((args, kwargs))
+            return ("model", "tokenizer")
+
+        return extract_definitions(
+            "speech_to_text.py", ["get_live_translation_model"],
+            {"config": {"live_translation": {}},
+             "_live_translation_lock": threading.Lock(),
+             "_live_translation_model": loaded,
+             "_live_translation_tokenizer": None,
+             "_live_translation_model_loaded": False,
+             "_live_translation_model_loading": False,
+             "_live_translation_model_id": None,
+             "_live_translation_model_wanted": False,
+             "_live_translation_is_ct2": False,
+             "_live_translation_device": None,
+             "_no_fallback_model_logged": False,
+             "_ts_get": lambda k, d=None: d,
+             "load_translation_model": loader,
+             "_warmup_translation_model": lambda *a, **k: None,
+             "_record_session_meta_change": lambda *a, **k: None,
+             "make_db_world_readable": lambda *a: None})
+
+    @pytest.mark.parametrize("model_id", ["", "   ", None])
+    def test_no_model_returns_nothing_and_loads_nothing(self, model_id):
+        calls = []
+        ns = self.ns(model_id, calls)
+        assert ns["get_live_translation_model"](True, model_id=model_id) == (None, None)
+        assert calls == [], "an empty model id must never reach the loader"
+
+    def test_a_configured_model_still_loads(self):
+        # The regression pin: every existing install goes down this path.
+        calls = []
+        ns = self.ns("facebook/nllb-200-distilled-600M", calls)
+        model, tokenizer = ns["get_live_translation_model"](
+            True, model_id="facebook/nllb-200-distilled-600M")
+        assert (model, tokenizer) == ("model", "tokenizer")
+        assert len(calls) == 1

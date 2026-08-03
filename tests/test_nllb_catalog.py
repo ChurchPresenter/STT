@@ -32,9 +32,22 @@ class TestResolveTranslationModelId:
         cfg = {"translation_method": "madlad", "translation_model": "google/madlad400-7b-mt"}
         assert resolve_translation_model_id(cfg, MADLAD_DEFAULT) == "google/madlad400-7b-mt"
 
-    def test_madlad_engine_with_no_model_gets_the_default(self):
+    def test_no_model_means_no_model_on_every_engine(self):
+        # An empty id is a choice, not a stale value: the operator selected
+        # "None" to run without a fallback model. Substituting the default would
+        # resurrect a model nobody chose and, with its weights absent, download
+        # several GB of it — on the box whose memory the choice was freeing.
+        for method in ("madlad", "nllb", "llm", "whisper_translate"):
+            cfg = {"translation_method": method, "translation_model": ""}
+            assert resolve_translation_model_id(cfg, MADLAD_DEFAULT) == "", method
+
+    def test_a_missing_key_is_also_no_model(self):
         assert resolve_translation_model_id({"translation_method": "madlad"},
-                                            MADLAD_DEFAULT) == MADLAD_DEFAULT
+                                            MADLAD_DEFAULT) == ""
+
+    def test_whitespace_is_not_a_model(self):
+        cfg = {"translation_method": "madlad", "translation_model": "   "}
+        assert resolve_translation_model_id(cfg, MADLAD_DEFAULT) == ""
 
     def test_nllb_engine_keeps_its_model_even_if_odd(self):
         cfg = {"translation_method": "nllb", "translation_model": "something/custom"}
