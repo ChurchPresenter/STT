@@ -404,18 +404,19 @@ def llm_model_id(llm_cfg: Mapping[str, Any]) -> str:
 def _effective_local_model(lt: Mapping[str, Any], madlad_default: str) -> str:
     """The model that will actually translate, as far as this box can know.
 
-    When offloading with a blank remote model ("use Machine B's own model"), the
-    local model id is not what translates — recording it as mt.model would assert
-    the wrong model, which is the exact failure this table exists to prevent. It
-    stays empty until the remote is probed (see remote_provenance); the local
-    config value remains available as mt.model_configured.
+    When offloading, the local model id is never what translates — the offload
+    server runs its own engine and its own model, and this machine has no say in
+    either. Recording the local id as mt.model would assert the wrong model, which
+    is the exact failure this table exists to prevent. It stays empty until the
+    remote is probed (see remote_provenance); the local config value remains
+    readable as mt.model_configured.
 
     An LLM session is the same failure in a second form: translation_model still
     holds the NMT id, which on that session is only the fallback and is not what
     captioned the service. The LLM is named instead, and the NMT id stays
     readable as mt.model_configured.
     """
-    if is_offloaded(lt) and not _section(lt, "remote").get("model"):
+    if is_offloaded(lt):
         return ""
     if uses_llm(lt) and not is_offloaded(lt):
         return llm_model_id(_section(lt, "llm"))
@@ -540,7 +541,6 @@ def _add_translation(meta: Dict[str, str], config: Mapping[str, Any],
     if remote:
         _put(meta, "mt.remote.enabled", remote.get("enabled"))
         _put(meta, "mt.remote.endpoint", remote.get("endpoint"))
-        _put(meta, "mt.remote.model", remote.get("model"))
         _put(meta, "mt.remote.fallback", remote.get("fallback"))
         # A cache hit returns text translated under whatever prompt, model or
         # glossary was live when it was first stored — so a session can contain

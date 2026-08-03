@@ -440,9 +440,7 @@
       "max_text_chars": 8000,
       "_max_text_chars_comment": "Largest text /api/translate will accept from a paired machine, in characters. Over this it returns 413 rather than passing it to the model. Captions are short — the longest seen over 70k real captions was ~1100 chars — so this only catches a malformed or runaway payload, which would also be held whole as a server cache key.",
       "sync_dictionary_on_edit": true,
-      "_sync_dictionary_on_edit_comment": "When offloading, push glossary/dictionary edits to the remote server immediately so it doesn't keep translating with a stale glossary.",
-      "model": "",
-      "_model_comment": "NLLB model the remote (Machine B) should run, chosen from B's already-downloaded models. Empty = B uses its own configured model. Set from the 'Machine B model' dropdown on this machine's Translations page."
+      "_sync_dictionary_on_edit_comment": "When offloading, push glossary/dictionary edits to the remote server immediately so it doesn't keep translating with a stale glossary."
     },
     "trusted_clients": [],
     "_trusted_client_ports_comment": "Web UI port of each paired client, keyed by IP (learned at pairing, refreshed by the heartbeat). Lets this machine link back to the machines it translates for. Managed automatically.",

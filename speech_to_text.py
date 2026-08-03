@@ -675,12 +675,18 @@ _session_glossary_override = None  # {"glossary": {...}} pushed by a paired Mach
 
 # What a paired Machine A has actually taken over on this machine, as opposed to
 # what it could take over. A pairing on its own dictates nothing: A pushes a
-# model only when its picker names one — "(use Machine B's own model)" pushes
-# nothing — and pushes a language only when it switches one. Reported by
-# /api/translation/status so B's settings page locks the controls A really owns
-# instead of every control it might: locking on the mere existence of a pairing
-# shut the operator out of the LLM settings, which A never sends at all.
-_a_pushed = {"model": False, "language": False, "glossary": False}
+# language only when it switches one, and a glossary only when one is edited.
+# Reported by /api/translation/status so this machine's settings page locks the
+# controls A really owns instead of every control it might — locking on the mere
+# existence of a pairing shut the operator out of the LLM settings, which A never
+# sends at all.
+#
+# The model is deliberately absent. An offload server runs its own engine and its
+# own model, and A has no say in either: it asks for a translation and is told
+# what produced it. One machine owning that choice is the whole point — two
+# machines negotiating it was a picker on A listing B's files, a push route, a
+# reload, and a lock group, all to arrive at a setting B already had.
+_a_pushed = {"language": False, "glossary": False}
 
 
 def _is_trusted_translation_client(ip):
@@ -5135,12 +5141,12 @@ def update_config():
         # hot-reloadable (model/VAD are bound at worker init).
         _prev_whisper_model = config.get("whisper", {}).get("model")
         _prev_vad_enabled = config.get("vad", {}).get("enabled")
-        # Snapshot live-translation model/language too, so a change made via the
-        # generic /api/config editor (not the Translations tab) still propagates
-        # to a paired offload server. Scalars are captured by value here.
+        # Snapshot the target language too, so a change made via the generic
+        # /api/config editor (not the Translations tab) still reaches a paired
+        # offload server. The model is not snapshotted: an offload server runs its
+        # own model and this machine no longer has an opinion about it.
         _lt_prev = config.get("live_translation", {})
         _prev_lt_target = _lt_prev.get("target_language")
-        _prev_lt_remote_model = (_lt_prev.get("remote", {}) or {}).get("model", "")
         # Provenance snapshot before the merge, for the same reason: deep_merge
         # mutates config in place, so a post-merge read can't see what changed.
         # This is the hot-reload path (config edited outside the Translations tab),
@@ -5203,15 +5209,6 @@ def update_config():
         # remote keeps its old model/precision/voice after a /api/config edit.
         try:
             _lt_now = config.get("live_translation", {})
-            _now_remote_model = (_lt_now.get("remote", {}) or {}).get("model", "")
-            # Push only an EXPLICIT Machine B model; a blank picker means
-            # "(use Machine B's own model)" so A dictates nothing. B owns its own
-            # precision/backend (fp16, CTranslate2, GPU).
-            if _now_remote_model and _prev_lt_remote_model != _now_remote_model:
-                _propagate_model_settings_to_remote(
-                    _now_remote_model,
-                    _lt_now.get("translation_method", "nllb"),
-                )
             _new_target = _lt_now.get("target_language")
             if _new_target and _new_target != _prev_lt_target \
                     and supported_target(_new_target, _lt_now.get("translation_method", "nllb")):
@@ -6678,22 +6675,6 @@ def save_translation_settings():
             and supported_target(data["target_language"], new_method):
         _apply_translation_language_switch(data["target_language"])
 
-    # Propagate model-load settings (precision / model / GPU) to a paired remote
-    # translation server. These can't ride on the per-request payload (which only
-    # carries text/langs/generation_params), so without this the offload box keeps
-    # its old model even after you change it here. Only push when an EXPLICIT
-    # Machine B model is chosen — a blank picker means "(use Machine B's own
-    # model)", so A dictates nothing and B keeps whatever it's configured with.
-    # Precision/backend (fp16, CTranslate2, GPU) are always B's own and are never
-    # pushed — A (CUDA) and B (e.g. a 16 GB Mac) want different ones.
-    # Re-assert an EXPLICIT Machine B model on every save (not only when it
-    # changed here) so it reconciles a B that drifted to a different model on its
-    # own — otherwise A's picker and B could stay out of sync forever. Idempotent:
-    # B only reloads if the pushed model actually differs from what it's running.
-    new_remote_model = (config.get("live_translation", {}).get("remote", {}) or {}).get("model", "")
-    if new_remote_model:
-        _propagate_model_settings_to_remote(new_remote_model, new_method)
-
     # Settings changes are recorded by save_config via
     # _sync_session_meta_from_config. What that can't know is what the REMOTE is
     # now running, so an offload change still triggers a re-probe.
@@ -6705,37 +6686,6 @@ def save_translation_settings():
         "success": True,
         "message": "Translation settings saved. Changes take effect immediately."
     })
-
-
-def _propagate_model_settings_to_remote(translation_model, translation_method=None):
-    """Tell a paired remote translation server WHICH model + engine to run so it
-    reloads to match. Best-effort, off the request thread — never blocks or
-    breaks the local save. No-op when offload isn't enabled/configured.
-
-    Only the model + engine (correctness) are pushed. Precision/backend (fp16,
-    CTranslate2, GPU) are B's OWN hardware-local settings — A and B are usually
-    different hardware (CUDA client vs a low-RAM Mac), so B keeps its own."""
-    remote_cfg = config.get("live_translation", {}).get("remote", {})
-    if not (remote_cfg.get("enabled") and remote_cfg.get("endpoint")):
-        return
-
-    def _push():
-        try:
-            ep = _get_remote_endpoint_safe()
-            if not ep:
-                return
-            _payload = {"translation_model": translation_model}
-            if translation_method:
-                _payload["translation_method"] = translation_method
-            _get_remote_http_session().post(
-                ep.rstrip("/") + "/api/translate/model-settings",
-                json=_payload,
-                timeout=5,
-            )
-        except Exception as e:
-            print(f"[REMOTE] Could not propagate model settings to remote: {e}")
-
-    threading.Thread(target=_push, daemon=True).start()
 
 
 def _dictionary_sync_payload():
@@ -7558,92 +7508,9 @@ def translation_unpair():
         global _session_glossary_override
         _session_glossary_override = None
         # Nobody is paired, so nothing here is A's any more.
-        _a_pushed.update(model=False, language=False, glossary=False)
+        _a_pushed.update(language=False, glossary=False)
     socketio.emit("translation_pair_denied", {"ip": ip})
     return jsonify({"success": True})
-
-
-def _downloaded_nllb_models():
-    """NLLB models present (with weights) in this machine's models dir, as
-    [{model_id, name}]. Used to tell a paired Machine A which models this offload
-    server can actually run (A only offers B's downloaded models — no remote
-    download is triggered)."""
-    out = []
-    try:
-        name_by_id = {m["model_id"]: m.get("name") for m in get_default_nllb_models()}
-    except Exception:
-        name_by_id = {}
-    try:
-        if os.path.isdir(MODELS_DIR):
-            for item in sorted(os.listdir(MODELS_DIR)):
-                path = os.path.join(MODELS_DIR, item)
-                if not ((item.startswith("facebook--nllb-") or item.startswith("google--madlad400-")) and os.path.isdir(path)):
-                    continue
-                if not dir_has_weights(path):
-                    continue
-                model_id = item.replace("--", "/")
-                out.append({"model_id": model_id, "name": name_by_id.get(model_id) or model_id})
-    except Exception as e:
-        print(f"[REMOTE] Failed to list downloaded NLLB models: {e}")
-    return out
-
-
-@app.route("/api/translate/model-settings", methods=["POST"])
-def translate_remote_model_settings():
-    """Paired Machine A pushes model-load settings (precision / model / GPU) that
-    can't ride on per-request translate payloads. Apply them to this server's
-    config and reload the model so offloaded translations use them."""
-    client_ip = request.remote_addr
-    if not _is_trusted_translation_client(client_ip):
-        return jsonify({"error": "Not paired"}), 403
-
-    global config
-    data = request.get_json() or {}
-    lt = config.setdefault("live_translation", {})
-    # A named a model, so from here on the model and engine are A's to set —
-    # recorded even when the value matches what is already configured, because
-    # what this flag reports is who owns the setting, not whether it changed.
-    _a_pushed["model"] = True
-
-    # A only tells us WHICH model + engine to run. Precision/backend (fp16,
-    # CTranslate2, GPU) are this machine's own hardware-local settings and are
-    # deliberately NOT accepted here, so A can never override them on reload.
-    changed = []
-    if data.get("translation_model"):
-        val = str(data["translation_model"])
-        if val != lt.get("translation_model", ""):
-            lt["translation_model"] = val
-            changed.append("translation_model")
-    if data.get("translation_method"):
-        val = str(data["translation_method"])
-        if val != lt.get("translation_method", "nllb"):
-            lt["translation_method"] = val
-            changed.append("translation_method")
-
-    if changed:
-        save_config(config)
-        print(f"[REMOTE] Model settings updated by Machine A: {', '.join(changed)} — reloading model")
-
-        # Reload in the background: unload the old model, then eagerly load the
-        # new one so the first offloaded request doesn't block on the load. The
-        # model is expected to already be on disk (A only offers B's downloaded
-        # models), so this is a load, not a multi-GB download.
-        def _reload():
-            unload_live_translation_model()
-            use_gpu = config.get("live_translation", {}).get("use_gpu", True)
-            model_id = _resolve_live_translation_model_id(config.get("live_translation", {}))
-            get_live_translation_model(use_gpu, model_id)
-        threading.Thread(target=_reload, daemon=True).start()
-    return jsonify({"success": True, "changed": changed})
-
-
-@app.route("/api/translate/nllb-models", methods=["GET"])
-def translate_remote_nllb_models():
-    """A paired Machine A calls this to list the NLLB models THIS machine (the
-    offload server) has downloaded, so A can pick which one B should run."""
-    if not _is_trusted_translation_client(request.remote_addr):
-        return jsonify({"error": "Not paired"}), 403
-    return jsonify({"success": True, "models": _downloaded_nllb_models()})
 
 
 @app.route("/api/translate/heartbeat", methods=["POST"])
@@ -7738,7 +7605,7 @@ def translation_unpair_me():
     if not _trusted_translation_clients:
         global _session_glossary_override
         _session_glossary_override = None
-        _a_pushed.update(model=False, language=False, glossary=False)
+        _a_pushed.update(language=False, glossary=False)
         if is_live_translation_model_loaded():
             import threading
             threading.Thread(target=unload_live_translation_model, daemon=True).start()
@@ -8293,27 +8160,6 @@ def proxy_translate_preload():
         return jsonify(data), r.status_code
     except Exception as e:
         return jsonify({"success": False, "error": str(e)}), 502
-
-
-@app.route("/api/remote-translation/nllb-list", methods=["GET"])
-def proxy_remote_nllb_list():
-    """Proxy: list the NLLB models the paired Machine B has downloaded, so this
-    machine's Translations page can offer them for 'Machine B model'. Returns an
-    empty list (not an error) when B is unconfigured/unreachable, so the UI shows
-    the 'download on Machine B' note rather than an error."""
-    if not check_ip_whitelist():
-        return jsonify({"success": False, "error": "Access Denied"}), 403
-    endpoint = _get_remote_endpoint_safe()
-    if not endpoint:
-        return jsonify({"success": True, "models": []})
-    try:
-        r = _get_remote_http_session().get(endpoint.rstrip("/") + "/api/translate/nllb-models", timeout=5)
-        data = r.json()
-        models = data.get("models", []) if isinstance(data, dict) else []
-        return jsonify({"success": True, "models": models})
-    except Exception as e:
-        print(f"[REMOTE] Could not list Machine B models: {e}")
-        return jsonify({"success": True, "models": []})
 
 
 @app.route("/api/remote-translation/sync-dictionary", methods=["POST"])

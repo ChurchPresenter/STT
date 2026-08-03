@@ -238,12 +238,11 @@ class TestTranslation:
 class TestOffloadedTranslation:
     """On an offloaded session the remote's model translates, not the local one."""
 
-    def offload(self, remote_model="", **lt):
+    def offload(self, **lt):
         cfg = {"live_translation": {"translation_method": "nllb",
                                     "translation_model": "facebook/nllb-200-distilled-600M",
                                     "remote": {"enabled": True,
-                                               "endpoint": "192.168.2.52:8080",
-                                               "model": remote_model}}}
+                                               "endpoint": "192.168.2.52:8080"}}}
         cfg["live_translation"].update(lt)
         return cfg
 
@@ -260,17 +259,20 @@ class TestOffloadedTranslation:
                                                "endpoint": "192.168.2.52:8080"}}}
         assert build(cfg)["mt.offloaded"] == "false"
 
-    def test_blank_remote_model_does_not_claim_the_local_model(self):
-        # A blank remote model means "use Machine B's own model" - asserting the
-        # local id here would name a model that never ran.
-        meta = build(self.offload(remote_model=""))
+    def test_an_offloaded_session_never_claims_the_local_model(self):
+        # The offload server runs its own engine and its own model; this machine
+        # has no say in either. Asserting the local id would name a model that
+        # never ran, which is the failure this table exists to prevent.
+        meta = build(self.offload())
         assert meta["mt.model"] == ""
         # ...but the local config value stays visible for reference.
         assert meta["mt.model_configured"] == "facebook/nllb-200-distilled-600M"
 
-    def test_explicit_remote_model_is_dictated_so_local_id_stands(self):
-        meta = build(self.offload(remote_model="google/madlad400-3b-mt"))
-        assert meta["mt.model"] == "facebook/nllb-200-distilled-600M"
+    def test_the_dictated_model_key_is_gone(self):
+        # mt.remote.model recorded which model this machine told the server to
+        # run. It no longer tells it anything, so a key claiming otherwise would
+        # be a claim about a setting that does not exist.
+        assert "mt.remote.model" not in build(self.offload())
 
     def test_local_session_still_records_its_model(self):
         cfg = {"live_translation": {"translation_method": "nllb",

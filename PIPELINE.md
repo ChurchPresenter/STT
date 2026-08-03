@@ -468,9 +468,14 @@ up mixed; the per-row `translation_language` column records which row went where
 transcribing box has no capacity to translate as well. Nothing here happens unless
 `remote.enabled` is set and the two machines have been paired.
 
-When it is on, offload is not a stateless HTTP call. Machine A transcribes; Machine B owns the
-translation model — and A pushes settings into B, so a paired B is not running its own
-configuration.
+When it is on, offload is not a stateless HTTP call. Machine A transcribes; **Machine B owns
+translation entirely** — its engine, its model, its precision, its prompt. A asks for a
+translation and is told what produced it; it has no setting for any of that.
+
+A does push two things, and only two, because both are decisions made where the operator sits
+rather than properties of the translating box: the **target language** and the **glossary**.
+Both are reported by `/api/translation/status` as `a_pushed`, which is what B's settings page
+locks — being paired and being controlled are different things.
 
 ```mermaid
 flowchart TD
@@ -482,10 +487,15 @@ flowchart TD
     A -->|2 · confirm the code| B
     A -->|3 · heartbeat every 20 s, while transcribing| B
     A -->|4 · translate · 15 s timeout · 8000 char cap| B
-    A -->|5 · push target language, glossary,<br/>model and precision| B
+    A -->|5 · push target language and glossary| B
     A -->|6 · unload when finished| B
     B -.->|health, proxied on a 3 s timeout| A
 ```
+
+A used to name B's model too, from a picker listing B's downloaded files, pushed over a route
+that made B save and reload. It was deleted: two machines negotiating one choice, to arrive at a
+setting B already had — and it could knock a box running an LLM back onto an NMT model it was
+never meant to load.
 
 Pairing is **persisted**, so it survives a restart on both sides. B can serve several A's at
 once, which is why an unload request is refused if any *other* trusted client has been seen in

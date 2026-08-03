@@ -257,11 +257,8 @@
                         </select>
                     </div>
                     <div class="form-group" style="margin-bottom: 8px;">
-                        <label for="remote_model">Machine B translation model</label>
-                        <select id="remote_model" style="width: 100%; box-sizing: border-box; padding: 6px 8px; background: var(--bg-elevated); border: 1px solid var(--border); border-radius: 4px; color: var(--text-primary); font-size: 0.9em;">
-                        </select>
-                        <small id="remote_model_note" style="display:block; margin-top:4px; color: var(--text-secondary); font-size: 0.75em;">Chosen from models already downloaded on Machine B.</small>
-                        <small style="display:block; margin-top:4px; color: var(--text-secondary); font-size: 0.75em;">Machine B uses its <strong>own</strong> precision/backend settings (fp16, CTranslate2) — set those on Machine B. Here you only choose which model B runs. (The fp16/CTranslate2 checkboxes above apply to <em>this</em> machine's local model.)</small>
+                        <label>Machine B</label>
+                        <small style="display:block; margin-top:4px; color: var(--text-secondary); font-size: 0.75em;">Machine B runs its <strong>own</strong> engine, model and precision — set those on Machine B. This machine sends text and shows what comes back.</small>
                         <div id="remote_b_status" style="margin-top:8px; padding:6px 10px; background: var(--bg-elevated); border:1px solid var(--border); border-radius:4px; font-size:0.8em; color: var(--text-secondary);">Machine B status will appear here.</div>
                         <button type="button" onclick="refreshRemoteBStatus()" class="secondary" style="margin-top:6px; padding:3px 10px; font-size:0.75em; width:auto;">↻ Refresh Machine B status</button>
                     </div>
@@ -291,7 +288,7 @@
 
                 <div class="form-group">
                     <label for="translation_method">Translation Method</label>
-                    <select id="translation_method" data-a-controlled="model" onchange="onTranslationMethodChange()">
+                    <select id="translation_method" onchange="onTranslationMethodChange()">
                         <option value="nllb">NLLB Model (any language)</option>
                         <option value="madlad">MADLAD-400 (Google, any language)</option>
                         <option value="llm">LLM (instruction model, best terminology)</option>
@@ -420,7 +417,7 @@
                 <div id="nllb_settings_group">
                 <div class="form-group" id="local_model_settings">
                     <label for="translation_model">Translation Model</label>
-                    <select id="translation_model" data-a-controlled="model">
+                    <select id="translation_model">
                         <!-- Populated dynamically from downloaded NLLB models -->
                     </select>
                     <small id="model_hint">Select from downloaded translation models</small>
@@ -830,47 +827,6 @@
             }
         }
 
-        // Machine B model dropdown: populated from B's DOWNLOADED models (no
-        // remote download is triggered). _pendingRemoteModel holds the saved
-        // value to re-select once the async list arrives.
-        let _pendingRemoteModel = '';
-        async function loadRemoteModels() {
-            const sel = document.getElementById('remote_model');
-            const note = document.getElementById('remote_model_note');
-            if (!sel) return;
-            let models = [];
-            try {
-                const response = await fetch('/api/remote-translation/nllb-list');
-                const data = await response.json();
-                models = (data && data.models) || [];
-            } catch (e) {
-                console.error('Error loading Machine B models:', e);
-            }
-            sel.innerHTML = '';
-            const first = document.createElement('option');
-            first.value = '';
-            first.textContent = "(use Machine B's own model)";
-            sel.appendChild(first);
-            models.forEach(m => {
-                const o = document.createElement('option');
-                o.value = m.model_id;
-                o.textContent = m.name || m.model_id;
-                sel.appendChild(o);
-            });
-            if (note) {
-                if (models.length === 0) {
-                    note.textContent = "No NLLB models downloaded on Machine B — open Machine B's Model Manager to download one, then it'll appear here.";
-                    note.style.color = 'var(--warning)';
-                } else {
-                    note.textContent = 'Chosen from models already downloaded on Machine B.';
-                    note.style.color = 'var(--text-secondary)';
-                }
-            }
-            if (_pendingRemoteModel && [...sel.options].some(o => o.value === _pendingRemoteModel)) {
-                sel.value = _pendingRemoteModel;
-            }
-        }
-
         async function loadSettings() {
             try {
                 const response = await fetch('/api/translation/settings');
@@ -904,9 +860,6 @@
                     document.getElementById('remote_translation_endpoint').value = remoteCfg.endpoint || '';
                     document.getElementById('remote_translation_fallback').value = remoteCfg.fallback || 'skip';
                     document.getElementById('remote_sync_dictionary').checked = remoteCfg.sync_dictionary_on_edit !== false;
-                    // Machine B model — populated from B's downloaded models (async).
-                    _pendingRemoteModel = remoteCfg.model || '';
-                    loadRemoteModels();
                     toggleRemoteFields();
 
                     applyLlmSettings(currentSettings.llm);
@@ -1111,7 +1064,6 @@
                     enabled: document.getElementById('remote_translation_enabled').checked,
                     endpoint: document.getElementById('remote_translation_endpoint').value.trim(),
                     fallback: document.getElementById('remote_translation_fallback').value,
-                    model: document.getElementById('remote_model').value,
                     sync_dictionary_on_edit: document.getElementById('remote_sync_dictionary').checked,
                 },
                 translation_count: parseInt(document.getElementById('translation_alternatives').value),
@@ -1130,8 +1082,8 @@
                     markClean();
                     checkStatus();
                     if (window.refreshSysreqBanner) window.refreshSysreqBanner();
-                    // Reflect the saved Machine B model: refresh now, then again
-                    // after B has had a moment to reload the newly-pushed model.
+                    // Machine B may have been reconfigured on its own side while
+                    // this page was open; re-read what it reports it is running.
                     if (document.getElementById('remote_translation_enabled').checked) {
                         refreshRemoteBStatus();
                         setTimeout(refreshRemoteBStatus, 2500);
@@ -1673,7 +1625,7 @@
         function toggleRemoteFields() {
             const enabled = document.getElementById('remote_translation_enabled').checked;
             document.getElementById('remote_translation_fields').style.display = enabled ? '' : 'none';
-            if (enabled) { loadRemoteModels(); refreshRemoteBStatus(); }  // B's models + effective settings
+            if (enabled) refreshRemoteBStatus();  // what B is actually running
         }
 
         // Show what Machine B will actually run with (model / engine / backend /
@@ -1724,12 +1676,7 @@
                 }
                 const device = d.model_device ? String(d.model_device).toUpperCase() : '—';
                 const state = isLoaded ? '' : ' (configured — not loaded yet)';
-                // Blank picker = "(use Machine B's own model)" — A isn't dictating,
-                // so this is B's own choice, shown for reference only.
-                const picker = document.getElementById('remote_model');
-                const ownModel = picker && !picker.value
-                    ? '<div style="margin-bottom:2px;">ℹ️ A is not selecting B’s model — B uses its own (below):</div>' : '';
-                el.innerHTML = ownModel + '🖥️ Machine B ' + (isLoaded ? 'is running' : 'will run') + ': <strong>' + escapeHtml(model) + '</strong>' +
+                el.innerHTML = '🖥️ Machine B ' + (isLoaded ? 'is running' : 'will run') + ': <strong>' + escapeHtml(model) + '</strong>' +
                     '<br>Engine: ' + escapeHtml(engine) +
                     ' · ' + backendLabel + ': <strong>' + escapeHtml(backend) + '</strong>' +
                     ' · Device: ' + escapeHtml(device) + escapeHtml(state);

@@ -51,7 +51,7 @@ def call_status(live_translation, *, local_llm=None, device=None, is_ct2=False,
             "_translation_clients": {},
             "_translation_clients_lock": threading.Lock(),
             "_trusted_translation_clients": set(trusted),
-            "_a_pushed": dict(a_pushed or {"model": False, "language": False, "glossary": False}),
+            "_a_pushed": dict(a_pushed or {"language": False, "glossary": False}),
             "_translation_client_ports": {},
             "_pending_pair_requests": {},
             "_live_translation_model": None,
@@ -179,13 +179,20 @@ class TestWhatMachineAControls:
 
     def test_reports_only_what_was_pushed(self):
         body = call_status(NMT, trusted=["192.168.2.62"],
-                           a_pushed={"model": True, "language": False, "glossary": False})
-        assert body["a_pushed"] == ["model"]
+                           a_pushed={"language": True, "glossary": False})
+        assert body["a_pushed"] == ["language"]
+
+    def test_the_model_is_never_something_a_can_take_over(self):
+        # A cannot set this machine's model or engine at all, so no pairing state
+        # may make B's settings page lock those controls.
+        for pushed in ({"language": True, "glossary": True}, {"language": False, "glossary": False}):
+            body = call_status(NMT, trusted=["192.168.2.62"], a_pushed=pushed)
+            assert "model" not in body["a_pushed"]
 
     def test_reports_several_and_stays_sorted(self):
         body = call_status(NMT, trusted=["192.168.2.62"],
-                           a_pushed={"model": True, "language": True, "glossary": True})
-        assert body["a_pushed"] == ["glossary", "language", "model"]
+                           a_pushed={"language": True, "glossary": True})
+        assert body["a_pushed"] == ["glossary", "language"]
 
     def test_unpaired_machine_reports_nothing_controlled(self):
         # No caller is paired, so the field must not leak a stale claim.

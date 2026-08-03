@@ -1052,7 +1052,7 @@
             function setLocked(locked, ips, active, pushed) {
                 document.body.classList.toggle('serving-mode', locked);
                 document.body.classList.toggle('serving-active', locked && active);
-                var NAMES = { model: 'the model', language: 'the language', glossary: 'the glossary' };
+                var NAMES = { language: 'the language', glossary: 'the glossary' };
                 var owned = (pushed || []).map(function (k) { return NAMES[k] || k; });
                 if (banner) {
                     if (locked && owned.length) {
