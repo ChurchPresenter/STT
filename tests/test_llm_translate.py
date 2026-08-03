@@ -384,7 +384,7 @@ class TestNumbersSurvived:
         # The regression: the forms were a hand-written table stopping at twelve, so a
         # correct caption for a real service was rejected as having lost its figure.
         assert numbers_survived("прочитаем первые 13 стихов",
-                                "We will read the first thirteen verses.", "en")
+                                "we will read the first thirteen verses", "en")
 
     @pytest.mark.parametrize("digits,words", [
         ("13", "thirteen"), ("19", "nineteenth"), ("20", "twenty"), ("21", "twenty-first"),
@@ -798,24 +798,25 @@ class TestCoverageFloor:
     an operator cannot spot from the English alone, because the result is fluent.
     """
 
+    # The shapes below are constructed to match the real failures rather than quote
+    # them: a sermon sentence is identifiable speech by a named person, and belongs in
+    # the local fixture (see TestRealServiceCaptions), not in a public repository.
+
     def test_a_caption_that_kept_only_the_quotation_is_rejected(self):
-        # Verbatim from 2026-08-02: the speaker's framing sentence is simply gone.
+        # The observed shape: a quotation survives, the sentence around it does not.
         src = ("Потом он скажет так, «Отче, почему ты оставил меня?» И это самое "
-               "трудное, что человек может себе представить в такую "
-               "минуту.")
+               "трудное, что человек может себе представить в такую минуту.")
         assert validate_translation("Father, why have you forsaken me?", src, "en") is None
 
     def test_a_full_sentence_answered_with_a_thank_you_is_rejected(self):
-        src = ("Третье, что мы видим в этом отрывке, когда он объяснил притчу, "
-               "это радость.")
-        assert validate_translation("Thank you.", src, "en") is None
+        src = "Третье, что мы видим в этом отрывке, когда он объяснил притчу, это радость."
+        assert validate_translation("Joy.", src, "en") is None
 
     def test_a_faithful_translation_of_the_same_source_passes(self):
-        src = ("Третье, что мы видим в этом отрывке, когда он объяснил притчу, "
-               "это радость.")
+        src = "Третье, что мы видим в этом отрывке, когда он объяснил притчу, это радость."
         assert validate_translation(
-            "The second thing I see in this prayer, when Jesus described it, "
-            "is to give thanks.", src, "en")
+            "The third thing we see in this passage, when he explained the parable, "
+            "is joy.", src, "en")
 
     def test_a_natural_compression_passes(self):
         # 17 words -> 9 is 0.53, comfortably above the floor and a good caption.

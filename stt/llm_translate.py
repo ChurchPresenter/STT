@@ -102,15 +102,16 @@ DEFAULT_SYSTEM_PROMPT_TEMPLATE = (
     # The sentences below were measured, not reasoned about. They exist because the
     # input is not clean text — it is speech transcribed by Whisper, and the model
     # treated a misheard word as a cue to supply something it recognised instead:
-    # "Евангелие от Иоанна, 3 глава, 14 стих." came back as a recitation of a
-    # different verse entirely, and a member's name and patronymic came back half-translated.
+    # a bare "3 глава, 14 стих" came back as a recitation of a different verse
+    # entirely, and a mis-transcribed Russian patronymic came back half-translated,
+    # an English given name in front of untouched Cyrillic.
     #
     # An earlier wording said "translate what is written, as written". It scored 8
     # fixed and 0 broken on the service it was written against — and then on a
     # held-out service the model read "as written" as leave it as it is, echoing
-    # short announcements and whole Russian sentences back untranslated. That is the reason
-    # for the explicit "must come back in {language}" clause, and the reason both
-    # services are now replayed before any wording here is believed.
+    # short announcements and whole Russian sentences back untranslated. That is the
+    # reason for the explicit "must come back in {language}" clause, and the reason
+    # both services are now replayed before any wording here is believed.
     #
     # Measured over both services, ~1210 captions, against the prompt without these
     # sentences: 10 captions fixed, 5 broken. That is the honest size of it — a net
@@ -201,7 +202,7 @@ _RETRY_NOTES = {
     # answer with a bare "John 3:16" and drop the sentence the speaker built around the
     # reference — a numbers rejection traded for a too_short one. Telling it to
     # translate the words around the reference broke the opposite case, where the
-    # caption really is nothing but a bare "9 глава, 22 стих" So the note now states
+    # caption really is nothing but a bare "9 глава, 22 стих". So the note now states
     # the rule both cases share: translate the words that are there, whichever they are.
     REJECT_NUMBERS: (
         "Your previous answer dropped or changed the chapter and verse numbers. Keep "
@@ -445,9 +446,9 @@ _NUMBER = re.compile(r"\d+")
 # Spelled-out forms, so "3 глава" -> "chapter three" is not read as a dropped number.
 #
 # These were a hand-written table stopping at twelve, and a replay found the cliff: a
-# correct caption for a source that wrote the figure 13 — "We will read the first
-# thirteen verses." — was rejected as a lost number, because thirteen was one past the
-# end of the table. Chapter and verse numbers do not stop at twelve, so the forms are
+# correct caption reading "the first thirteen verses", for a source that wrote the
+# figure 13, was rejected as a lost number because thirteen was one past the end of
+# the table. Chapter and verse numbers do not stop at twelve, so the forms are
 # generated instead, through the range where a translation still writes words rather
 # than digits.
 #
@@ -647,16 +648,17 @@ def check_translation(raw: Optional[str], source: str, target_lang: str, *,
     other rule here bounds a model that says too much; this one catches the model that
     quietly says less, which is the failure the length rules were blind to. Replaying
     the 2026-08-02 services found six captions that passed every other check while
-    dropping whole clauses — "a sentence naming the second thing a speaker saw in a passage"
-    came back as "Thank you." — fluent, correctly scripted, number-clean, and wrong.
+    dropping whole clauses: a sentence naming the second thing a speaker saw in a
+    passage came back as "Thank you." — fluent, correctly scripted, number-clean,
+    and wrong.
 
     The threshold is measured, not guessed: over the 36,307 aligned source/translation
     pairs in the session archive, translations below 0.45x their source's word count
     are 0.04-0.11% of every source-length band. So the rule almost never fires on a
     real translation, while catching six per service. It is deliberately blind to
     sources under ``min_coverage_source_words``, where a ratio on a handful of words
-    says nothing — "один, два, а может быть и три." to "one, two, perhaps
-    three." is a good caption at 0.50.
+    says nothing — a source counting "one, two, maybe three" compresses to about half
+    its length in English and is a perfectly good caption at 0.50.
 
     This rule in particular is why a rejection must not simply mean "use NMT": the
     borderline cases it catches are captions the LLM got mostly right, and the NMT

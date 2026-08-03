@@ -1,6 +1,8 @@
 """Offline replay harness for translation changes (stt/translation_replay.py)."""
 
+import glob
 import json
+import os
 import sqlite3
 
 import pytest
@@ -157,7 +159,7 @@ class TestSummarize:
         long_source = "Третье, что мы видим в этом отрывке, когда он объяснил притчу, это радость."
         summary = summarize([
             result(long_source, "Thank you."),
-            result(long_source, "The second thing I see in this prayer, when Jesus described it, is to give thanks."),
+            result(long_source, "The third thing we see in this passage, when he explained the parable, is joy."),
         ], "run")
         assert summary.short_outputs == 1
 
@@ -389,3 +391,60 @@ class TestPerRowProvenance:
         ])
         translation_replay.main([db])
         assert "shipped by: llm=1, nmt=1" in capsys.readouterr().out
+
+
+class TestRealServiceDatabases:
+    """The harness against real sessions, when the machine holding them runs the suite.
+
+    The harness is public — it is just code. The sessions are not: a service database
+    is verbatim congregation speech, and a replay run is that speech again alongside a
+    model's translation of every line. Both stay on the machine that recorded them
+    (see .gitignore), so these cases skip everywhere else and CI stays green.
+
+    Drop or symlink session databases into tests/fixtures/sessions/ to enable them.
+    What they check is what synthetic rows cannot: that a real schema — years of
+    migrations, partial rows, denied rows, columns that postdate the file — still
+    loads, and that reading one leaves it untouched.
+    """
+
+    DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fixtures", "sessions")
+
+    @pytest.fixture
+    def databases(self):
+        found = sorted(glob.glob(os.path.join(self.DIR, "*.db"))) if os.path.isdir(self.DIR) else []
+        if not found:
+            pytest.skip("no local session databases; see tests/fixtures/sessions/ in .gitignore")
+        return found
+
+    def test_every_local_session_loads(self, databases):
+        for path in databases:
+            pairs = load_session_pairs(path)
+            assert pairs, f"{os.path.basename(path)} yielded no captions"
+            assert all(p.source.strip() for p in pairs)
+            assert all(p.row_id > 0 for p in pairs)
+
+    def test_reading_leaves_the_database_untouched(self, databases):
+        # An operator's recording is evidence. Reading it must not journal, and must
+        # not leave sidecars beside a file this tool does not own.
+        for path in databases:
+            before = os.stat(path).st_mtime_ns, os.path.getsize(path)
+            load_session_pairs(path)
+            assert (os.stat(path).st_mtime_ns, os.path.getsize(path)) == before
+            assert not os.path.exists(path + "-wal")
+            assert not os.path.exists(path + "-shm")
+
+    def test_shipped_captions_score_without_a_model(self, databases):
+        for path in databases:
+            pairs = load_session_pairs(path)
+            results = shipped_run(pairs, "en")
+            assert len(results) == len(pairs)
+            summary = summarize(results, os.path.basename(path))
+            # A real service is overwhelmingly captions that worked. A rule that
+            # rejects a large share of one is a rule that is wrong, not a service
+            # that was bad.
+            translated = [r for r in results if r.pair.shipped]
+            if translated:
+                rejected = sum(1 for r in translated if not r.ok)
+                assert rejected / len(translated) < 0.10, (
+                    f"{os.path.basename(path)}: {rejected}/{len(translated)} shipped "
+                    f"captions rejected — {summary.by_reason}")

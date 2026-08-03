@@ -58,3 +58,18 @@ MARKETING.md
 # translations: kept on the machine that recorded it, never in a public repository.
 # tests/ skips the cases that need it when the file is absent, so CI stays green.
 tests/fixtures/real_captions.json
+
+# Replay material, same rule and for the same reason. stt/translation_replay.py is
+# the public part — the harness is just code, and belongs in the repository. What it
+# reads and writes is a service: session databases and their copies, and the run
+# files holding every caption a service produced alongside a model's translation of
+# it. Those stay on the machine that recorded them, and they would bloat the
+# repository besides — a single service is a few megabytes of JSON.
+# Work in the scratchpad by preference; these patterns are the backstop for when
+# something lands here anyway.
+*.db
+*.db-wal
+*.db-shm
+tests/fixtures/sessions/
+replay-runs/
+*.replay.json
