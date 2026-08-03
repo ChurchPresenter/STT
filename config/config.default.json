@@ -492,7 +492,7 @@
       "n_gpu_layers": "auto",
       "_n_gpu_layers_comment": "provider=local: layers offloaded to the GPU. 'auto' = all when an accelerator is present, none otherwise; -1 = all; 0 = CPU only. CPU works everywhere and is the safe default — a caption is short (measured p50 19 output tokens), so CPU is slow but viable.",
       "n_ctx": 2048,
-      "_n_ctx_comment": "provider=local: context window. Captions are short; 2048 is ample and keeps memory down."
+      "_n_ctx_comment": "provider=local: context window. Captions are short; 2048 is ample and keeps memory down. Clamped to a minimum of 1024: below that the system prompt plus the reserved output leaves no room for the caption itself, so every caption declines for not fitting and LLM translation is silently off."
     }
   },
   "corrections": {

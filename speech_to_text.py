@@ -6502,7 +6502,7 @@ def save_translation_settings():
         if "max_tokens" in _sent:
             _llm["max_tokens"] = coerce_int(_sent.get("max_tokens"), 160, lo=16, hi=1024)
         if "n_ctx" in _sent:
-            _llm["n_ctx"] = coerce_int(_sent.get("n_ctx"), 2048, lo=512, hi=32768)
+            _llm["n_ctx"] = coerce_int(_sent.get("n_ctx"), 2048, lo=_LLM_MIN_N_CTX, hi=32768)
         if "timeout_ms" in _sent:
             _llm["timeout_ms"] = coerce_int(_sent.get("timeout_ms"), 8000, lo=500, hi=120000)
         if "warmup_timeout_ms" in _sent:
@@ -14763,7 +14763,7 @@ def get_local_llm(llm_cfg_override=None):
                   f"(n_gpu_layers={n_gpu_layers})...", flush=True)
             _local_llm = Llama(
                 model_path=path,
-                n_ctx=coerce_int(llm_cfg.get("n_ctx"), 2048, lo=512, hi=32768),
+                n_ctx=coerce_int(llm_cfg.get("n_ctx"), 2048, lo=_LLM_MIN_N_CTX, hi=32768),
                 n_gpu_layers=n_gpu_layers,
                 verbose=False,
             )
@@ -14853,7 +14853,7 @@ def _llm_token_counter():
 def _llm_budget_for(llm_cfg, system_prompt, max_tokens):
     """User-text token budget for the configured model, and the counter used for it."""
     counter = _llm_token_counter()
-    n_ctx = coerce_int(llm_cfg.get("n_ctx"), 2048, lo=512, hi=32768)
+    n_ctx = coerce_int(llm_cfg.get("n_ctx"), 2048, lo=_LLM_MIN_N_CTX, hi=32768)
     return _llm_input_budget(n_ctx, max_tokens, system_prompt, counter=counter), counter
 
 
@@ -14889,6 +14889,14 @@ def _translate_via_local_llm(text, system_prompt, max_tokens, llm_cfg_override=N
 # Below this much remaining budget a second attempt cannot finish in time, so the
 # caption goes to the NMT model instead of arriving after the speaker has moved on.
 _LLM_RETRY_MIN_SECONDS = 1.5
+
+# The smallest context window the shipped prompt can actually work in. It used to be
+# 512, which stopped meaning anything once the prompt grew: the system prompt plus the
+# output reservation left a budget of zero, so every caption declined for not fitting
+# and LLM translation was silently off for anyone who had lowered the setting. A small
+# window is meant to cost context, not captions. At 1024 the shipped prompt still
+# leaves ~470 tokens, against a p99.9 caption of 40 words.
+_LLM_MIN_N_CTX = 1024
 
 
 def _llm_retry_enabled(llm_cfg):

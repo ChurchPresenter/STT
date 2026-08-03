@@ -98,7 +98,19 @@ DEFAULT_SYSTEM_PROMPT_TEMPLATE = (
     "input is a fragment, translate it as a fragment. If the input is a scripture "
     "reference, translate only the reference; do not quote the passage. Keep chapter "
     "and verse numbers exactly as spoken: never replace a reference with the text it "
-    "points to, and never expand a range such as 'verses 2-9' into a list of numbers."
+    "points to, and never expand a range such as 'verses 2-9' into a list of numbers. "
+    # The two sentences below were measured, not reasoned about. Replaying a service
+    # with and without them: rejections 13 -> 5 over 603 captions, 8 captions fixed and
+    # none broken, at no cost in latency. They exist because the input is not clean
+    # text — it is speech transcribed by Whisper, and the model treated a misheard
+    # word as a cue to supply something it recognised instead. "Евангелие от Иоанна,
+    # 3 глава, 14 стих." came back as a recitation of a different verse entirely, and
+    # a member's name and patronymic came back half-translated.
+    "The speech was transcribed automatically and may contain misheard words, "
+    "especially names of Bible books. Translate what is written, as written — if a "
+    "word looks garbled, render it as best you can, but never replace it with a "
+    "passage or a phrase you recognise. Translate every clause of the input: if the "
+    "input has three sentences, the output has three sentences."
 )
 
 

@@ -648,16 +648,27 @@ class TestArchiveHeadroom:
         budget = input_token_budget(2048, 160, DEFAULT_SYSTEM_PROMPT_TEMPLATE)
         assert input_fits(self.WORST_STACKED, budget)
 
+    # Mirrors _LLM_MIN_N_CTX in the monolith. Raised from 512 when the shipped prompt
+    # grew: at 512 the prompt and the output reservation left a budget of zero, so
+    # every caption declined for not fitting and LLM translation was silently off.
+    SMALLEST_WINDOW = 1024
+
     def test_the_same_input_does_not_fit_the_smallest_configurable_window(self):
-        # n_ctx bottoms out at 512 in the UI; that is the one setting that turns this
-        # guard from inert into load-bearing.
-        budget = input_token_budget(512, 160, DEFAULT_SYSTEM_PROMPT_TEMPLATE)
+        # The smallest window the UI allows is the one setting that turns this guard
+        # from inert into load-bearing.
+        budget = input_token_budget(self.SMALLEST_WINDOW, 160, DEFAULT_SYSTEM_PROMPT_TEMPLATE)
         assert not input_fits(self.WORST_STACKED, budget)
 
     def test_a_typical_caption_still_fits_the_smallest_window(self):
         # Degrading must cost context, not captions.
-        budget = input_token_budget(512, 160, DEFAULT_SYSTEM_PROMPT_TEMPLATE)
+        budget = input_token_budget(self.SMALLEST_WINDOW, 160, DEFAULT_SYSTEM_PROMPT_TEMPLATE)
         assert input_fits(SRC, budget)
+
+    def test_the_shipped_prompt_leaves_a_usable_budget_at_the_floor(self):
+        # The regression the floor exists to prevent: a prompt long enough to consume
+        # the whole window turns every caption into a decline, silently.
+        budget = input_token_budget(self.SMALLEST_WINDOW, 160, DEFAULT_SYSTEM_PROMPT_TEMPLATE)
+        assert budget > 300, f"only {budget} tokens left for the caption"
 
 
 class TestExpansionCeiling:
