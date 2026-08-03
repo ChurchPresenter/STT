@@ -723,9 +723,19 @@
                                 <input type="text" id="gguf_repo_input" placeholder="ggml-org/gemma-3-4b-it-GGUF"
                                        style="flex: 1 1 260px; min-width: 0;" list="gguf_repo_suggestions">
                                 <datalist id="gguf_repo_suggestions">
-                                    <option value="ggml-org/gemma-3-4b-it-GGUF">Gemma 3 4B Instruct — small, fast, good terminology</option>
-                                    <option value="bartowski/Qwen2.5-7B-Instruct-GGUF">Qwen2.5 7B Instruct — stronger, needs more memory</option>
-                                    <option value="bartowski/Llama-3.2-3B-Instruct-GGUF">Llama 3.2 3B Instruct — smallest useful option</option>
+                                    <!-- Sizes are the Q4_K_M quantisation, the one worth
+                                         downloading in almost every case. Every entry here
+                                         is an INSTRUCTION model: a reasoning model reasons
+                                         into the reply, which the caption validator rejects,
+                                         so it is slower and worse than the model it replaced.
+                                         Repos verified to exist and publish Q4_K_M. -->
+                                    <option value="bartowski/Llama-3.2-3B-Instruct-GGUF">Llama 3.2 3B Instruct — ~2.0 GB, smallest useful option</option>
+                                    <option value="ggml-org/gemma-3-4b-it-GGUF">Gemma 3 4B Instruct — ~2.3 GB, fast, good terminology</option>
+                                    <option value="bartowski/Qwen2.5-7B-Instruct-GGUF">Qwen2.5 7B Instruct — ~4.4 GB, stronger</option>
+                                    <option value="bartowski/Ministral-8B-Instruct-2410-GGUF">Ministral 8B Instruct — ~4.6 GB</option>
+                                    <option value="bartowski/aya-expanse-8b-GGUF">Aya Expanse 8B — ~4.7 GB, built for multilingual work</option>
+                                    <option value="ggml-org/gemma-3-12b-it-GGUF">Gemma 3 12B Instruct — ~6.8 GB, needs ~11 GB free RAM</option>
+                                    <option value="bartowski/Qwen2.5-14B-Instruct-GGUF">Qwen2.5 14B Instruct — ~8.4 GB, needs ~13 GB free RAM</option>
                                 </datalist>
                                 <button class="model-btn" onclick="loadGgufRepoFiles()" style="background: var(--accent); padding: 5px 10px; font-size: 0.8em;">Browse Quantisations</button>
                             </div>
@@ -2880,7 +2890,20 @@
                 const activeLlm = active.llm || {};
                 const isActive = f => activeLlm.gguf_repo === data.repo_id && activeLlm.gguf_file === f.name;
 
-                listEl.innerHTML = data.files.map(f => {
+                // Say it before the download, not after a service. A reasoning model
+                // writes its thinking into the reply; the caption validator rejects
+                // that, so every caption falls back to the fallback model — slower
+                // and worse than whatever it replaced.
+                const warning = data.reasoning
+                    ? '<div class="model-item" style="border-left: 3px solid var(--warning);">' +
+                      '<div class="model-info"><div class="model-name" style="color: var(--warning);">' +
+                      '⚠️ This looks like a reasoning model</div>' +
+                      '<div class="model-meta">It reasons aloud into its reply, which is rejected as a ' +
+                      'caption — so every caption would fall back to the fallback model. Choose an ' +
+                      'instruction model instead (Instruct / -it).</div></div></div>'
+                    : '';
+
+                listEl.innerHTML = warning + data.files.map(f => {
                     // Q4_K_M is the usual size/quality balance, so it is called out
                     // rather than leaving a dozen equally-weighted choices.
                     const recommended = /Q4_K_M/i.test(f.name);

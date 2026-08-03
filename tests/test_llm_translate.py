@@ -23,6 +23,7 @@ from stt.llm_translate import (
     language_name,
     local_model_path,
     looks_like_reasoning_model,
+    looks_like_reasoning_name,
     resolve_gpu_layers,
     retry_system_prompt,
     scan_gguf_models,
@@ -855,3 +856,60 @@ class TestCoverageFloor:
     def test_the_rule_is_named_in_the_check_variant(self):
         src = " ".join(["слово"] * 20)
         assert check_translation(" ".join(["word"] * 5), src, "en")[1] == "too_short"
+
+
+class TestLooksLikeReasoningName:
+    """Catch a reasoning model before the download, not after the service.
+
+    A reasoning model is the one way to pick a "better" model and get strictly
+    worse captions: it emits its chain of thought into the reply, the validator
+    rejects it, and every caption falls back — slower and weaker than the model it
+    replaced. looks_like_reasoning_model() is the real test but needs the model
+    downloaded and answering, which is several GB too late to help a picker.
+    """
+
+    @pytest.mark.parametrize("name", [
+        "bartowski/QwQ-32B-GGUF",
+        "bartowski/Qwen3-8B-GGUF",
+        "deepseek-ai/DeepSeek-R1-Distill-Qwen-7B",
+        "some/model-Thinking-GGUF",
+        "microsoft/phi-4-reasoning",
+        "AIDC-AI/Marco-o1",
+        "Skywork/Skywork-o1-Open-Llama-3.1-8B",
+        "open-thoughts/OpenThinker-7B",
+        "LGAI-EXAONE/EXAONE-Deep-7.8B",
+        "mistralai/Magistral-Small-2506",
+    ])
+    def test_reasoning_families_are_flagged(self, name):
+        assert looks_like_reasoning_name(name) is True
+
+    @pytest.mark.parametrize("name", [
+        "ggml-org/gemma-3-4b-it-GGUF",
+        "ggml-org/gemma-3-12b-it-GGUF",
+        "bartowski/Qwen2.5-7B-Instruct-GGUF",
+        "bartowski/Qwen2.5-14B-Instruct-GGUF",
+        "bartowski/Llama-3.2-3B-Instruct-GGUF",
+        "bartowski/aya-expanse-8b-GGUF",
+        "bartowski/Ministral-8B-Instruct-2410-GGUF",
+    ])
+    def test_instruction_models_are_not_flagged(self, name):
+        # These are the models actually worth running; a false positive here would
+        # steer an operator away from the right choice.
+        assert looks_like_reasoning_name(name) is False
+
+    def test_qwen2_is_not_qwen3(self):
+        # The version digit is the whole difference: 2.5 answers, 3 thinks first.
+        assert looks_like_reasoning_name("Qwen2.5-7B") is False
+        assert looks_like_reasoning_name("Qwen3-8B") is True
+
+    @pytest.mark.parametrize("name", ["Qwen3_8B", "Qwen3/8B", "qwen3 8b", "  QWEN3-8B  "])
+    def test_separators_and_case_do_not_hide_it(self, name):
+        assert looks_like_reasoning_name(name) is True
+
+    @pytest.mark.parametrize("name", [None, "", "   "])
+    def test_no_name_is_not_a_claim(self, name):
+        assert looks_like_reasoning_name(name) is False
+
+    def test_a_quantisation_name_is_not_mistaken_for_r1(self):
+        # "r1" alone would flag half of Llama's file names.
+        assert looks_like_reasoning_name("Llama-3.1-8B-Instruct-Q4_K_M.gguf") is False

@@ -809,6 +809,53 @@ def fit_context_prefix(context_texts: Sequence[str], target_text: str, budget: i
     return []
 
 
+# Model families that reason aloud. A reasoning model is the one way to pick a
+# "better" model and get strictly worse captions: it emits its chain of thought
+# into the reply, which consumes the token budget before the translation and which
+# several of them will not disable. validate_translation catches the output, so
+# every caption falls back — a slower, weaker service than the model it replaced.
+#
+# Matched on the name because the alternative is finding out after a multi-GB
+# download and a service. Names are normalised to lowercase with separators
+# collapsed, so "Qwen3-8B", "qwen3_8b" and "Qwen3/8B" all match.
+#
+# Deliberately specific rather than clever: "r1" alone would flag Llama-3.1's
+# quantisation names, and "think" alone would flag anything with "rethinking" in
+# a fine-tune's name. Each entry here names a family that actually reasons.
+_REASONING_NAME_MARKERS = (
+    "qwq",
+    "qwen3",            # thinking is its default mode
+    "deepseek-r1",
+    "r1-distill",
+    "-thinking",
+    "thinking-",
+    "reasoning",
+    "marco-o1",
+    "skywork-o1",
+    "openthinker",
+    "exaone-deep",
+    "magistral",
+    "-o1-",
+)
+
+
+def looks_like_reasoning_name(name: Optional[str]) -> bool:
+    """Whether a model or repo name belongs to a family that reasons aloud.
+
+    A name check, not a behaviour check: :func:`looks_like_reasoning_model` is the
+    real test but needs the model downloaded and answering, which is several GB and
+    a restart too late to be useful in a picker. This is the one that can warn
+    before the download.
+
+    False here does not mean "safe" — it means "not a family we know of". The
+    behavioural check still runs on the test call.
+    """
+    if not name:
+        return False
+    normalised = re.sub(r"[\s_/.]+", "-", str(name).strip().lower())
+    return any(marker in normalised for marker in _REASONING_NAME_MARKERS)
+
+
 def looks_like_reasoning_model(response: Mapping[str, Any]) -> bool:
     """Whether a probe response shows the model reasoning rather than answering.
 

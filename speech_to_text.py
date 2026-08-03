@@ -839,6 +839,7 @@ from stt.llm_translate import (
     input_token_budget as _llm_input_budget,
     local_model_path as _llm_local_model_path,
     looks_like_reasoning_model as _llm_looks_like_reasoning,
+    looks_like_reasoning_name as _llm_reasoning_name,
     resolve_gpu_layers as _llm_resolve_gpu_layers,
     scan_gguf_models as _scan_gguf_models,
     extract_chat_text as _llm_extract_text,
@@ -7281,10 +7282,15 @@ def list_gguf_models():
     """
     if not check_ip_whitelist():
         return jsonify({"success": False, "error": "Access Denied"}), 403
+    models = _scan_gguf_models(MODELS_DIR)
+    # A reasoning model already on disk is still the wrong model to select, so the
+    # picker marks it rather than leaving it to look like any other choice.
+    for entry in models:
+        entry["reasoning"] = _llm_reasoning_name(entry.get("repo", ""))
     return jsonify({
         "success": True,
         "runtime_available": local_llm_available(),
-        "models": _scan_gguf_models(MODELS_DIR),
+        "models": models,
     })
 
 
@@ -7321,6 +7327,12 @@ def list_gguf_repo_files():
         f["downloaded"] = f["name"] in downloaded
 
     return jsonify({"success": True, "repo_id": repo_id,
+                    # Flagged before the download rather than after a service. A
+                    # reasoning model emits its chain of thought into the reply, the
+                    # validator rejects it, and every caption falls back — a slower,
+                    # weaker service than the model it replaced. Several GB is a long
+                    # way to travel to learn that.
+                    "reasoning": _llm_reasoning_name(repo_id),
                     "files": sorted(files, key=lambda f: f["name"])})
 
 
