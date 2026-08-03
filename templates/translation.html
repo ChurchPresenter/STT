@@ -255,6 +255,7 @@
                             <option value="skip">Skip translation (show original text)</option>
                             <option value="local">Fall back to local translation</option>
                         </select>
+                        <small id="local_fallback_warning" style="display:none; margin-top:4px; color: var(--warning); font-size: 0.75em;"></small>
                     </div>
                     <div class="form-group" style="margin-bottom: 8px;">
                         <label>Machine B</label>
@@ -1228,6 +1229,20 @@
                     } else {
                         remoteOpenRow.style.display = 'none';
                     }
+                    // "Fall back to local translation" silently becomes "skip" when
+                    // no local model is on disk, and both look the same on screen.
+                    const lfw = document.getElementById('local_fallback_warning');
+                    if (lfw) {
+                        if (data.local_fallback_ready === false) {
+                            lfw.textContent = '⚠️ No local translation model is downloaded, so this ' +
+                                'would show the original text instead. Download one in the Model Manager, ' +
+                                'or choose "Skip translation" so the behaviour matches the setting.';
+                            lfw.style.display = 'block';
+                        } else {
+                            lfw.style.display = 'none';
+                        }
+                    }
+
                     if (data.remote_active && data.remote_reachable === false) {
                         // Known unreachable — skip the proxied round-trips, which would just
                         // time out and misleadingly report "not paired".

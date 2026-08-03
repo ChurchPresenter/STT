@@ -12,6 +12,7 @@ is what these pin down.
 import pytest
 
 from conftest import extract_definitions
+from stt.model_disk import dir_has_weights
 
 
 class _StubTorchCuda:
@@ -339,3 +340,71 @@ class TestTranslationReadyWithLlm:
         cfg = {"live_translation": {"translation_method": "madlad"}}
         assert self.ns(cfg, nmt_loaded=True)["is_live_translation_ready"]() is True
         assert self.ns(cfg, nmt_loaded=False)["is_live_translation_ready"]() is False
+
+
+class TestLocalFallbackReady:
+    """Whether "fall back to local translation" can actually be honoured.
+
+    The setting quietly becomes "skip translation" when no local model is on
+    disk, and both produce the same thing on screen: untranslated captions. The
+    operator picks one behaviour and silently gets the other, during a service.
+    This is what lets the page say so beforehand.
+    """
+
+    def ns(self, cfg, models_dir, gguf_path=""):
+        return extract_definitions(
+            "speech_to_text.py", ["_local_fallback_ready"],
+            {"config": cfg, "MODELS_DIR": str(models_dir),
+             "dir_has_weights": dir_has_weights,
+             "_resolve_live_translation_model_id": lambda lt: lt.get("translation_model", ""),
+             "_llm_local_model_path": lambda d, repo, f: gguf_path})
+
+    def nmt(self, tmp_path, model_id, downloaded):
+        if downloaded:
+            d = tmp_path / model_id.replace("/", "--")
+            d.mkdir(parents=True)
+            (d / "model.safetensors").write_text("x")
+        return {"live_translation": {"translation_method": "nllb", "translation_model": model_id}}
+
+    def test_a_downloaded_nmt_model_is_ready(self, tmp_path):
+        cfg = self.nmt(tmp_path, "facebook/nllb-200-distilled-600M", True)
+        assert self.ns(cfg, tmp_path)["_local_fallback_ready"]() is True
+
+    def test_a_missing_nmt_model_is_not_ready(self, tmp_path):
+        cfg = self.nmt(tmp_path, "facebook/nllb-200-distilled-600M", False)
+        assert self.ns(cfg, tmp_path)["_local_fallback_ready"]() is False
+
+    def test_a_directory_without_weights_is_not_ready(self, tmp_path):
+        # A part-finished or cancelled download leaves the directory behind.
+        (tmp_path / "facebook--nllb-200-distilled-600M").mkdir(parents=True)
+        cfg = self.nmt(tmp_path, "facebook/nllb-200-distilled-600M", False)
+        assert self.ns(cfg, tmp_path)["_local_fallback_ready"]() is False
+
+    def test_no_model_configured_is_not_ready(self, tmp_path):
+        cfg = {"live_translation": {"translation_method": "nllb", "translation_model": ""}}
+        assert self.ns(cfg, tmp_path)["_local_fallback_ready"]() is False
+
+    @pytest.mark.parametrize("method", ["whisper_translate", "whisper_forced_lang"])
+    def test_whisper_translate_needs_no_separate_model(self, tmp_path, method):
+        # The ASR pass produces the translation; there is nothing else to download.
+        cfg = {"live_translation": {"translation_method": method}}
+        assert self.ns(cfg, tmp_path)["_local_fallback_ready"]() is True
+
+    def test_a_local_llm_is_ready_when_its_gguf_exists(self, tmp_path):
+        gguf = tmp_path / "m.gguf"
+        gguf.write_text("x")
+        cfg = {"live_translation": {"translation_method": "llm",
+                                    "llm": {"provider": "local", "gguf_repo": "r", "gguf_file": "m.gguf"}}}
+        assert self.ns(cfg, tmp_path, gguf_path=str(gguf))["_local_fallback_ready"]() is True
+
+    def test_a_local_llm_without_its_gguf_is_not_ready(self, tmp_path):
+        cfg = {"live_translation": {"translation_method": "llm",
+                                    "llm": {"provider": "local", "gguf_repo": "r", "gguf_file": "m.gguf"}}}
+        assert self.ns(cfg, tmp_path, gguf_path=str(tmp_path / "absent.gguf"))["_local_fallback_ready"]() is False
+
+    def test_an_endpoint_llm_is_ready_once_configured(self, tmp_path):
+        cfg = {"live_translation": {"translation_method": "llm",
+                                    "llm": {"provider": "endpoint", "endpoint": "http://h"}}}
+        assert self.ns(cfg, tmp_path)["_local_fallback_ready"]() is True
+        cfg["live_translation"]["llm"]["endpoint"] = ""
+        assert self.ns(cfg, tmp_path)["_local_fallback_ready"]() is False

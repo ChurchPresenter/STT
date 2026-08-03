@@ -896,6 +896,33 @@ from stt.session_meta import (
 MADLAD_DEFAULT_MODEL = "google/madlad400-3b-mt"
 
 
+def _local_fallback_ready():
+    """Whether this machine could translate locally if the remote went away.
+
+    Answers the question the "fall back to local translation" setting quietly
+    assumes: is a local model actually on disk. Whisper-translate modes need no
+    separate model — the ASR pass produces the translation — and an LLM session
+    is ready when its GGUF is there. Checked on disk rather than by loading,
+    because this runs on a settings page, not on the caption path.
+    """
+    lt = config.get("live_translation", {})
+    method = (lt.get("translation_method") or "nllb").strip().lower()
+    if method in ("whisper_translate", "whisper_forced_lang"):
+        return True
+    if method == "llm":
+        llm_cfg = lt.get("llm") or {}
+        if (llm_cfg.get("provider") or "endpoint").strip().lower() != "local":
+            return bool((llm_cfg.get("endpoint") or "").strip())
+        path = (llm_cfg.get("gguf_path") or "").strip() or _llm_local_model_path(
+            MODELS_DIR, (llm_cfg.get("gguf_repo") or "").strip(),
+            (llm_cfg.get("gguf_file") or "").strip())
+        return bool(path and os.path.isfile(path))
+    model_id = _resolve_live_translation_model_id(lt)
+    if not model_id:
+        return False
+    return dir_has_weights(os.path.join(MODELS_DIR, model_id.replace("/", "--")))
+
+
 def _resolve_live_translation_model_id(lt_cfg):
     """Effective live-translation model id for the configured engine.
 
@@ -6984,6 +7011,13 @@ def get_translation_status():
         "remote_endpoint": remote_cfg.get("endpoint", "") if remote_active else "",
         "remote_reachable": _check_remote_reachable(_get_remote_endpoint_safe()) if remote_active else None,
         "remote_fallback": remote_cfg.get("fallback", "skip"),
+        # Whether the "fall back to local translation" choice can actually be
+        # honoured. It silently becomes "skip" when no local model is on disk,
+        # and both look the same on screen: untranslated captions. Reported so
+        # the page can say so before a service rather than during one. null when
+        # the choice is not in play (not offloading, or set to skip).
+        "local_fallback_ready": _local_fallback_ready() if (
+            remote_active and remote_cfg.get("fallback", "skip") == "local") else None,
         "cache_size": get_translation_cache().get_size(),
         "is_transcription_running": transcription_state.get("running", False),
         # Device the local NLLB model actually landed on ('cuda'/'mps'/'cpu',
@@ -15114,6 +15148,13 @@ def translate_live_text(text, source_lang, target_lang, return_extras=False, num
         trans_model_id = _resolve_live_translation_model_id(config.get("live_translation", {}))
         model, tokenizer = get_live_translation_model(trans_use_gpu, model_id=trans_model_id)
         if model is None:
+            # The operator chose an option that cannot be honoured. Silence here
+            # turns "fall back to local translation" into "skip translation"
+            # without anyone being told, so the choice they made is not the
+            # behaviour they get — and untranslated captions look identical
+            # either way. Say which model was wanted; that is the fix.
+            print(f"[LIVE-TRANSLATION] no local model available ({trans_model_id or 'unset'}) — "
+                  f"caption left in the source language")
             _record_mt_engine(MT_ENGINE_NONE)
             if return_extras:
                 return {"text": text, "confidence": None, "alternatives": []}
