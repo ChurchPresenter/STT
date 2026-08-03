@@ -837,7 +837,6 @@ from stt.llm_translate import (
     scan_gguf_models as _scan_gguf_models,
     extract_chat_text as _llm_extract_text,
     uses_local_llm as _uses_local_llm,
-    validate_translation as _llm_validate,
 )
 # Service-phase detection lives in stt/service_phase.py (importable, unit-tested);
 # the monolith supplies the connection and the live config and does nothing else.
