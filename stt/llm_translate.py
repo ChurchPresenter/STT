@@ -171,10 +171,19 @@ def build_chat_messages(text: str, system_prompt: str,
 # to find that out again; wrong-script output means the model is not translating at
 # all, which a nudge does not fix. Both go straight to NMT as before.
 _RETRY_NOTES = {
+    # This note was measured and rewritten twice, because both obvious phrasings push
+    # the model off one edge or the other. Telling it not to recite the passage made it
+    # answer with a bare "John 3:16" and drop the sentence the speaker built around the
+    # reference — a numbers rejection traded for a too_short one. Telling it to
+    # translate the words around the reference broke the opposite case, where the
+    # caption really is nothing but a bare "9 глава, 22 стих" So the note now states
+    # the rule both cases share: translate the words that are there, whichever they are.
     REJECT_NUMBERS: (
         "Your previous answer dropped or changed the chapter and verse numbers. Keep "
-        "every figure exactly as the input has it, translate the reference as a "
-        "reference, and do not quote or recite the passage it points to."
+        "every figure exactly as the input has it, and translate exactly the words the "
+        "input contains — no more and no fewer. If the input is only a reference, give "
+        "only that reference. If the speaker said more around it, or quoted the verse "
+        "aloud, translate that too. Never replace a reference with the text it points to."
     ),
     REJECT_TOO_SHORT: (
         "Your previous answer left out part of the input. Translate every clause of "
@@ -182,7 +191,9 @@ _RETRY_NOTES = {
     ),
     REJECT_TOO_LONG: (
         "Your previous answer added material the input does not contain. Translate "
-        "only what is written, and stop when the input stops."
+        "only the words that are there and stop when they stop. If the input merely "
+        "names a passage or a subject, translate that name — do not supply the text "
+        "it refers to."
     ),
     REJECT_LIST: (
         "Your previous answer was a list. Return one caption, on one line, as running "
