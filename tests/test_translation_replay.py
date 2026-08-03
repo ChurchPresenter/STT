@@ -19,6 +19,8 @@ from stt.translation_replay import (
     render_comparison,
     render_summary,
     replay,
+    session_settings,
+    settings_mismatch,
     shipped_run,
     summarize,
 )
@@ -448,3 +450,109 @@ class TestRealServiceDatabases:
                 assert rejected / len(translated) < 0.10, (
                     f"{os.path.basename(path)}: {rejected}/{len(translated)} shipped "
                     f"captions rejected — {summary.by_reason}")
+
+
+META_SCHEMA = "CREATE TABLE session_meta (key TEXT PRIMARY KEY, value TEXT)"
+
+
+def add_meta(path, values):
+    conn = sqlite3.connect(str(path))
+    conn.execute(META_SCHEMA)
+    conn.executemany("INSERT INTO session_meta (key, value) VALUES (?,?)", list(values.items()))
+    conn.commit()
+    conn.close()
+    return str(path)
+
+
+class TestSessionSettings:
+    """A replay configured by what the operator typed can disagree with the session
+    for reasons nobody sees. The session knows what produced it; ask it."""
+
+    def test_a_local_session_reports_its_own_settings(self, session_db):
+        add_meta(session_db, {
+            "mt.method": "llm", "mt.llm.model": "gemma.gguf", "mt.context_window": "1",
+            "mt.llm.max_tokens": "160", "mt.llm.retry_on_reject": "true",
+            "mt.llm.system_prompt": "You translate live captions.", "app.commit": "abc1234",
+        })
+        s = session_settings(session_db)
+        assert s["method"] == "llm"
+        assert s["model"] == "gemma.gguf"
+        assert s["system_prompt"] == "You translate live captions."
+        assert s["app_commit"] == "abc1234"
+
+    def test_an_offloaded_session_prefers_the_translating_box(self, session_db):
+        # The local mt.llm.* keys describe a model that never ran: on an offloaded
+        # session the remote does the work, and its values are the only true ones.
+        add_meta(session_db, {
+            "mt.method": "madlad",
+            "mt.model": "google/madlad400-3b-mt",
+            "mt.remote.effective.method": "llm",
+            "mt.remote.effective.model": "gemma-3-4b-it-Q4_K_M.gguf",
+            "mt.remote.effective.llm_system_prompt": "Remote prompt.",
+            "mt.remote.effective.llm_max_tokens": "160",
+        })
+        s = session_settings(session_db)
+        assert s["method"] == "llm"
+        assert s["model"] == "gemma-3-4b-it-Q4_K_M.gguf"
+        assert s["system_prompt"] == "Remote prompt."
+        assert s["max_tokens"] == "160"
+
+    def test_a_session_without_the_table_reports_nothing(self, session_db):
+        assert session_settings(session_db) == {}
+
+    def test_blank_values_are_not_reported_as_recorded(self, session_db):
+        # An empty string is "not recorded", not a setting worth comparing against.
+        add_meta(session_db, {"mt.llm.system_prompt": "", "mt.method": "llm"})
+        s = session_settings(session_db)
+        assert "system_prompt" not in s
+        assert s["method"] == "llm"
+
+    def test_reading_settings_leaves_the_database_untouched(self, tmp_path, session_db):
+        add_meta(session_db, {"mt.method": "llm"})
+        before = (tmp_path / "session.db").stat().st_mtime_ns
+        session_settings(session_db)
+        assert (tmp_path / "session.db").stat().st_mtime_ns == before
+        assert not (tmp_path / "session.db-wal").exists()
+
+
+class TestSettingsMismatch:
+    def test_a_difference_is_named(self):
+        out = settings_mismatch({"model": "a.gguf", "context_window": "1"},
+                                {"model": "b.gguf"})
+        assert out == ["model: session='a.gguf', this run='b.gguf'"]
+
+    def test_agreement_is_silent(self):
+        assert settings_mismatch({"model": "a.gguf"}, {"model": "a.gguf"}) == []
+
+    def test_values_are_compared_as_text(self):
+        # session_meta stores everything as TEXT; an int candidate must still match.
+        assert settings_mismatch({"max_tokens": "160"}, {"max_tokens": 160}) == []
+
+    def test_a_setting_the_session_never_recorded_is_not_a_mismatch(self):
+        # Absence is not disagreement — it is the older-session case, reported
+        # separately so it is not mistaken for a change the operator made.
+        assert settings_mismatch({}, {"model": "b.gguf"}) == []
+
+    def test_every_difference_is_listed(self):
+        out = settings_mismatch({"model": "a", "context_window": "1", "fallback": "nmt"},
+                                {"model": "b", "context_window": "2", "fallback": "nmt"})
+        assert len(out) == 2
+
+
+class TestCliSettings:
+    def test_the_cli_prints_recorded_settings(self, session_db, capsys):
+        add_meta(session_db, {"mt.method": "llm", "mt.llm.model": "gemma.gguf",
+                              "mt.llm.system_prompt": "P" * 80})
+        translation_replay.main([session_db])
+        out = capsys.readouterr().out
+        assert "method           llm" in out
+        assert "80 chars" in out
+
+    def test_the_cli_says_when_the_prompt_was_not_recorded(self, session_db, capsys):
+        add_meta(session_db, {"mt.method": "llm"})
+        translation_replay.main([session_db])
+        assert "the prompt that produced these captions is unknown" in capsys.readouterr().out
+
+    def test_the_cli_says_when_nothing_was_recorded(self, session_db, capsys):
+        translation_replay.main([session_db])
+        assert "predates session_meta" in capsys.readouterr().out

@@ -17,7 +17,12 @@ import threading
 import pytest
 
 from conftest import extract_definitions
-from stt.llm_translate import uses_local_llm
+from stt.coercion import coerce_int
+from stt.llm_translate import (
+    DEFAULT_SYSTEM_PROMPT_TEMPLATE,
+    build_system_prompt,
+    uses_local_llm,
+)
 
 NLLB = "facebook/nllb-200-distilled-600M"
 MADLAD = "google/madlad400-3b-mt"
@@ -35,7 +40,7 @@ def call_status(live_translation, *, local_llm=None, device=None, is_ct2=False,
                 model_loaded=True, whisper_model="large-v3", trusted=(), a_pushed=None):
     """Run the route and return its JSON body as a plain dict."""
     ns = extract_definitions(
-        "speech_to_text.py", ["get_translation_status"],
+        "speech_to_text.py", ["get_translation_status", "_llm_retry_enabled"],
         extra_globals={
             "config": {"live_translation": live_translation,
                        "model": {"whisper": {"model": whisper_model}}},
@@ -64,6 +69,13 @@ def call_status(live_translation, *, local_llm=None, device=None, is_ct2=False,
             "_get_remote_endpoint_safe": lambda: "",
             "_check_remote_reachable": lambda ep: None,
             "TRANSLATION_LANGUAGES": {"en": "English", "es": "Spanish"},
+            # The payload now also reports *how* the LLM runs, so a paired machine
+            # can record the configuration that shaped its captions and not only
+            # the model's name. These are the helpers that answer that.
+            "coerce_int": coerce_int,
+            "_LLM_MIN_N_CTX": 1024,
+            "_llm_system_prompt": build_system_prompt,
+            "_DEFAULT_LLM_SYSTEM_PROMPT": DEFAULT_SYSTEM_PROMPT_TEMPLATE,
             "transcription_state": {"running": False},
             "time": __import__("time"),
         })
@@ -188,3 +200,65 @@ class TestWhisperSessionUnchanged:
     def test_carries_no_llm_claims(self):
         cfg = dict(NMT, translation_method="whisper_translate")
         assert call_status(cfg)["llm_provider"] is None
+
+
+class TestLlmParametersReported:
+    """The payload must describe *how* the LLM runs, not only which model.
+
+    A paired machine records this endpoint's answer into its session database. On an
+    offloaded session these settings exist nowhere else — the transcript names the
+    translator but not the configuration that shaped every caption — so a service
+    recorded without them cannot be replayed against a changed setting later.
+    """
+
+    def test_the_generation_settings_are_reported(self):
+        cfg = dict(LLM_LOCAL, context_window=2,
+                   llm=dict(LLM_LOCAL["llm"], max_tokens=200, n_ctx=4096))
+        status = call_status(cfg, local_llm=object())
+        assert status["llm_max_tokens"] == 200
+        assert status["llm_n_ctx"] == 4096
+        assert status["llm_context_window"] == 2
+
+    def test_the_rejection_behaviour_is_reported(self):
+        cfg = dict(LLM_LOCAL, llm=dict(LLM_LOCAL["llm"],
+                                       retry_on_reject=False, fallback="skip"))
+        status = call_status(cfg, local_llm=object())
+        assert status["llm_retry_on_reject"] is False
+        assert status["llm_fallback"] == "skip"
+
+    def test_the_rejection_defaults_are_reported_when_unset(self):
+        status = call_status(LLM_LOCAL, local_llm=object())
+        assert status["llm_retry_on_reject"] is True
+        assert status["llm_fallback"] == "nmt"
+
+    def test_the_prompt_is_the_one_actually_sent(self):
+        # Effective, not configured: the configured value is usually blank, and the
+        # target language is substituted into the template before the model sees it.
+        status = call_status(LLM_LOCAL, local_llm=object())
+        assert "English Bibles" in status["llm_system_prompt"]
+        assert "{language}" not in status["llm_system_prompt"]
+
+    def test_a_custom_prompt_is_reported_as_built(self):
+        cfg = dict(LLM_LOCAL, llm=dict(LLM_LOCAL["llm"],
+                                       system_prompt="Render вечеря as communion."))
+        status = call_status(cfg, local_llm=object())
+        assert status["llm_system_prompt"].startswith("Render вечеря as communion.")
+        assert "Translate into English." in status["llm_system_prompt"]
+
+    def test_n_ctx_is_clamped_to_the_usable_floor(self):
+        # Below the floor the prompt leaves no room for the caption, so reporting a
+        # configured 512 would describe a session that could not have happened.
+        cfg = dict(LLM_LOCAL, llm=dict(LLM_LOCAL["llm"], n_ctx=512))
+        assert call_status(cfg, local_llm=object())["llm_n_ctx"] == 1024
+
+    @pytest.mark.parametrize("field", ["llm_max_tokens", "llm_n_ctx", "llm_retry_on_reject",
+                                       "llm_fallback", "llm_context_window", "llm_system_prompt"])
+    def test_an_nmt_session_claims_none_of_them(self, field):
+        assert call_status(NMT)[field] is None
+
+    def test_an_endpoint_provider_reports_no_local_context_size(self):
+        # n_ctx sizes the in-process GGUF and says nothing about a remote model's window.
+        cfg = dict(LLM_LOCAL, llm={"provider": "endpoint", "endpoint": "http://h", "model": "m"})
+        status = call_status(cfg)
+        assert status["llm_n_ctx"] is None
+        assert status["llm_max_tokens"] == 160

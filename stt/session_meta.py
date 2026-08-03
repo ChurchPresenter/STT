@@ -452,6 +452,18 @@ def remote_provenance(status: Optional[Mapping[str, Any]]) -> Dict[str, str]:
         # them and they are simply absent from the transcript.
         ("llm_provider", "llm_provider"),
         ("llm_endpoint", "llm_endpoint"),
+        # How the remote runs that model. On an offloaded session these live only on
+        # the other box, so a transcript without them names the translator but not
+        # the configuration that shaped every caption — and a service recorded that
+        # way cannot be replayed against a changed setting, because nobody can say
+        # what the setting used to be. The prompt matters most: it is the surface an
+        # operator tunes captions with, and it is invisible in the output.
+        ("llm_max_tokens", "llm_max_tokens"),
+        ("llm_n_ctx", "llm_n_ctx"),
+        ("llm_retry_on_reject", "llm_retry_on_reject"),
+        ("llm_fallback", "llm_fallback"),
+        ("llm_context_window", "llm_context_window"),
+        ("llm_system_prompt", "llm_system_prompt"),
     )
     meta: Dict[str, str] = {}
     for suffix, source in fields:

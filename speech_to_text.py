@@ -7034,6 +7034,24 @@ def get_translation_status():
         "llm_provider": (_llm_cfg.get("provider") or "endpoint") if _using_llm else None,
         "llm_model": _status_model if _using_llm else None,
         "llm_endpoint": (_llm_cfg.get("endpoint") or "") if (_using_llm and not _llm_local) else None,
+        # ...and *how* it runs it. On an offloaded session these settings live only
+        # on this box, so without them the paired machine's transcript records which
+        # model translated but nothing about the configuration that shaped every
+        # caption — the prompt above all, which is the tuning surface. A service
+        # recorded that way cannot be replayed against a changed setting later,
+        # because nobody can say what the setting used to be.
+        "llm_max_tokens": coerce_int(_llm_cfg.get("max_tokens"), 160, lo=16, hi=1024) if _using_llm else None,
+        "llm_n_ctx": (coerce_int(_llm_cfg.get("n_ctx"), 2048, lo=_LLM_MIN_N_CTX, hi=32768)
+                      if (_using_llm and _llm_local) else None),
+        "llm_retry_on_reject": _llm_retry_enabled(_llm_cfg) if _using_llm else None,
+        "llm_fallback": ((_llm_cfg.get("fallback") or "nmt").strip().lower()
+                         if _using_llm else None),
+        "llm_context_window": coerce_int(trans_config.get("context_window"), 1, lo=1, hi=10) if _using_llm else None,
+        # The effective prompt, built exactly as the caption path builds it — not the
+        # configured value, which is usually blank and says nothing about what was sent.
+        "llm_system_prompt": (_llm_system_prompt(
+            _llm_cfg.get("system_prompt") or _DEFAULT_LLM_SYSTEM_PROMPT,
+            trans_config.get("target_language"), TRANSLATION_LANGUAGES) if _using_llm else None),
     }
 
     # Only expose sensitive info (clients, pairs) to local/whitelisted or paired callers

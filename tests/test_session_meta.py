@@ -960,3 +960,49 @@ class TestMtRowLabel:
     def test_absent_config_does_not_raise(self):
         assert mt_row_label(None, MT_ENGINE_LLM) == ""
         assert mt_row_label(None, MT_ENGINE_REMOTE) == "remote"
+
+
+class TestRemoteLlmParameters:
+    """An offloaded session's settings live only on the box that translates.
+
+    Without them the transcript names the translator but not the configuration that
+    shaped every caption, and the service cannot be replayed against a changed
+    setting later — nobody can say what the setting used to be. Both 2026-08-02
+    services were recorded exactly that way.
+    """
+
+    STATUS = {
+        "success": True,
+        "translation_model": "gemma-3-4b-it-Q4_K_M.gguf",
+        "translation_method": "llm",
+        "llm_provider": "local",
+        "llm_max_tokens": 160,
+        "llm_n_ctx": 2048,
+        "llm_retry_on_reject": True,
+        "llm_fallback": "nmt",
+        "llm_context_window": 1,
+        "llm_system_prompt": "You translate live captions for a church service.",
+    }
+
+    def test_the_parameters_are_recorded(self):
+        meta = remote_provenance(self.STATUS)
+        assert meta["mt.remote.effective.llm_max_tokens"] == "160"
+        assert meta["mt.remote.effective.llm_n_ctx"] == "2048"
+        assert meta["mt.remote.effective.llm_retry_on_reject"] == "true"
+        assert meta["mt.remote.effective.llm_fallback"] == "nmt"
+        assert meta["mt.remote.effective.llm_context_window"] == "1"
+
+    def test_the_prompt_is_recorded_in_full(self):
+        # The prompt is the surface an operator tunes captions with and is invisible
+        # in the output, so a digest would not be enough to reproduce a session.
+        meta = remote_provenance(self.STATUS)
+        assert meta["mt.remote.effective.llm_system_prompt"] == self.STATUS["llm_system_prompt"]
+
+    def test_an_nmt_remote_records_none_of_them(self):
+        meta = remote_provenance({"success": True, "translation_model": "madlad",
+                                  "translation_method": "madlad"})
+        assert not [k for k in meta if "llm_" in k]
+
+    def test_an_unreachable_remote_still_leaves_no_claim(self):
+        assert remote_provenance(None) == {}
+        assert remote_provenance({"success": False, "llm_max_tokens": 160}) == {}

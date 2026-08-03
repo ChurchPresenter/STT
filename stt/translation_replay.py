@@ -27,7 +27,7 @@ import time
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass, field
-from typing import Callable, Dict, List, Optional, Sequence, Tuple
+from typing import Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from stt.llm_translate import check_translation, word_count
 
@@ -158,6 +158,69 @@ def load_session_pairs(db_path: str, *, min_source_words: int = 1) -> List[Capti
                                  shipped_engine=mt_engine or None,
                                  shipped_model=mt_model or None))
     return pairs
+
+
+# The settings that decide what a caption looks like, wherever the session recorded
+# them. An offloaded session keeps them under mt.remote.effective.* — the translating
+# box's own values, which is the only place they exist — and a local one under mt.*.
+# Both are read, remote first, because on an offloaded session the local mt.llm.* keys
+# describe a model that never ran.
+_SETTING_KEYS = (
+    ("model", ("mt.remote.effective.model", "mt.llm.model", "mt.model")),
+    ("method", ("mt.remote.effective.method", "mt.method")),
+    ("system_prompt", ("mt.remote.effective.llm_system_prompt", "mt.llm.system_prompt")),
+    ("max_tokens", ("mt.remote.effective.llm_max_tokens", "mt.llm.max_tokens")),
+    ("n_ctx", ("mt.remote.effective.llm_n_ctx", "mt.llm.n_ctx")),
+    ("context_window", ("mt.remote.effective.llm_context_window", "mt.context_window")),
+    ("retry_on_reject", ("mt.remote.effective.llm_retry_on_reject", "mt.llm.retry_on_reject")),
+    ("fallback", ("mt.remote.effective.llm_fallback", "mt.llm.fallback")),
+    ("target_language", ("mt.target_language",)),
+    ("app_commit", ("app.commit",)),
+)
+
+
+def session_settings(db_path: str) -> Dict[str, str]:
+    """What the session says it was translated with, or {} if it did not record it.
+
+    A replay configured by whatever the operator typed is a replay that can disagree
+    with the session for reasons nobody sees: the wrong prompt, a different quant, a
+    context window that was never on. The session knows; ask it. An empty result is
+    itself the answer — a session that recorded nothing cannot be replayed faithfully,
+    and a report should say so rather than imply a comparison it cannot support.
+    """
+    conn = sqlite3.connect(_read_only_uri(db_path), uri=True)
+    try:
+        names = {row[0] for row in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'")}
+        if "session_meta" not in names:
+            return {}
+        stored = dict(conn.execute("SELECT key, value FROM session_meta"))
+    finally:
+        conn.close()
+
+    out: Dict[str, str] = {}
+    for label, candidates in _SETTING_KEYS:
+        for key in candidates:
+            value = stored.get(key)
+            if value not in (None, ""):
+                out[label] = str(value)
+                break
+    return out
+
+
+def settings_mismatch(session: Mapping[str, str], candidate: Mapping[str, str]) -> List[str]:
+    """Settings the session and the run about to happen disagree on.
+
+    Only compares keys the caller supplies, so an intentional change — a new prompt,
+    a different context window — is named rather than hidden, and the operator sees
+    exactly what they are varying instead of trusting they remembered.
+    """
+    differences = []
+    for key, value in candidate.items():
+        recorded = session.get(key)
+        if recorded is not None and str(value) != recorded:
+            differences.append("%s: session=%r, this run=%r" % (key, recorded, str(value)))
+    return differences
 
 
 def engine_breakdown(pairs: Sequence[CaptionPair]) -> Dict[str, int]:
@@ -441,6 +504,23 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         print("no translatable captions found in %s" % args.db)
         return 1
     print("loaded %d captions from %s" % (len(pairs), args.db))
+
+    settings = session_settings(args.db)
+    if settings:
+        print("  recorded settings:")
+        for key in ("method", "model", "context_window", "max_tokens", "n_ctx",
+                    "retry_on_reject", "fallback", "app_commit"):
+            if key in settings:
+                print("    %-16s %s" % (key, settings[key]))
+        prompt = settings.get("system_prompt")
+        if prompt:
+            print("    %-16s %d chars, %s" % ("system_prompt", len(prompt), prompt[:48] + "…"))
+        else:
+            print("    %-16s not recorded — the prompt that produced these captions is unknown"
+                  % "system_prompt")
+    else:
+        print("  recorded settings: none — this session predates session_meta, so a replay\n"
+              "                     cannot be checked against what actually produced it.")
 
     engines = engine_breakdown(pairs)
     if engines:
