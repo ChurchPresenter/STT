@@ -477,6 +477,8 @@
       "_keep_alive_comment": "How long the server keeps the model loaded; -1 = forever. Leave at -1: an unpinned model measured p90 4.89s against p50 0.29s purely because it was unloaded between captions. Ignored by servers that don't support it.",
       "timeout_ms": 8000,
       "_timeout_ms_comment": "Per-caption timeout. On timeout the caption falls back to the NMT model rather than being dropped.",
+      "fallback": "nmt",
+      "_fallback_comment": "What a caption does when the LLM declines it. 'nmt' translates it with the NMT model, which means those weights load on the first declined caption and stay resident for the session — several GB to serve roughly one caption in a hundred. 'skip' shows the source text untranslated and never loads them, which on a memory-bound machine is the room a larger and better LLM needs. Same vocabulary as remote.fallback.",
       "retry_on_reject": true,
       "_retry_on_reject_comment": "When a caption fails validation, ask the model once more with the broken rule named, before falling back to the NMT model. Without this a rejection is a downgrade rather than a fix: the LLM usually had the caption nearly right and broke one rule, and the NMT model is not the better answer for it. Costs a second call only on the ~1% of captions that are rejected, is never attempted after a timeout or a transport error, and is skipped when too little of the caption's budget remains to finish.",
       "warmup_timeout_ms": 180000,

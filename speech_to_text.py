@@ -1652,16 +1652,27 @@ def _record_remote_translate_ms(elapsed_ms, alpha=0.3):
 
 def is_live_translation_ready():
     """True when a live translation can actually be produced right now: a remote
-    endpoint is configured, or the local NLLB model has finished loading. Used to
-    avoid persisting a warmup echo (the source text returned unchanged while the
-    model is still loading)."""
-    remote_cfg = config.get("live_translation", {}).get("remote", {})
+    endpoint is configured, the LLM is the engine and is up, or the local NLLB model
+    has finished loading. Used to avoid persisting a warmup echo (the source text
+    returned unchanged while the model is still loading)."""
+    live_cfg = config.get("live_translation", {})
+    remote_cfg = live_cfg.get("remote", {})
     if remote_cfg.get("enabled") and remote_cfg.get("endpoint"):
         # A machine configured to offload can produce translations for its own
         # display regardless of whether it also hosts trusted clients. (Serving
         # a paired machine's request always translates locally — see
         # translate_remote's local_only=True — so this never causes chaining.)
         return True
+    if live_cfg.get("translation_method") == "llm":
+        # The LLM is the engine here; the NMT model is only its fallback, and
+        # llm.fallback = "skip" means it is never loaded at all. Asking the NMT
+        # flag in that configuration would report "not ready" for the whole
+        # session, and every translated caption would be produced and then
+        # silently dropped instead of saved.
+        llm_cfg = live_cfg.get("llm") or {}
+        if (llm_cfg.get("provider") or "endpoint").strip().lower() == "local":
+            return is_local_llm_loaded()
+        return bool((llm_cfg.get("endpoint") or "").strip() and (llm_cfg.get("model") or "").strip())
     return _live_translation_model_loaded
 
 
@@ -14886,6 +14897,17 @@ def _llm_retry_enabled(llm_cfg):
     return value if isinstance(value, bool) else str(value).strip().lower() not in ("0", "false", "no", "off")
 
 
+def _llm_fallback_is_skip():
+    """Whether a declined caption shows the source instead of loading the NMT model.
+
+    Same vocabulary as remote.fallback, deliberately: "skip" shows the original text
+    there too, and an operator who has met one of these should not have to learn a
+    second word for it.
+    """
+    llm_cfg = config.get("live_translation", {}).get("llm") or {}
+    return (llm_cfg.get("fallback") or "nmt").strip().lower() == "skip"
+
+
 def _translate_via_llm(text, source_lang, target_lang, timeout_override=None,
                        llm_cfg_override=None, return_raw=False):
     """Translate one caption with an LLM. Returns the caption, or None to fall back.
@@ -15059,13 +15081,23 @@ def translate_live_text(text, source_lang, target_lang, return_extras=False, num
 
     # LLM path. Declining falls through to the NMT model below, so the fallback needs
     # no plumbing of its own — which also means translation_model must stay pointed at
-    # a real NMT model even when translation_method is "llm".
+    # a real NMT model even when translation_method is "llm", unless the operator has
+    # set llm.fallback to "skip".
     if config.get("live_translation", {}).get("translation_method") == "llm":
         _llm_text = _translate_via_llm(text, source_lang, target_lang)
         if _llm_text is not None:
             if return_extras:
                 return {"text": _llm_text, "confidence": None, "alternatives": []}
             return _llm_text
+        if _llm_fallback_is_skip():
+            # No NMT model is ever loaded in this mode, which is the point: on a
+            # memory-bound box the NMT weights are several GB held to serve about
+            # one caption in a hundred, and that is the room a larger LLM needs.
+            # The cost is that those captions show the source text untranslated.
+            print(f"[LLM-TRANSLATE] declined; showing the source (llm.fallback=skip) for: '{text[:48]}'")
+            if return_extras:
+                return {"text": text, "confidence": None, "alternatives": []}
+            return text
         print(f"[LLM-TRANSLATE] declined; using the NMT model for: '{text[:48]}'")
 
     try:

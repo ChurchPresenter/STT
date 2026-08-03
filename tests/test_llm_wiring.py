@@ -259,3 +259,83 @@ class _FakeModel:
 def test_the_functions_under_test_still_exist(name):
     """A rename would otherwise turn these tests into silent no-ops."""
     extract_definitions("speech_to_text.py", [name], extra_globals={})
+
+
+class TestLlmFallbackSelector:
+    """llm.fallback decides whether the NMT weights are ever loaded at all.
+
+    On a 16 GB translation box those weights are several GB held to serve about one
+    caption in a hundred, and they are the room a larger LLM needs.
+    """
+
+    def ns(self, cfg):
+        return extract_definitions("speech_to_text.py", ["_llm_fallback_is_skip"],
+                                   {"config": cfg})
+
+    def test_default_keeps_the_nmt_fallback(self):
+        # Absent config must not silently stop translating a declined caption.
+        assert self.ns({})["_llm_fallback_is_skip"]() is False
+        assert self.ns({"live_translation": {}})["_llm_fallback_is_skip"]() is False
+        assert self.ns({"live_translation": {"llm": {}}})["_llm_fallback_is_skip"]() is False
+
+    def test_skip_is_recognised(self):
+        cfg = {"live_translation": {"llm": {"fallback": "skip"}}}
+        assert self.ns(cfg)["_llm_fallback_is_skip"]() is True
+
+    def test_case_and_padding_do_not_matter(self):
+        cfg = {"live_translation": {"llm": {"fallback": "  SKIP "}}}
+        assert self.ns(cfg)["_llm_fallback_is_skip"]() is True
+
+    def test_an_explicit_nmt_or_an_unknown_word_keeps_the_fallback(self):
+        for value in ("nmt", "local", "", None, "yes"):
+            cfg = {"live_translation": {"llm": {"fallback": value}}}
+            assert self.ns(cfg)["_llm_fallback_is_skip"]() is False, value
+
+
+class TestTranslationReadyWithLlm:
+    """The persistence gate must follow the engine actually producing captions.
+
+    is_live_translation_ready() reports the NMT model's load state. With
+    llm.fallback = "skip" that model never loads, so asking it would report "not
+    ready" for a whole service and every translated caption would be produced and
+    then dropped instead of saved.
+    """
+
+    def ns(self, cfg, nmt_loaded=False, llm_loaded=False):
+        return extract_definitions(
+            "speech_to_text.py", ["is_live_translation_ready"],
+            {"config": cfg, "_live_translation_model_loaded": nmt_loaded,
+             "is_local_llm_loaded": lambda: llm_loaded})
+
+    def test_offloading_is_ready_regardless(self):
+        cfg = {"live_translation": {"remote": {"enabled": True, "endpoint": "http://h"}}}
+        assert self.ns(cfg)["is_live_translation_ready"]() is True
+
+    def test_local_llm_gates_on_the_gguf_not_the_nmt_model(self):
+        cfg = {"live_translation": {"translation_method": "llm",
+                                    "llm": {"provider": "local"}}}
+        assert self.ns(cfg, llm_loaded=True)["is_live_translation_ready"]() is True
+        assert self.ns(cfg, llm_loaded=False)["is_live_translation_ready"]() is False
+
+    def test_a_loaded_nmt_model_does_not_make_an_unloaded_gguf_ready(self):
+        cfg = {"live_translation": {"translation_method": "llm",
+                                    "llm": {"provider": "local"}}}
+        ready = self.ns(cfg, nmt_loaded=True, llm_loaded=False)["is_live_translation_ready"]()
+        assert ready is False, "captions would be persisted while the GGUF still echoes the source"
+
+    def test_endpoint_provider_is_ready_once_it_is_configured(self):
+        cfg = {"live_translation": {"translation_method": "llm",
+                                    "llm": {"provider": "endpoint", "endpoint": "http://h",
+                                            "model": "m"}}}
+        assert self.ns(cfg)["is_live_translation_ready"]() is True
+
+    def test_an_unconfigured_endpoint_is_not_ready(self):
+        for llm in ({"provider": "endpoint", "endpoint": "", "model": "m"},
+                    {"provider": "endpoint", "endpoint": "http://h", "model": ""}):
+            cfg = {"live_translation": {"translation_method": "llm", "llm": llm}}
+            assert self.ns(cfg)["is_live_translation_ready"]() is False, llm
+
+    def test_the_nmt_path_is_unchanged(self):
+        cfg = {"live_translation": {"translation_method": "madlad"}}
+        assert self.ns(cfg, nmt_loaded=True)["is_live_translation_ready"]() is True
+        assert self.ns(cfg, nmt_loaded=False)["is_live_translation_ready"]() is False
