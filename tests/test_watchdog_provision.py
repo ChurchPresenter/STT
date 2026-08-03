@@ -156,3 +156,64 @@ def test_the_module_exposes_what_these_tests_patch():
     for name in ("_which", "IS_WINDOWS", "ProvisionError", "Provisioner"):
         assert hasattr(watchdog, name), name
     assert isinstance(watchdog.UV_PYTHON_VERSION, str)
+
+
+class TestPinLatestRelease:
+    """Which release tag a fresh install checks out.
+
+    A release workflow that tags and pushes the branch separately can leave a tag
+    on a commit that reached no branch — and that is the *newest* tag, so it wins
+    the version comparison and a fresh install silently checks out code that was
+    never released. Observed once, from a branch push rejected as non-fast-forward
+    while the tag in the same command went through.
+    """
+
+    def pin(self, monkeypatch, tags, on_branch=(), shallow=False):
+        p = make_provisioner(monkeypatch)
+        seen = {}
+
+        def fake_subprocess_run(cmd, **kw):
+            joined = " ".join(cmd)
+            if "tag" in cmd and "--list" in cmd:
+                return type("R", (), {"returncode": 0, "stdout": "\n".join(tags)})()
+            if "--is-shallow-repository" in cmd:
+                return type("R", (), {"returncode": 0, "stdout": "true" if shallow else "false"})()
+            if "merge-base" in cmd:
+                seen.setdefault("checked", []).append(cmd[-2])
+                return type("R", (), {"returncode": 0 if cmd[-2] in on_branch else 1, "stdout": ""})()
+            return type("R", (), {"returncode": 0, "stdout": ""})()
+
+        monkeypatch.setattr(watchdog.subprocess, "run", fake_subprocess_run)
+        monkeypatch.setattr(watchdog, "_which", lambda n: "/usr/bin/" + n)
+        p._pin_latest_release()
+        resets = [c[-1] for c in p.runs if "reset" in c]
+        return p, resets, seen
+
+    def test_the_newest_tag_on_the_branch_wins(self, monkeypatch):
+        _p, resets, _ = self.pin(monkeypatch, ["26.2.140", "26.2.150"],
+                                on_branch=("26.2.140", "26.2.150"))
+        assert resets == ["26.2.150"]
+
+    def test_a_tag_on_no_branch_is_skipped_for_the_next_one(self, monkeypatch):
+        # The exact failure: the newest tag is the orphan, so it must not win.
+        p, resets, _ = self.pin(monkeypatch, ["26.2.140", "26.2.158"],
+                                on_branch=("26.2.140",))
+        assert resets == ["26.2.140"]
+        assert any("skipping 26.2.158" in m for m in p.logs)
+
+    def test_no_usable_tag_stays_on_the_branch(self, monkeypatch):
+        p, resets, _ = self.pin(monkeypatch, ["26.2.158"], on_branch=())
+        assert resets == []
+        assert any("staying on default branch" in m for m in p.logs)
+
+    def test_no_tags_at_all_stays_on_the_branch(self, monkeypatch):
+        p, resets, _ = self.pin(monkeypatch, [], on_branch=())
+        assert resets == []
+        assert any("no release tags" in m for m in p.logs)
+
+    def test_a_shallow_clone_trusts_the_tag(self, monkeypatch):
+        # Fails open: a shallow clone has no history to walk, and refusing every
+        # tag there would leave every install on the default branch.
+        _p, resets, seen = self.pin(monkeypatch, ["26.2.158"], on_branch=(), shallow=True)
+        assert resets == ["26.2.158"]
+        assert "checked" not in seen, "no reachability check is possible on a shallow clone"

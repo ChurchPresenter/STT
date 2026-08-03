@@ -402,19 +402,45 @@ jobs:
       # after updating — without this they'd see "update available" forever.
       - name: Bump VERSION and tag (dispatch)
         if: github.event_name == 'workflow_dispatch'
+        env:
+          BRANCH: ${{ github.ref_name }}
         run: |
           TAG="${{ needs.version.outputs.tag }}"
-          echo "${TAG#v}" > VERSION
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add VERSION
-          if ! git diff --cached --quiet; then
-            git commit -m "chore(release): bump VERSION to ${TAG#v}"
-          fi
-          git tag "$TAG"
-          # Checkout is detached at the trigger SHA; push back to the branch
-          # the workflow was dispatched from, plus the new tag.
-          git push origin "HEAD:refs/heads/${{ github.ref_name }}" "refs/tags/$TAG"
+
+          # The checkout is detached at the trigger SHA, and the builds above take
+          # minutes — long enough for someone to push to the branch meanwhile. That
+          # happened: the branch push was rejected non-fast-forward while the tag
+          # push in the same command succeeded, leaving a tag on a commit that was
+          # on no branch. A fresh install pins to the newest tag, so it would have
+          # checked out that orphan.
+          #
+          # --atomic makes the pair all-or-nothing, and the retry rebases the bump
+          # onto whatever arrived instead of giving up. The tag is created inside
+          # the loop, after the rebase, so it always names the commit being pushed.
+          for attempt in 1 2 3; do
+            git fetch origin "$BRANCH" --quiet
+            # Re-apply the bump on top of the current branch tip rather than the
+            # trigger SHA. Reset keeps the working tree, so VERSION is rewritten
+            # from scratch each attempt and cannot accumulate conflicts.
+            git reset --hard "origin/$BRANCH" --quiet
+            echo "${TAG#v}" > VERSION
+            git add VERSION
+            if ! git diff --cached --quiet; then
+              git commit -m "chore(release): bump VERSION to ${TAG#v}" --quiet
+            fi
+            git tag -f "$TAG"
+            if git push --atomic origin "HEAD:refs/heads/$BRANCH" "refs/tags/$TAG"; then
+              echo "pushed $TAG on attempt $attempt"
+              exit 0
+            fi
+            echo "::warning::push rejected (attempt $attempt) — branch moved, retrying"
+            git tag -d "$TAG"
+            sleep $((attempt * 5))
+          done
+          echo "::error::could not push $TAG after 3 attempts — the branch is moving faster than the build"
+          exit 1
 
       - uses: actions/download-artifact@v7
         with:

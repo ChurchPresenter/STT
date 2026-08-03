@@ -1230,7 +1230,15 @@ class Provisioner:
 
     def _pin_latest_release(self):
         """Move a fresh clone from the default branch to the newest release tag so
-        installs and auto-updates track the same refs. No tags → stay on main."""
+        installs and auto-updates track the same refs. No tags → stay on main.
+
+        A tag is only followed when it is an ancestor of the branch. A release
+        workflow that tags and pushes the branch in two steps can leave a tag on a
+        commit that reached no branch — and that is exactly the newest tag, so a
+        fresh install would pin to it and silently run code that was never
+        released. Observed once, from a branch push rejected as non-fast-forward
+        while its tag went through.
+        """
         self._run(["git", "-C", SOURCE_DIR, "fetch", "--depth", "1", "--force",
                    "origin", "+refs/tags/*:refs/tags/*"],
                   desc="git fetch --tags", check=False)
@@ -1240,10 +1248,37 @@ class Provisioner:
         if not tags:
             self.log("  no release tags — staying on default branch")
             return
-        latest = max(tags, key=parse_version)
-        self.log(f"  pinning to release {latest}")
-        self._run(["git", "-C", SOURCE_DIR, "reset", "--hard", latest],
-                  desc=f"git reset --hard {latest}", check=False)
+        for tag in sorted(tags, key=parse_version, reverse=True):
+            if not self._tag_is_on_branch(tag):
+                self.log(f"  skipping {tag} — tagged commit is on no branch "
+                         f"(a release that half-published)")
+                continue
+            self.log(f"  pinning to release {tag}")
+            self._run(["git", "-C", SOURCE_DIR, "reset", "--hard", tag],
+                      desc=f"git reset --hard {tag}", check=False)
+            return
+        self.log("  no release tag is on the branch — staying on default branch")
+
+    def _tag_is_on_branch(self, tag):
+        """Whether ``tag`` is an ancestor of the checked-out branch.
+
+        Fails **open** (True) when the answer cannot be determined — a shallow
+        clone has no history to walk, and refusing every tag there would leave
+        every install on the default branch instead. The check exists to catch a
+        tag that git can positively prove is unreachable, not to demand proof of
+        reachability.
+        """
+        git = _which("git") or "git"
+        try:
+            r = subprocess.run([git, "-C", SOURCE_DIR, "rev-parse", "--is-shallow-repository"],
+                               capture_output=True, text=True, creationflags=_CREATE_NO_WINDOW)
+            if r.returncode != 0 or r.stdout.strip() == "true":
+                return True
+            r = subprocess.run([git, "-C", SOURCE_DIR, "merge-base", "--is-ancestor", tag, "HEAD"],
+                               capture_output=True, text=True, creationflags=_CREATE_NO_WINDOW)
+            return r.returncode == 0
+        except OSError:
+            return True
 
     def _latest_release_tag(self):
         """Latest release tag from the GitHub API, or None (offline / no releases)."""
