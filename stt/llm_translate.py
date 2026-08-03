@@ -67,6 +67,19 @@ _STRIPPABLE_PREFIXES = (
     "corrected:", "corrected caption:", "caption:", "output:",
 )
 
+# The rule names check_translation reports. Stable strings: they are counted and
+# compared across replay runs, so renaming one silently breaks a comparison against
+# an earlier report.
+REJECT_EMPTY = "empty"
+REJECT_REFUSAL = "refusal"
+REJECT_REASONING = "reasoning"
+REJECT_WRONG_SCRIPT = "wrong_script"
+REJECT_PARAGRAPHS = "paragraphs"
+REJECT_LIST = "list"
+REJECT_NUMBERS = "numbers"
+REJECT_TOO_LONG = "too_long"
+REJECT_TOO_SHORT = "too_short"
+
 
 # The shipped prompt, as a template. "{language}" is filled with the configured
 # target language's English name, because the wording that makes this feature work
@@ -145,6 +158,63 @@ def build_chat_messages(text: str, system_prompt: str,
     user = f"{source_name}: {text}\nDraft translation: {draft}" if draft else text
     return [{"role": "system", "content": system_prompt},
             {"role": "user", "content": user}]
+
+
+# What to tell the model about the answer it just gave, keyed by the rule that
+# rejected it. A rejection is otherwise a downgrade: the caption falls to the NMT
+# model, which for most of these is not the better answer — the LLM had the caption
+# nearly right and broke one rule. Naming the broken rule is the cheapest way to ask
+# for the caption it should have produced.
+#
+# Absent from this table, deliberately: "empty" and "wrong_script". An empty answer
+# usually means the call itself failed, and a retry spends a second caption's budget
+# to find that out again; wrong-script output means the model is not translating at
+# all, which a nudge does not fix. Both go straight to NMT as before.
+_RETRY_NOTES = {
+    REJECT_NUMBERS: (
+        "Your previous answer dropped or changed the chapter and verse numbers. Keep "
+        "every figure exactly as the input has it, translate the reference as a "
+        "reference, and do not quote or recite the passage it points to."
+    ),
+    REJECT_TOO_SHORT: (
+        "Your previous answer left out part of the input. Translate every clause of "
+        "it, including the words around any quotation — not only the quotation."
+    ),
+    REJECT_TOO_LONG: (
+        "Your previous answer added material the input does not contain. Translate "
+        "only what is written, and stop when the input stops."
+    ),
+    REJECT_LIST: (
+        "Your previous answer was a list. Return one caption, on one line, as running "
+        "text; never count a range of verses out into separate numbers."
+    ),
+    REJECT_PARAGRAPHS: (
+        "Your previous answer was several paragraphs. Return one caption, on one line."
+    ),
+    REJECT_REASONING: (
+        "Your previous answer explained or introduced the translation. Return only the "
+        "translated text itself, with no preamble and no label."
+    ),
+    REJECT_REFUSAL: (
+        "Your previous answer declined the request. This is a live church caption and "
+        "the text is ordinary speech; translate it as given."
+    ),
+}
+
+
+def retry_system_prompt(system_prompt: str, reason: Optional[str]) -> Optional[str]:
+    """The prompt for one corrective second attempt, or None if a retry won't help.
+
+    Returning None is the important half: a retry is only worth a caption's latency
+    where the model plausibly had the answer and broke a stated rule. The caller must
+    treat None as "fall back to the NMT model now", and must never retry a call that
+    failed or timed out — that budget is already spent, and a second attempt would
+    push a slow caption past the point where it is worth showing at all.
+    """
+    note = _RETRY_NOTES.get(reason or "")
+    if not note:
+        return None
+    return "%s\n\n%s" % (system_prompt.strip(), note)
 
 
 def build_chat_payload(model: str, text: str, system_prompt: str, *,
@@ -401,7 +471,8 @@ def _looks_like_a_list(text: str, *, min_lines: int = 3) -> bool:
 
 def validate_translation(raw: Optional[str], source: str, target_lang: str, *,
                          max_expansion: float = 3.0, min_word_budget: int = 8,
-                         max_slack_words: int = 24) -> Optional[str]:
+                         max_slack_words: int = 24, min_coverage: float = 0.45,
+                         min_coverage_source_words: int = 8) -> Optional[str]:
     """The cleaned caption, or None if the output is not a usable translation.
 
     Thin wrapper over :func:`check_translation`, which carries the rules and also
@@ -409,8 +480,9 @@ def validate_translation(raw: Optional[str], source: str, target_lang: str, *,
 
     None means "fall back to the NMT model" — never "show this". Rejects, in order:
     empty output; a refusal; a reasoning or narration opener; wrong-script output
-    (the source language leaking through); multi-paragraph output; and output far
-    longer than the source, which is how commentary and recitation present.
+    (the source language leaking through); multi-paragraph output; output far
+    longer than the source, which is how commentary and recitation present; and
+    output far *shorter* than the source, which is how dropped clauses present.
 
     ``max_expansion`` is deliberately loose, because Russian to English legitimately
     expands. But a pure ratio is not enough on its own: a short source has a tiny
@@ -436,29 +508,22 @@ def validate_translation(raw: Optional[str], source: str, target_lang: str, *,
     At 24 words the two rules together reject 0.044% of those real translations
     against the ratio alone's 0.039% — two captions in 36,264, each of which falls
     back to the NMT model rather than being lost.
+
+    ``min_coverage`` is the floor under all of that, and it catches the opposite
+    failure: not a model that says too much, but one that quietly says less. See
+    :func:`check_translation` for the measurement behind the threshold.
     """
     text, _reason = check_translation(
         raw, source, target_lang, max_expansion=max_expansion,
-        min_word_budget=min_word_budget, max_slack_words=max_slack_words)
+        min_word_budget=min_word_budget, max_slack_words=max_slack_words,
+        min_coverage=min_coverage, min_coverage_source_words=min_coverage_source_words)
     return text
-
-
-# The rule names check_translation reports. Stable strings: they are counted and
-# compared across replay runs, so renaming one silently breaks a comparison against
-# an earlier report.
-REJECT_EMPTY = "empty"
-REJECT_REFUSAL = "refusal"
-REJECT_REASONING = "reasoning"
-REJECT_WRONG_SCRIPT = "wrong_script"
-REJECT_PARAGRAPHS = "paragraphs"
-REJECT_LIST = "list"
-REJECT_NUMBERS = "numbers"
-REJECT_TOO_LONG = "too_long"
 
 
 def check_translation(raw: Optional[str], source: str, target_lang: str, *,
                       max_expansion: float = 3.0, min_word_budget: int = 8,
-                      max_slack_words: int = 24) -> Tuple[Optional[str], Optional[str]]:
+                      max_slack_words: int = 24, min_coverage: float = 0.45,
+                      min_coverage_source_words: int = 8) -> Tuple[Optional[str], Optional[str]]:
     """``(caption, None)`` if the output is usable, else ``(None, rule_name)``.
 
     The rules and their order are documented on :func:`validate_translation`, which is
@@ -468,6 +533,25 @@ def check_translation(raw: Optional[str], source: str, target_lang: str, *,
     rejections" is not. Keeping both behind one implementation is the point — a
     harness that scored captions by its own copy of these rules would drift from the
     thing it is supposed to be measuring.
+
+    ``min_coverage`` bounds how much *shorter* than its source a caption may be. Every
+    other rule here bounds a model that says too much; this one catches the model that
+    quietly says less, which is the failure the length rules were blind to. Replaying
+    the 2026-08-02 services found six captions that passed every other check while
+    dropping whole clauses — "a sentence naming the second thing a speaker saw in a passage"
+    came back as "Thank you." — fluent, correctly scripted, number-clean, and wrong.
+
+    The threshold is measured, not guessed: over the 36,307 aligned source/translation
+    pairs in the session archive, translations below 0.45x their source's word count
+    are 0.04-0.11% of every source-length band. So the rule almost never fires on a
+    real translation, while catching six per service. It is deliberately blind to
+    sources under ``min_coverage_source_words``, where a ratio on a handful of words
+    says nothing — "один, два, а может быть и три." to "one, two, perhaps
+    three." is a good caption at 0.50.
+
+    This rule in particular is why a rejection must not simply mean "use NMT": the
+    borderline cases it catches are captions the LLM got mostly right, and the NMT
+    model is not a better answer for them. It is meant to be paired with a retry.
     """
     if raw is None:
         return None, REJECT_EMPTY
@@ -501,10 +585,15 @@ def check_translation(raw: Optional[str], source: str, target_lang: str, *,
     # Absolute floor as well as a ratio, so a short source still has a bounded budget —
     # and an absolute ceiling, so a long one does not buy unlimited room to hide in.
     src_words = _word_count(source)
+    out_words = _word_count(text)
     allowed = max(min_word_budget, int(max_expansion * src_words))
     allowed = min(allowed, src_words + max_slack_words)
-    if _word_count(text) > allowed:
+    if out_words > allowed:
         return None, REJECT_TOO_LONG
+
+    # And the floor: a caption far shorter than its source has dropped clauses.
+    if src_words >= min_coverage_source_words and out_words < min_coverage * src_words:
+        return None, REJECT_TOO_SHORT
 
     return text, None
 

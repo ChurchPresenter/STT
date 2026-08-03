@@ -14,6 +14,7 @@ from stt.llm_translate import (
     build_chat_messages,
     build_chat_payload,
     build_system_prompt,
+    check_translation,
     estimate_tokens,
     extract_chat_text,
     fit_context_prefix,
@@ -23,6 +24,7 @@ from stt.llm_translate import (
     local_model_path,
     looks_like_reasoning_model,
     resolve_gpu_layers,
+    retry_system_prompt,
     scan_gguf_models,
     uses_local_llm,
     numbers_survived,
@@ -343,6 +345,13 @@ class TestRealServiceCaptions:
     def test_the_good_captions_are_not_rejected(self, captions):
         # The rule has to be precise, not merely strict: rejecting sound translations
         # costs the LLM's quality on every one of them.
+        #
+        # A failure here is not automatically a bad rule. "must_accept" holds what the
+        # rules accepted when the fixture was generated, which is a presumption of
+        # quality and not a verified one — so a new rule firing on one of these means
+        # "read this caption", not "revert". Two were moved to must_reject on that
+        # basis when the coverage floor landed: both kept a quotation and dropped the
+        # sentence the speaker wrapped around it.
         rejected = [(src, out) for src, out in captions["must_accept"]
                     if validate_translation(out, src, "en") is None]
         assert not rejected, f"{len(rejected)} good captions would now fall back to NMT"
@@ -703,3 +712,103 @@ class TestExpansionCeiling:
     def test_the_floor_still_wins_for_a_tiny_source(self):
         # min_word_budget must not be clipped by the ceiling on a 1-word source.
         assert validate_translation(" ".join(["word"] * 8), "Аминь.", "en")
+
+
+class TestRetryPrompt:
+    """One corrective second attempt, before a rejection becomes an NMT downgrade."""
+
+    def test_a_content_rejection_gets_a_retry_naming_the_rule(self):
+        prompt = retry_system_prompt("BASE RULES", "numbers")
+        assert prompt is not None
+        assert prompt.startswith("BASE RULES")
+        assert "chapter and verse numbers" in prompt
+
+    @pytest.mark.parametrize("reason", ["numbers", "too_short", "too_long", "list",
+                                        "paragraphs", "reasoning", "refusal"])
+    def test_every_content_rule_has_a_correction(self, reason):
+        assert retry_system_prompt("BASE", reason) is not None
+
+    @pytest.mark.parametrize("reason", ["empty", "wrong_script"])
+    def test_the_rules_a_retry_cannot_help_are_not_retried(self, reason):
+        # "empty" usually means the call itself failed, and wrong-script means the
+        # model is not translating at all. Both spend a caption's budget to fail again.
+        assert retry_system_prompt("BASE", reason) is None
+
+    def test_no_reason_means_no_retry(self):
+        assert retry_system_prompt("BASE", None) is None
+        assert retry_system_prompt("BASE", "") is None
+
+    def test_an_unknown_rule_does_not_retry(self):
+        # A rule added without a correction must fall back, not retry blindly.
+        assert retry_system_prompt("BASE", "some_new_rule") is None
+
+    def test_the_correction_is_appended_not_substituted(self):
+        # The original rules still apply on the second attempt; the note is extra.
+        prompt = retry_system_prompt(DEFAULT_SYSTEM_PROMPT_TEMPLATE, "too_short")
+        assert DEFAULT_SYSTEM_PROMPT_TEMPLATE.strip() in prompt
+
+
+class TestCoverageFloor:
+    """Output far shorter than its source has dropped clauses.
+
+    Every other length rule bounds a model that says too much. This one catches the
+    model that quietly says less — the failure those rules were blind to, and the one
+    an operator cannot spot from the English alone, because the result is fluent.
+    """
+
+    def test_a_caption_that_kept_only_the_quotation_is_rejected(self):
+        # Verbatim from 2026-08-02: the speaker's framing sentence is simply gone.
+        src = ("Потом он скажет так, «Отче, почему ты оставил меня?» И это самое "
+               "трудное, что человек может себе представить в такую "
+               "минуту.")
+        assert validate_translation("Father, why have you forsaken me?", src, "en") is None
+
+    def test_a_full_sentence_answered_with_a_thank_you_is_rejected(self):
+        src = ("Третье, что мы видим в этом отрывке, когда он объяснил притчу, "
+               "это радость.")
+        assert validate_translation("Thank you.", src, "en") is None
+
+    def test_a_faithful_translation_of_the_same_source_passes(self):
+        src = ("Третье, что мы видим в этом отрывке, когда он объяснил притчу, "
+               "это радость.")
+        assert validate_translation(
+            "The second thing I see in this prayer, when Jesus described it, "
+            "is to give thanks.", src, "en")
+
+    def test_a_natural_compression_passes(self):
+        # 17 words -> 9 is 0.53, comfortably above the floor and a good caption.
+        src = ("Также мы просим Тебя о том, чтобы Ты благословил их в пути обратно "
+               "домой и сохранил их.")
+        assert validate_translation("May you guide them safely home and keep them.", src, "en")
+
+    def test_a_short_source_is_exempt(self):
+        # A ratio on a handful of words says nothing, and this is a good caption at 0.50.
+        assert validate_translation("one, two, perhaps three.",
+                                    "один, два, а может быть и три.", "en")
+
+    def test_the_boundary(self):
+        # 20 words at 0.45 allows 9; exactly at the threshold passes.
+        src = " ".join(["слово"] * 20)
+        assert validate_translation(" ".join(["word"] * 9), src, "en")
+        assert validate_translation(" ".join(["word"] * 8), src, "en") is None
+
+    def test_the_floor_is_configurable(self):
+        src = " ".join(["слово"] * 20)
+        assert validate_translation(" ".join(["word"] * 9), src, "en", min_coverage=0.3)
+        assert validate_translation(" ".join(["word"] * 12), src, "en",
+                                    min_coverage=0.7) is None
+
+    def test_it_can_be_turned_off(self):
+        src = " ".join(["слово"] * 20)
+        assert validate_translation("word", src, "en", min_coverage=0.0)
+
+    def test_the_exemption_threshold_is_configurable(self):
+        src = " ".join(["слово"] * 10)
+        assert validate_translation(" ".join(["word"] * 3), src, "en",
+                                    min_coverage_source_words=12)
+        assert validate_translation(" ".join(["word"] * 3), src, "en",
+                                    min_coverage_source_words=10) is None
+
+    def test_the_rule_is_named_in_the_check_variant(self):
+        src = " ".join(["слово"] * 20)
+        assert check_translation(" ".join(["word"] * 5), src, "en")[1] == "too_short"

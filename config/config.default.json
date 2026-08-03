@@ -477,6 +477,8 @@
       "_keep_alive_comment": "How long the server keeps the model loaded; -1 = forever. Leave at -1: an unpinned model measured p90 4.89s against p50 0.29s purely because it was unloaded between captions. Ignored by servers that don't support it.",
       "timeout_ms": 8000,
       "_timeout_ms_comment": "Per-caption timeout. On timeout the caption falls back to the NMT model rather than being dropped.",
+      "retry_on_reject": true,
+      "_retry_on_reject_comment": "When a caption fails validation, ask the model once more with the broken rule named, before falling back to the NMT model. Without this a rejection is a downgrade rather than a fix: the LLM usually had the caption nearly right and broke one rule, and the NMT model is not the better answer for it. Costs a second call only on the ~1% of captions that are rejected, is never attempted after a timeout or a transport error, and is skipped when too little of the caption's budget remains to finish.",
       "warmup_timeout_ms": 180000,
       "_warmup_timeout_ms_comment": "Timeout for the one-off warm-up call that loads and pins the model at start. Much longer than timeout_ms because a cold load of a multi-GB model takes far longer than a caption's budget; if the warm-up times out the NMT fallback loads instead and then occupies the VRAM the LLM needed.",
       "gguf_repo": "",

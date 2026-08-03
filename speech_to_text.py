@@ -826,6 +826,8 @@ from stt.llm_translate import (
     build_chat_messages as _llm_chat_messages,
     build_chat_payload as _llm_chat_payload,
     build_system_prompt as _llm_system_prompt,
+    check_translation as _llm_check,
+    retry_system_prompt as _llm_retry_prompt,
     fit_context_prefix as _llm_fit_context,
     input_fits as _llm_input_fits,
     input_token_budget as _llm_input_budget,
@@ -14874,6 +14876,17 @@ def _translate_via_local_llm(text, system_prompt, max_tokens, llm_cfg_override=N
         return None
 
 
+# Below this much remaining budget a second attempt cannot finish in time, so the
+# caption goes to the NMT model instead of arriving after the speaker has moved on.
+_LLM_RETRY_MIN_SECONDS = 1.5
+
+
+def _llm_retry_enabled(llm_cfg):
+    """Whether a rejected caption gets one corrective second attempt."""
+    value = llm_cfg.get("retry_on_reject", True)
+    return value if isinstance(value, bool) else str(value).strip().lower() not in ("0", "false", "no", "off")
+
+
 def _translate_via_llm(text, source_lang, target_lang, timeout_override=None,
                        llm_cfg_override=None, return_raw=False):
     """Translate one caption with an LLM. Returns the caption, or None to fall back.
@@ -14916,7 +14929,16 @@ def _translate_via_llm(text, source_lang, target_lang, timeout_override=None,
                   f"({len(text)} chars); using the NMT model")
             return (None, None, "input exceeds context budget") if return_raw else None
         raw = _translate_via_local_llm(text, system_prompt, max_tokens, llm_cfg_override)
-        clean = _llm_validate(raw, text, target_lang)
+        clean, reason = _llm_check(raw, text, target_lang)
+        if clean is None:
+            retry_prompt = _llm_retry_prompt(system_prompt, reason) if _llm_retry_enabled(llm_cfg) else None
+            if retry_prompt is not None:
+                print(f"[LLM-TRANSLATE] retrying once ({reason})")
+                raw2 = _translate_via_local_llm(text, retry_prompt, max_tokens, llm_cfg_override)
+                clean2, reason2 = _llm_check(raw2, text, target_lang)
+                if clean2 is not None:
+                    return (clean2, raw2, None) if return_raw else clean2
+                print(f"[LLM-TRANSLATE] retry also rejected ({reason2}); using the NMT model")
         return (clean, raw, None) if return_raw else clean
 
     endpoint = (llm_cfg.get("endpoint") or "").strip()
@@ -14942,6 +14964,7 @@ def _translate_via_llm(text, source_lang, target_lang, timeout_override=None,
     timeout = (timeout_override if timeout_override is not None
                else coerce_float(llm_cfg.get("timeout_ms"), 8000, lo=500, hi=60000) / 1000.0)
 
+    _started_at = time.time()
     try:
         import requests as _req
         resp = _req.post(endpoint, json=payload, headers=headers, timeout=timeout)
@@ -14952,7 +14975,29 @@ def _translate_via_llm(text, source_lang, target_lang, timeout_override=None,
         return (None, None, f"{type(e).__name__}: {e}") if return_raw else None
 
     raw = _llm_extract_text(data)
-    clean = _llm_validate(raw, text, target_lang)
+    clean, reason = _llm_check(raw, text, target_lang)
+    if clean is None:
+        # The retry is bounded by whatever the first call left of the caption's budget,
+        # never a fresh timeout: a caption that already spent its time is late, and a
+        # second full-length attempt would make it later than it is worth showing.
+        # Nothing here retries a timeout or a transport error — those return above.
+        remaining = timeout - (time.time() - _started_at)
+        retry_prompt = _llm_retry_prompt(system_prompt, reason) if _llm_retry_enabled(llm_cfg) else None
+        if retry_prompt is not None and remaining >= _LLM_RETRY_MIN_SECONDS:
+            print(f"[LLM-TRANSLATE] retrying once ({reason}, {remaining:.1f}s left)")
+            payload["messages"] = _llm_chat_messages(text, retry_prompt)
+            try:
+                resp = _req.post(endpoint, json=payload, headers=headers, timeout=remaining)
+                resp.raise_for_status()
+                data2 = resp.json()
+            except Exception as e:
+                print(f"[LLM-TRANSLATE] retry failed ({type(e).__name__}: {e})")
+            else:
+                raw2 = _llm_extract_text(data2)
+                clean2, reason2 = _llm_check(raw2, text, target_lang)
+                if clean2 is not None:
+                    return (clean2, raw2, data2) if return_raw else clean2
+                print(f"[LLM-TRANSLATE] retry also rejected ({reason2}); using the NMT model")
     return (clean, raw, data) if return_raw else clean
 
 

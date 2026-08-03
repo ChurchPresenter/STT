@@ -12,7 +12,9 @@ exclude = [".venv", "_AUTOMATIC_BACKUP", "models", "installer"]
 # they churn a deployed monolith for no behavior benefit.)
 select = ["E9", "F63", "F7", "F82", "F811", "B", "RUF"]
 ignore = [
-    "RUF001", "RUF003",  # ambiguous-unicode: Cyrillic strings are real data here
+    "RUF001", "RUF002", "RUF003",  # ambiguous-unicode: Cyrillic strings are real data here,
+                                   # in docstrings (002) as much as in code — the captions
+                                   # a rule was measured against belong next to the rule.
     "RUF100",            # unused-noqa: noqa comments document intent for wider local runs
 ]
 
