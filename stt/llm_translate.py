@@ -99,18 +99,31 @@ DEFAULT_SYSTEM_PROMPT_TEMPLATE = (
     "reference, translate only the reference; do not quote the passage. Keep chapter "
     "and verse numbers exactly as spoken: never replace a reference with the text it "
     "points to, and never expand a range such as 'verses 2-9' into a list of numbers. "
-    # The two sentences below were measured, not reasoned about. Replaying a service
-    # with and without them: rejections 13 -> 5 over 603 captions, 8 captions fixed and
-    # none broken, at no cost in latency. They exist because the input is not clean
-    # text — it is speech transcribed by Whisper, and the model treated a misheard
-    # word as a cue to supply something it recognised instead. "Евангелие от Иоанна,
-    # 3 глава, 14 стих." came back as a recitation of a different verse entirely, and
-    # a member's name and patronymic came back half-translated.
+    # The sentences below were measured, not reasoned about. They exist because the
+    # input is not clean text — it is speech transcribed by Whisper, and the model
+    # treated a misheard word as a cue to supply something it recognised instead:
+    # "Евангелие от Иоанна, 3 глава, 14 стих." came back as a recitation of a
+    # different verse entirely, and a member's name and patronymic came back half-translated.
+    #
+    # An earlier wording said "translate what is written, as written". It scored 8
+    # fixed and 0 broken on the service it was written against — and then on a
+    # held-out service the model read "as written" as leave it as it is, echoing
+    # short announcements and whole Russian sentences back untranslated. That is the reason
+    # for the explicit "must come back in {language}" clause, and the reason both
+    # services are now replayed before any wording here is believed.
+    #
+    # Measured over both services, ~1210 captions, against the prompt without these
+    # sentences: 10 captions fixed, 5 broken. That is the honest size of it — a net
+    # five or so in twelve hundred. The variance between the two services is larger
+    # than the gap between this wording and the one it replaced, so neither is
+    # "better" by measurement; this one is kept because the fault it avoids is the
+    # worse one to have on screen. Do not tune this against a single service.
     "The speech was transcribed automatically and may contain misheard words, "
-    "especially names of Bible books. Translate what is written, as written — if a "
-    "word looks garbled, render it as best you can, but never replace it with a "
-    "passage or a phrase you recognise. Translate every clause of the input: if the "
-    "input has three sentences, the output has three sentences."
+    "especially names of Bible books. A garbled word is still to be translated: render "
+    "it into {language} as best you can, and never replace it with a passage or a "
+    "phrase you recognise instead. Every caption must come back in {language} — never "
+    "repeat the input unchanged. Translate every clause: if the input has three "
+    "sentences, the output has three sentences."
 )
 
 
@@ -430,19 +443,92 @@ def _word_count(text: str) -> int:
 _NUMBER = re.compile(r"\d+")
 
 # Spelled-out forms, so "3 глава" -> "chapter three" is not read as a dropped number.
-# Only the small values a chapter-and-verse reference uses in words; past twenty a
-# translation writes the digits. Latin-script targets only — a language whose numerals
-# are not covered here simply falls back to comparing digits, which is the safe direction.
-_NUMBER_WORDS: Dict[str, Dict[str, Tuple[str, ...]]] = {
-    "en": {"1": ("one", "first"), "2": ("two", "second"), "3": ("three", "third"),
-           "4": ("four", "fourth"), "5": ("five", "fifth"), "6": ("six", "sixth"),
-           "7": ("seven", "seventh"), "8": ("eight", "eighth"), "9": ("nine", "ninth"),
-           "10": ("ten", "tenth"), "11": ("eleven", "eleventh"), "12": ("twelve", "twelfth")},
-    "es": {"1": ("uno", "primero", "primera"), "2": ("dos", "segundo", "segunda"),
-           "3": ("tres", "tercero", "tercera"), "4": ("cuatro",), "5": ("cinco",),
-           "6": ("seis",), "7": ("siete",), "8": ("ocho",), "9": ("nueve",),
-           "10": ("diez",), "11": ("once",), "12": ("doce",)},
+#
+# These were a hand-written table stopping at twelve, and a replay found the cliff: a
+# correct caption for a source that wrote the figure 13 — "We will read the first
+# thirteen verses." — was rejected as a lost number, because thirteen was one past the
+# end of the table. Chapter and verse numbers do not stop at twelve, so the forms are
+# generated instead, through the range where a translation still writes words rather
+# than digits.
+#
+# Latin-script targets only. A language whose numerals are not covered here falls back
+# to comparing digits, which is the safe direction: it can reject a good caption but
+# never accepts a lost figure.
+_EN_UNITS = ("", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine",
+             "ten", "eleven", "twelve", "thirteen", "fourteen", "fifteen", "sixteen",
+             "seventeen", "eighteen", "nineteen")
+_EN_TENS = ("", "", "twenty", "thirty", "forty", "fifty", "sixty", "seventy", "eighty", "ninety")
+_EN_ORDINALS = {
+    "one": "first", "two": "second", "three": "third", "five": "fifth", "eight": "eighth",
+    "nine": "ninth", "twelve": "twelfth",
 }
+_ES_UNITS = ("", "uno", "dos", "tres", "cuatro", "cinco", "seis", "siete", "ocho", "nueve",
+             "diez", "once", "doce", "trece", "catorce", "quince", "dieciséis",
+             "diecisiete", "dieciocho", "diecinueve")
+_ES_TENS = ("", "", "veinte", "treinta", "cuarenta", "cincuenta", "sesenta", "setenta",
+            "ochenta", "noventa")
+_ES_ORDINALS = {"uno": ("primero", "primera"), "dos": ("segundo", "segunda"),
+                "tres": ("tercero", "tercera")}
+
+
+def _en_ordinal(word: str) -> str:
+    """The ordinal of an English number word ("four" -> "fourth")."""
+    if word in _EN_ORDINALS:
+        return _EN_ORDINALS[word]
+    if word.endswith("y"):          # twenty -> twentieth
+        return word[:-1] + "ieth"
+    return word + "th"
+
+
+def _spelled_forms(number: str, lang: str) -> Tuple[str, ...]:
+    """Every way a translation might write ``number`` as words, or ()."""
+    try:
+        value = int(number)
+    except ValueError:
+        return ()
+    if not 1 <= value <= 99:
+        # Past a hundred a translation writes the digits, and the compound forms
+        # ("one hundred and nineteen") stop being worth enumerating.
+        return ()
+
+    if lang == "en":
+        units, tens = _EN_UNITS, _EN_TENS
+    elif lang == "es":
+        units, tens = _ES_UNITS, _ES_TENS
+    else:
+        return ()
+
+    ten, unit = divmod(value, 10)
+    tens_word: str
+    unit_word: str
+    joiners: Tuple[str, ...]
+    if value < 20:
+        tens_word, unit_word, joiners = "", units[value], ("",)
+    elif unit == 0:
+        tens_word, unit_word, joiners = tens[ten], "", ("",)
+    elif lang == "en":
+        # Both spellings are seen; "twenty three" is not wrong, just unhyphenated.
+        tens_word, unit_word, joiners = tens[ten], units[unit], ("-", " ")
+    elif ten == 2:
+        # Spanish writes 21-29 as one word, and 31+ as "treinta y uno".
+        tens_word, unit_word, joiners = "veinti", units[unit], ("",)
+    else:
+        tens_word, unit_word, joiners = tens[ten], units[unit], (" y ",)
+
+    forms = []
+    for joiner in joiners:
+        cardinal = tens_word + joiner + unit_word
+        forms.append(cardinal)
+        if lang != "en":
+            continue
+        # The ordinal inflects only the last word: twenty-three -> twenty-third.
+        if unit_word:
+            forms.append(tens_word + joiner + _en_ordinal(unit_word))
+        else:
+            forms.append(_en_ordinal(cardinal))
+    if lang == "es":
+        forms.extend(_ES_ORDINALS.get(forms[0], ()))
+    return tuple(dict.fromkeys(f for f in forms if f))
 
 
 def numbers_survived(source: str, text: str, target_lang: str = "",
@@ -469,13 +555,13 @@ def numbers_survived(source: str, text: str, target_lang: str = "",
     if not src and not out:
         return True
 
-    spelled = _NUMBER_WORDS.get((target_lang or "").lower(), {})
+    lang = (target_lang or "").lower()
     low = (text or "").lower()
     for number in set(src):
         if number in out:
             continue
         if any(re.search(r"(?<!\w)%s(?!\w)" % re.escape(word), low)
-               for word in spelled.get(number, ())):
+               for word in _spelled_forms(number, lang)):
             continue
         return False
 

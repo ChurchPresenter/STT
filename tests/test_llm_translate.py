@@ -301,8 +301,12 @@ class TestScriptureReferences:
             assert validate_translation(output, source, "en") == output
 
     def test_a_number_spelled_out_is_not_a_dropped_number(self):
+        # "sixteen" used to be read as a lost figure purely because the spelled-out
+        # forms were a hand-written table that stopped at twelve. The assertion here
+        # was that this caption is rejected, which encoded that limit as if it were
+        # intent — against the name of this very test. The forms are generated now.
         assert validate_translation("chapter three, verse sixteen is where we are",
-                                    "3 глава, 16 стих", "en") is None
+                                    "3 глава, 16 стих", "en")
         assert validate_translation("the third chapter", "3 глава", "en") == "the third chapter"
 
     def test_one_invented_number_is_tolerated(self):
@@ -375,6 +379,33 @@ class TestNumbersSurvived:
         # rather than being waved through.
         assert not numbers_survived("3 глава", "kolmas luku", "fi")
         assert numbers_survived("3 глава", "luku 3", "fi")
+
+    def test_a_number_spelled_out_past_twelve_still_counts(self):
+        # The regression: the forms were a hand-written table stopping at twelve, so a
+        # correct caption for a real service was rejected as having lost its figure.
+        assert numbers_survived("прочитаем первые 13 стихов",
+                                "We will read the first thirteen verses.", "en")
+
+    @pytest.mark.parametrize("digits,words", [
+        ("13", "thirteen"), ("19", "nineteenth"), ("20", "twenty"), ("21", "twenty-first"),
+        ("23", "twenty three"), ("30", "thirtieth"), ("42", "forty-two"), ("99", "ninety-nine"),
+    ])
+    def test_spelled_forms_are_recognised_across_the_range(self, digits, words):
+        assert numbers_survived(f"глава {digits}", f"chapter {words}", "en")
+
+    def test_a_hundred_and_up_is_not_spelled_out(self):
+        # Past a hundred a translation writes digits, so the compound forms are not
+        # enumerated — and a missing figure is still a missing figure.
+        assert numbers_survived("Псалом 119", "Psalm 119", "en")
+        assert not numbers_survived("Псалом 119", "Psalm one hundred and nineteen", "en")
+
+    def test_spanish_forms(self):
+        assert numbers_survived("3 глава", "capítulo tres", "es")
+        assert numbers_survived("21 стих", "versículo veintiuno", "es")
+        assert numbers_survived("31 стих", "versículo treinta y uno", "es")
+
+    def test_a_different_number_is_not_accepted_as_the_spelled_form(self):
+        assert not numbers_survived("глава 13", "chapter thirty", "en")
 
 
 class TestLocalModelPath:
