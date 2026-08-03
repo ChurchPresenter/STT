@@ -1,5 +1,6 @@
 """Config persistence, upload validation, and version helpers (stt/config_utils.py)."""
 
+import re
 import datetime
 import json
 import os
@@ -246,3 +247,48 @@ class TestSystemTimezone:
     def test_returns_a_concrete_tzinfo(self):
         tz = system_timezone()
         assert datetime.datetime.now(tz).utcoffset() is not None
+
+
+class TestShippedTemplateHasNoCredential:
+    """config.default.json must not ship a usable password.
+
+    It did: `"password": "admin"` with auth enabled, which meant every
+    installation of this software shared one password, published in a public
+    repository. The server already had the better behaviour — an empty value makes
+    it generate a random 12-character password at startup, save it, and print it to
+    the console — and the shipped default was the only thing standing in its way.
+    """
+
+    PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                        "config", "config.default.json")
+
+    @pytest.fixture
+    def template(self):
+        with open(self.PATH, encoding="utf-8") as fh:
+            return json.load(fh)
+
+    def test_the_password_ships_empty(self, template):
+        password = template["web_server"]["password_auth"]["password"]
+        assert password == "", (
+            "a non-empty default is the same password on every install, in a public "
+            "repository — leave it empty so each install generates its own")
+
+    def test_no_other_credential_field_ships_a_value(self, template):
+        # Same rule, applied to every secret-shaped key rather than the one that
+        # happened to be wrong.
+        secretish = re.compile(r"pass|secret|token|api_key|credential", re.I)
+        offenders = []
+
+        def walk(node, path=""):
+            if not isinstance(node, dict):
+                return
+            for key, value in node.items():
+                here = f"{path}.{key}" if path else key
+                if isinstance(value, dict):
+                    walk(value, here)
+                elif (isinstance(value, str) and value.strip()
+                        and not key.startswith("_") and secretish.search(key)):
+                    offenders.append(here)
+
+        walk(template)
+        assert not offenders, f"shipped credential values: {offenders}"

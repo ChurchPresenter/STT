@@ -175,8 +175,8 @@
     "password_auth": {
       "enabled": true,
       "_enabled_comment": "Enable password authentication as fallback for non-whitelisted IPs",
-      "password": "admin",
-      "_password_comment": "Password for temporary access. Empty = generate random password on startup and display in console",
+      "password": "",
+      "_password_comment": "Password for temporary access. Ships empty on purpose: an empty value makes the server generate a random 12-character password at startup, save it here, and print it to the console. A shipped default would be the same password on every installation of this software, published in the repository \u2014 which is what it used to be.",
       "session_timeout_minutes": 60,
       "_session_timeout_comment": "How long password-authenticated sessions remain valid (in minutes)"
     }
