@@ -423,16 +423,29 @@ as both client and server cannot chain an offload onward.
 the worker by decoding the audio a second time, so it never reaches this dispatcher — the web
 process only reads the result.
 
-**The LLM's answer is thrown away when:**
+**The LLM's answer is rejected when:**
 
-| Rejected when | Because |
-|---------------|---------|
-| It refuses — *"I can't assist…"*, *"As an AI…"* | A refusal is not a translation |
-| It narrates — *"Okay, let's…"*, *"Here's the translation:"* | Reasoning models ignore instructions to stop |
-| Cyrillic survives into a Latin-script target | The source leaked through untranslated |
-| The output is multi-paragraph | A caption is one utterance; a document is a recitation |
-| It runs past `min(max(8, 3 × source words), source + 24)` | Commentary and recited scripture present as length. The floor of 8 stops a two-word caption getting a two-word budget |
-| The input would not fit the context window | Checked *before* generating, so an overflow is a decline and never a crash — but **only on `provider: local`**. `n_ctx` sizes the in-process GGUF; an OpenAI-compatible endpoint, the shipped default, is not pre-checked |
+| Rejected when | Rule | Because |
+|---------------|------|---------|
+| It refuses — *"I can't assist…"*, *"As an AI…"* | `refusal` | A refusal is not a translation |
+| It narrates — *"Okay, let's…"*, *"Here's the translation:"* | `reasoning` | Reasoning models ignore instructions to stop |
+| Cyrillic survives into a Latin-script target | `wrong_script` | The source leaked through untranslated |
+| The output is multi-paragraph | `paragraphs` | A caption is one utterance; a document is a recitation |
+| Three or more lines of ≤2 words | `list` | A counted-out verse range arrives on single newlines and slips past the paragraph check |
+| A figure the speaker gave has vanished, or a crowd of figures appears that the source never had | `numbers` | The two scripture failure modes move numbers in opposite directions: a reference answered with a remembered passage loses them, a range counted out invents them |
+| It runs past `min(max(8, 3 × source words), source + 24)` | `too_long` | Commentary and recited scripture present as length. The floor of 8 stops a two-word caption getting a two-word budget |
+| It falls under `0.45 × source words` (sources of 8+ words only) | `too_short` | Dropped clauses present as brevity — a full sentence answered with *"Thank you."* is fluent, correctly scripted and wrong. Measured at 0.04–0.11% of 36,307 real aligned pairs, so it effectively never fires on a good translation |
+| The input would not fit the context window | — | Checked *before* generating, so an overflow is a decline and never a crash — but **only on `provider: local`**. `n_ctx` sizes the in-process GGUF; an OpenAI-compatible endpoint, the shipped default, is not pre-checked |
+
+**A rejection buys one retry before it becomes a downgrade.** Falling straight to NMT made
+every new rule a net loss on the captions it caught: the LLM usually had the caption nearly
+right and broke one stated rule. So the caption is asked for again with that rule named, and
+only the second failure falls back. `live_translation.llm.retry_on_reject` turns this off.
+
+Not retried: `empty` (the call itself failed) and `wrong_script` (the model is not translating
+at all) — both spend a caption's budget to fail the same way. Nor is anything retried after a
+timeout or a transport error, and on the endpoint path the retry is bounded by what remains of
+the caption's budget rather than taking a fresh timeout.
 
 Each caption is an independent two-message call — nothing accumulates between sentences, so
 there is no context to clear.
@@ -653,7 +666,9 @@ anyone edits the file, and these did. Search for the name.
 | Emit loops | `emit_new_entries` · `emit_translated_entries` · `emit_audio_stream` · `emit_tts_audio` |
 | Translation dispatcher | `translate_live_text` |
 | Remote / LLM / NMT legs | `_translate_via_remote` · `_translate_via_llm` · `translate_text` |
-| LLM validation | `stt/llm_translate.py` — `validate_translation` |
+| LLM validation | `stt/llm_translate.py` — `validate_translation` · `check_translation` (same rules, names the one that fired) |
+| LLM retry before fallback | `stt/llm_translate.py` — `retry_system_prompt` · `_translate_via_llm` |
+| Offline replay / A-B a change | `stt/translation_replay.py` — `load_session_pairs` · `replay` · `compare` |
 | Model load / unload | `ModelFactory.load_model` · `get_live_translation_model` · `get_local_llm` · `unload_local_llm` |
 | Device ladder | `ModelFactory.load_model` (CUDA → MPS → CPU) · `_load_faster_whisper` (CUDA → CPU only) |
 | Calibration | `/api/calibration/start` · `stt/calibration.py` — `analyze_calibration_data` |
@@ -671,7 +686,9 @@ anyone edits the file, and these did. Search for the name.
 | Timezone resolution | `stt/config_utils.py` — `resolve_timezone` · `get_configured_timezone` |
 | Overlap de-duplication | `stt/text_utils.py` — `remove_overlapping_prefix` |
 | Live-line stabiliser | `stt/hypothesis_buffer.py` — `LocalAgreementBuffer.stabilize` |
-| LLM validation | `stt/llm_translate.py` — `validate_translation` |
+| LLM validation | `stt/llm_translate.py` — `validate_translation` · `check_translation` (same rules, names the one that fired) |
+| LLM retry before fallback | `stt/llm_translate.py` — `retry_system_prompt` · `_translate_via_llm` |
+| Offline replay / A-B a change | `stt/translation_replay.py` — `load_session_pairs` · `replay` · `compare` |
 
 </details>
 
