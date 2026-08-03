@@ -40,8 +40,8 @@ jobs:
   test:
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v5
-      - uses: astral-sh/setup-uv@v8.1.0
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v9.0.0
         with:
           python-version: "3.11"
       - name: Install test deps
@@ -65,7 +65,7 @@ jobs:
       tag: ${{ steps.v.outputs.tag }}
       macos_include: ${{ steps.mac.outputs.include }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
       - id: mac
@@ -113,10 +113,10 @@ jobs:
       # build stays unsigned (same pattern as ChurchPresenter).
       WINDOWS_SIGNING_ENABLED: ${{ secrets.WINDOWS_CERTIFICATE_PFX != '' && 'true' || 'false' }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
-      - uses: astral-sh/setup-uv@v8.1.0
+      - uses: astral-sh/setup-uv@v9.0.0
         with:
           python-version: "3.11"
       - name: Install build tools
@@ -170,7 +170,7 @@ jobs:
             & $iscc "/DAppVersion=$VERSION" "installer\windows\setup.iss"
           }
           if ($LASTEXITCODE -ne 0) { throw "ISCC failed" }
-      - uses: actions/upload-artifact@v6
+      - uses: actions/upload-artifact@v7
         with:
           name: STT-windows
           path: Output/STT-Setup.exe
@@ -195,10 +195,10 @@ jobs:
       MACOS_SIGNING_ENABLED: ${{ secrets.MACOS_CERTIFICATE_P12 != '' && 'true' || 'false' }}
       PKG_SIGNING_ENABLED: ${{ secrets.MACOS_INSTALLER_CERTIFICATE_P12 != '' && 'true' || 'false' }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
-      - uses: astral-sh/setup-uv@v8.1.0
+      - uses: astral-sh/setup-uv@v9.0.0
         with:
           python-version: "3.11"
       - name: Install build tools
@@ -314,7 +314,7 @@ jobs:
             --wait
           xcrun stapler staple STT-macos-${{ matrix.arch }}.pkg
           spctl --assess --type install -v STT-macos-${{ matrix.arch }}.pkg
-      - uses: actions/upload-artifact@v6
+      - uses: actions/upload-artifact@v7
         with:
           name: STT-macos-${{ matrix.arch }}
           path: STT-macos-${{ matrix.arch }}.pkg
@@ -327,10 +327,10 @@ jobs:
     env:
       LINUX_SIGNING_ENABLED: ${{ secrets.LINUX_GPG_PRIVATE_KEY != '' && 'true' || 'false' }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
-      - uses: astral-sh/setup-uv@v8.1.0
+      - uses: astral-sh/setup-uv@v9.0.0
         with:
           python-version: "3.11"
       - name: Install build tools
@@ -371,7 +371,7 @@ jobs:
           # dpkg-sig --verify reports BADSIG on its own output with gnupg2;
           # verify the embedded clearsigned manifest with gpg directly instead.
           ar p STT-linux.deb _gpgbuilder | gpg --verify -
-      - uses: actions/upload-artifact@v6
+      - uses: actions/upload-artifact@v7
         with:
           name: STT-linux
           path: STT-linux.deb
@@ -393,7 +393,7 @@ jobs:
           || needs.build-linux.result == 'success')
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
@@ -442,7 +442,7 @@ jobs:
           echo "::error::could not push $TAG after 3 attempts — the branch is moving faster than the build"
           exit 1
 
-      - uses: actions/download-artifact@v7
+      - uses: actions/download-artifact@v8
         with:
           path: artifacts/
 
@@ -468,7 +468,7 @@ jobs:
 
       # The release now holds the installers; the run's artifacts are redundant.
       - name: Delete build artifacts
-        uses: actions/github-script@v7
+        uses: actions/github-script@v9
         with:
           script: |
             const { data: { artifacts } } = await github.rest.actions.listWorkflowRunArtifacts({
