@@ -76,6 +76,14 @@ _LLM_KEYS = (
     "keep_alive",
     "timeout_ms",
     "warmup_timeout_ms",
+    # Both decide what a *rejected* caption becomes, which is the part of a
+    # transcript that cannot be explained from the text alone. Without them a
+    # reader cannot tell a caption the LLM produced on its second attempt from one
+    # it got right first time, nor an untranslated row that means "the LLM declined
+    # and this box has no NMT model loaded" from one that means "translation was
+    # still warming up".
+    "retry_on_reject",
+    "fallback",
 )
 
 # Provider-specific keys: recording an endpoint for a local session (or GPU

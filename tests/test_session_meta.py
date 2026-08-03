@@ -431,6 +431,21 @@ class TestLlmSettings:
         assert meta["mt.llm.timeout_ms"] == "8000"
         assert meta["mt.llm.warmup_timeout_ms"] == "180000"
 
+    def test_the_rejection_behaviour_is_recorded(self):
+        # These two decide what a *rejected* caption becomes, which is the part of a
+        # transcript the text cannot explain. Without them a reader cannot tell a
+        # caption the LLM produced on a second attempt from one it got right first
+        # time, nor an untranslated row that means "declined, and no NMT model here"
+        # from one that means "translation was still warming up".
+        meta = build(self.llm(model="m", retry_on_reject=False, fallback="skip"))
+        assert meta["mt.llm.retry_on_reject"] == "false"
+        assert meta["mt.llm.fallback"] == "skip"
+
+    def test_the_rejection_defaults_are_recorded_when_set(self):
+        meta = build(self.llm(model="m", retry_on_reject=True, fallback="nmt"))
+        assert meta["mt.llm.retry_on_reject"] == "true"
+        assert meta["mt.llm.fallback"] == "nmt"
+
     def test_api_key_is_never_recorded(self):
         """Session databases are delivered to a NAS; a bearer token must not ride along."""
         meta = build(self.llm(model="m", api_key="sk-secret-value"))
