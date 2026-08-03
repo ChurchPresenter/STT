@@ -167,6 +167,70 @@ def resolve_asr_model(model_cfg: Mapping[str, Any]) -> str:
     return _stringify(_section(model_cfg, "whisper").get("model"))
 
 
+# --- Per-row provenance ----------------------------------------------------------
+#
+# session_meta records what a session was configured with. That is not the same as
+# what produced a given caption, and the gap is not academic: when the LLM declines a
+# caption it is translated by the NMT model instead, so a session recorded as "llm"
+# contains rows from two engines with nothing to tell them apart. Measuring an LLM
+# change against such a transcript silently compares its output to the other model's
+# on exactly the rows where they differ most — which is how a replay first read as a
+# regression when it was not one.
+#
+# Hence three columns on every row, filled by whichever leg actually ran.
+
+# Engines that can produce a caption's translated_text.
+MT_ENGINE_LLM = "llm"
+MT_ENGINE_NMT = "nmt"
+MT_ENGINE_REMOTE = "remote"      # another machine translated it; its own engine is in the label
+MT_ENGINE_WHISPER = "whisper"    # whisper_translate decoded the audio straight to the target
+MT_ENGINE_NONE = "none"          # nothing translated it; the caption is the source text
+
+
+def asr_row_label(config: Optional[Mapping[str, Any]]) -> str:
+    """What transcribed a row, as "implementation/model".
+
+    Both halves, because neither identifies a decode on its own: "large-v3" says
+    nothing about whether faster-whisper or openai-whisper produced it, and the two
+    do not decode identically.
+    """
+    model_cfg = _section(config, "model")
+    implementation = resolve_asr_implementation(model_cfg)
+    model = resolve_asr_model(model_cfg)
+    if not model:
+        return implementation
+    return "%s/%s" % (implementation, model)
+
+
+def mt_row_label(lt_cfg: Optional[Mapping[str, Any]], engine: str,
+                 *, remote_status: Optional[Mapping[str, Any]] = None,
+                 model: str = "") -> str:
+    """What translated a row, named the way that engine identifies its model.
+
+    ``engine`` is passed by the leg that ran rather than derived from config, which
+    is the whole point: config says which engine was *asked*, and the interesting
+    rows are the ones where a different one answered.
+
+    ``model`` is the caller's own model id, used by the engines this module cannot
+    name from config alone: the NMT model actually resident, and the Whisper model
+    that decoded straight to the target language.
+
+    For a remote translation the label names the machine and, when its status has
+    been seen, the model it reported — a paired box can be reconfigured without this
+    one restarting, so local config is not evidence about what ran over there.
+    """
+    lt = lt_cfg or {}
+    if engine == MT_ENGINE_LLM:
+        return llm_model_id(_section(lt, "llm"))
+    if engine == MT_ENGINE_REMOTE:
+        endpoint = _stringify(_section(lt, "remote").get("endpoint")).strip()
+        remote_model = _stringify((remote_status or {}).get("model")).strip()
+        if endpoint and remote_model:
+            return "%s (%s)" % (endpoint, remote_model)
+        return endpoint or MT_ENGINE_REMOTE
+    return _stringify(model).strip()
+
+
 def _add_identity(meta: Dict[str, str], version: str, commit: str,
                   describe: str, hostname: str, started_at: str) -> None:
     _put(meta, "app.version", version)

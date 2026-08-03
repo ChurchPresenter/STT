@@ -875,6 +875,13 @@ from stt.session_meta import (
     remote_provenance as _remote_provenance,
     write_missing as _session_meta_write_missing,
     write_session_meta as _write_session_meta,
+    asr_row_label as _session_asr_row_label,
+    mt_row_label as _session_mt_row_label,
+    MT_ENGINE_LLM,
+    MT_ENGINE_NMT,
+    MT_ENGINE_NONE,
+    MT_ENGINE_REMOTE,
+    MT_ENGINE_WHISPER,
 )
 
 # Default MADLAD-400 model when the translation engine is set to "madlad".
@@ -1135,6 +1142,12 @@ def _current_session_meta(session_config=None):
     return meta
 
 
+# Last successful answer from the paired machine about what it translates with.
+# Kept because every offloaded row records the model that produced it, and probing
+# per caption would put a network round trip in front of every one.
+_remote_effective = {}
+
+
 def _fetch_remote_provenance():
     """Ask the paired remote what it is translating with. {} if unreachable.
 
@@ -1148,10 +1161,13 @@ def _fetch_remote_provenance():
     try:
         import requests as _req
         r = _req.get(endpoint + "/api/translation/status", timeout=5)
-        return _remote_provenance(r.json())
+        provenance = _remote_provenance(r.json())
     except Exception as e:
         print(f"[SESSION-META] Could not read remote translation provenance: {e}")
         return {}
+    if provenance:
+        _remote_effective.update(provenance)
+    return provenance
 
 
 def _record_remote_provenance_async(db_path):
@@ -3742,6 +3758,43 @@ def initialize_database(session_config=None):
                 db_cursor.execute("ALTER TABLE transcriptions ADD COLUMN translation_ts_ms INTEGER DEFAULT NULL")
                 db_connection.commit()
                 print("[DB] OK: Migration complete (added translation_ts_ms column)")
+            if "asr_model" not in columns:
+                # What produced this row, per row rather than per session. The session
+                # records what was *configured*; a caption records what actually ran,
+                # and the two part company exactly where it matters. A session set to
+                # translate with the LLM still contains NMT rows wherever the LLM
+                # declined a caption, and nothing distinguished them — so measuring an
+                # LLM change against a past service compared it against the other
+                # model's output on precisely the rows the two disagree about.
+                print("[DB] Migrating database: adding model provenance columns...")
+                db_cursor.execute("ALTER TABLE transcriptions ADD COLUMN asr_model TEXT DEFAULT NULL")
+                db_cursor.execute("ALTER TABLE transcriptions ADD COLUMN mt_engine TEXT DEFAULT NULL")
+                db_cursor.execute("ALTER TABLE transcriptions ADD COLUMN mt_model TEXT DEFAULT NULL")
+                db_connection.commit()
+                print("[DB] OK: Migration complete (added asr_model, mt_engine, mt_model columns)")
+
+            # Stamp every row with the model that transcribed it, from a trigger rather
+            # than from the INSERT statements. There are nineteen of those, each with a
+            # different column list — the segment batch, the phrase timeout, the stop
+            # flush, and a denied variant of each — and an approach that has to touch
+            # all nineteen is one that silently misses the twentieth when it is added.
+            # The trigger cannot be bypassed by a writer that does not know about it.
+            #
+            # The label is the session's: a model swapped mid-session leaves this stale,
+            # which session_meta's timestamped change keys already record properly.
+            try:
+                _asr_label = _session_asr_row_label(config)
+                db_cursor.execute("DROP TRIGGER IF EXISTS stamp_asr_model")
+                if _asr_label:
+                    db_cursor.execute(
+                        "CREATE TRIGGER stamp_asr_model AFTER INSERT ON transcriptions"
+                        " WHEN NEW.asr_model IS NULL"
+                        " BEGIN UPDATE transcriptions SET asr_model = '%s' WHERE id = NEW.id; END"
+                        % _asr_label.replace("'", "''")
+                    )
+                db_connection.commit()
+            except Exception as _asr_err:
+                print(f"[DB] WARNING: could not stamp the ASR model on rows ({_asr_err})")
 
             # Service-phase tables. Created here, inside the init transaction, so the
             # detector's tick (which runs in the web process, on its own connection)
@@ -15030,6 +15083,35 @@ def _translate_via_llm(text, source_lang, target_lang, timeout_override=None,
     return (clean, raw, data) if return_raw else clean
 
 
+# Which engine served the caption this thread just translated. Thread-local rather
+# than a return value because the answer is wanted at the row's UPDATE, several call
+# shapes away, and threading it through would mean changing every signature between
+# here and there for a field almost none of them care about. The contract is narrow:
+# translate_live_text sets it on every return path, and the caller reads it
+# immediately afterwards, on the same thread, before translating anything else.
+_mt_provenance = threading.local()
+
+
+def _record_mt_engine(engine, model=""):
+    """Note the engine that produced the translation being returned."""
+    _mt_provenance.engine = engine
+    _mt_provenance.model = _session_mt_row_label(
+        config.get("live_translation", {}), engine,
+        remote_status=_remote_effective_status(), model=model)
+    return engine
+
+
+def last_mt_provenance():
+    """(engine, model) for this thread's most recent translation, or (None, None)."""
+    return getattr(_mt_provenance, "engine", None), getattr(_mt_provenance, "model", None)
+
+
+def _remote_effective_status():
+    """What a paired machine last reported about the model it translates with."""
+    model = _remote_effective.get("mt.remote.effective.model")
+    return {"model": model} if model else None
+
+
 def translate_live_text(text, source_lang, target_lang, return_extras=False, num_alternatives=0, generation_params=None, local_only=False):
     """Translate text for live display using the singleton model.
 
@@ -15061,6 +15143,7 @@ def translate_live_text(text, source_lang, target_lang, return_extras=False, num
                                                  generation_params=gen_params, raise_on_error=True)
                     if _dbg:
                         print(f"[TRANS-DBG] remote result=ok ep={_remote_ep} text='{text[:40]}'", flush=True)
+                    _record_mt_engine(MT_ENGINE_REMOTE)
                     return _res
                 except _RemoteTranslateError as e:
                     print(f"[REMOTE_TRANSLATE] Call failed: {e}")
@@ -15078,11 +15161,13 @@ def translate_live_text(text, source_lang, target_lang, return_extras=False, num
         if remote_failed and remote_cfg.get("fallback", "skip") == "skip":
             if _dbg:
                 print(f"[TRANS-DBG] remote result=fallback-skip (returning source) text='{text[:40]}'", flush=True)
+            _record_mt_engine(MT_ENGINE_NONE)
             if return_extras:
                 return {"text": text, "confidence": None, "alternatives": []}
             return text
 
     if not text or not text.strip():
+        _record_mt_engine(MT_ENGINE_NONE)
         if return_extras:
             return {"text": "", "confidence": None, "alternatives": []}
         return ""
@@ -15094,6 +15179,7 @@ def translate_live_text(text, source_lang, target_lang, return_extras=False, num
     if config.get("live_translation", {}).get("translation_method") == "llm":
         _llm_text = _translate_via_llm(text, source_lang, target_lang)
         if _llm_text is not None:
+            _record_mt_engine(MT_ENGINE_LLM)
             if return_extras:
                 return {"text": _llm_text, "confidence": None, "alternatives": []}
             return _llm_text
@@ -15103,6 +15189,7 @@ def translate_live_text(text, source_lang, target_lang, return_extras=False, num
             # one caption in a hundred, and that is the room a larger LLM needs.
             # The cost is that those captions show the source text untranslated.
             print(f"[LLM-TRANSLATE] declined; showing the source (llm.fallback=skip) for: '{text[:48]}'")
+            _record_mt_engine(MT_ENGINE_NONE)
             if return_extras:
                 return {"text": text, "confidence": None, "alternatives": []}
             return text
@@ -15113,6 +15200,7 @@ def translate_live_text(text, source_lang, target_lang, return_extras=False, num
         trans_model_id = _resolve_live_translation_model_id(config.get("live_translation", {}))
         model, tokenizer = get_live_translation_model(trans_use_gpu, model_id=trans_model_id)
         if model is None:
+            _record_mt_engine(MT_ENGINE_NONE)
             if return_extras:
                 return {"text": text, "confidence": None, "alternatives": []}
             return text
@@ -15123,9 +15211,11 @@ def translate_live_text(text, source_lang, target_lang, return_extras=False, num
             num_alternatives=num_alternatives if return_extras else 0,
             generation_params=gen_params,
         )
+        _record_mt_engine(MT_ENGINE_NMT, model=trans_model_id)
         return result
     except Exception as e:
         print(f"[LIVE-TRANSLATION ERROR] {e}")
+        _record_mt_engine(MT_ENGINE_NONE)
         if return_extras:
             return {"text": text, "confidence": None, "alternatives": []}
         return text  # Return original on error
@@ -15451,6 +15541,10 @@ def emit_translated_entries():
                         if dbg:
                             _dbg_branches.append((seg_id, "warmup_skip"))
                         continue
+                    # Read before anything else translates on this thread: the record
+                    # is the last call's, and the in-progress line below makes one.
+                    _mt_engine, _mt_model = last_mt_provenance()
+
                     if extras is not None:
                         cache.set_with_extras(seg_id, original_text, translated_text, target_lang,
                                               confidence=extras.get("confidence"), alternatives=extras.get("alternatives", []))
@@ -15470,8 +15564,10 @@ def emit_translated_entries():
                             with sqlite3.connect(current_db, timeout=30.0) as _tconn:
                                 _tconn.execute("PRAGMA busy_timeout=30000")
                                 _tconn.execute(
-                                    "UPDATE transcriptions SET translated_text = ?, translation_language = ?, translation_ts_ms = ? WHERE id = ?",
-                                    (translated_text, target_lang, int(time.time() * 1000), seg_id),
+                                    "UPDATE transcriptions SET translated_text = ?, translation_language = ?,"
+                                    " translation_ts_ms = ?, mt_engine = ?, mt_model = ? WHERE id = ?",
+                                    (translated_text, target_lang, int(time.time() * 1000),
+                                     _mt_engine, _mt_model, seg_id),
                                 )
                                 _tconn.commit()
                                 if dbg:
@@ -16036,6 +16132,10 @@ def thread1_function(ts, cq, cfq, cal_state, cal_data, cal_step1, asq):
 
                     # Load fresh config for this process
                     process_config = load_config()
+                    # In whisper_translate modes the translation is a second decode by
+                    # the ASR model itself, so the model that produced a row's
+                    # translated_text is the one that produced its text.
+                    _whisper_mt_model = _session_asr_row_label(process_config)
                     # Get defaults from config file
                     # Note: model config is at model.whisper, not whisper
                     whisper_config = process_config.get("model", {}).get("whisper", {})
@@ -17693,8 +17793,10 @@ def thread1_function(ts, cq, cfq, cal_state, cal_data, cal_step1, asq):
                                                             _tcache.set(_row_id, "", _part, _target_lang)
                                                             # Also save to DB translated_text column
                                                             persistent_db_cursor.execute(
-                                                                "UPDATE transcriptions SET translated_text = ?, translation_language = ?, translation_ts_ms = ? WHERE id = ?",
-                                                                (_part, _target_lang, int(time.time() * 1000), _row_id),
+                                                                "UPDATE transcriptions SET translated_text = ?, translation_language = ?,"
+                                                                " translation_ts_ms = ?, mt_engine = ?, mt_model = ? WHERE id = ?",
+                                                                (_part, _target_lang, int(time.time() * 1000),
+                                                                 MT_ENGINE_WHISPER, _whisper_mt_model, _row_id),
                                                             )
                                                         persistent_db_conn.commit()
                                                     # Track saved_sentences and database row count
@@ -17925,8 +18027,10 @@ def thread1_function(ts, cq, cfq, cal_state, cal_data, cal_step1, asq):
                                                                     continue
                                                                 _tcache.set(_row_id, "", _part, _target_lang)
                                                                 persistent_db_cursor.execute(
-                                                                    "UPDATE transcriptions SET translated_text = ?, translation_language = ?, translation_ts_ms = ? WHERE id = ?",
-                                                                    (_part, _target_lang, int(time.time() * 1000), _row_id),
+                                                                    "UPDATE transcriptions SET translated_text = ?, translation_language = ?,"
+                                                                    " translation_ts_ms = ?, mt_engine = ?, mt_model = ? WHERE id = ?",
+                                                                    (_part, _target_lang, int(time.time() * 1000),
+                                                                     MT_ENGINE_WHISPER, _whisper_mt_model, _row_id),
                                                                 )
                                                             persistent_db_conn.commit()
                                                     except Exception as db_error:

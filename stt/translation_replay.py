@@ -47,6 +47,13 @@ class CaptionPair:
     source: str
     shipped: Optional[str]
     shipped_latency_ms: Optional[int]
+    # Which engine produced ``shipped``, for sessions recorded since rows carry it.
+    # Older databases leave this None, and a comparison against them has to be read
+    # with that in mind: a caption a rejection sent to the NMT model is stored the
+    # same way as one the LLM produced, so scoring an LLM candidate against them
+    # compares it to a different model on exactly the rows the two disagree about.
+    shipped_engine: Optional[str] = None
+    shipped_model: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -119,21 +126,27 @@ def load_session_pairs(db_path: str, *, min_source_words: int = 1) -> List[Capti
     """
     conn = sqlite3.connect(_read_only_uri(db_path), uri=True)
     try:
+        # mt_engine/mt_model postdate most recorded sessions, so they are selected only
+        # when present rather than making every older database unreadable.
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(transcriptions)")}
+        provenance = "mt_engine, mt_model" if {"mt_engine", "mt_model"} <= columns else "NULL, NULL"
         rows = conn.execute(
             """
-            SELECT id, COALESCE(timestamp, ''), text, translated_text, ts_ms, translation_ts_ms
+            SELECT id, COALESCE(timestamp, ''), text, translated_text, ts_ms, translation_ts_ms,
+                   %s
             FROM transcriptions
             WHERE COALESCE(is_final, 1) = 1
               AND COALESCE(denied, 0) = 0
               AND text IS NOT NULL AND TRIM(text) != ''
             ORDER BY id ASC
-            """
+            """ % provenance
         ).fetchall()
     finally:
         conn.close()
 
     pairs: List[CaptionPair] = []
-    for row_id, timestamp, text, translated, ts_ms, translation_ts_ms in rows:
+    for (row_id, timestamp, text, translated, ts_ms, translation_ts_ms,
+         mt_engine, mt_model) in rows:
         source = (text or "").strip()
         if word_count(source) < min_source_words:
             continue
@@ -141,8 +154,25 @@ def load_session_pairs(db_path: str, *, min_source_words: int = 1) -> List[Capti
         if ts_ms and translation_ts_ms and translation_ts_ms >= ts_ms:
             latency = int(translation_ts_ms - ts_ms)
         shipped = (translated or "").strip() or None
-        pairs.append(CaptionPair(int(row_id), str(timestamp), source, shipped, latency))
+        pairs.append(CaptionPair(int(row_id), str(timestamp), source, shipped, latency,
+                                 shipped_engine=mt_engine or None,
+                                 shipped_model=mt_model or None))
     return pairs
+
+
+def engine_breakdown(pairs: Sequence[CaptionPair]) -> Dict[str, int]:
+    """How many captions each engine produced, for a session that recorded it.
+
+    An empty result means the session predates per-row provenance, which is worth
+    saying out loud in a report rather than showing as a clean-looking zero: it is
+    the difference between "no caption fell back" and "we cannot tell".
+    """
+    counts: Dict[str, int] = {}
+    for pair in pairs:
+        if pair.shipped is None or not pair.shipped_engine:
+            continue
+        counts[pair.shipped_engine] = counts.get(pair.shipped_engine, 0) + 1
+    return counts
 
 
 def shipped_run(pairs: Sequence[CaptionPair], target_lang: str) -> List[ReplayResult]:
@@ -411,6 +441,15 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         print("no translatable captions found in %s" % args.db)
         return 1
     print("loaded %d captions from %s" % (len(pairs), args.db))
+
+    engines = engine_breakdown(pairs)
+    if engines:
+        print("  shipped by: " + ", ".join(
+            "%s=%d" % (name, count) for name, count in sorted(engines.items())))
+    else:
+        print("  shipped by: not recorded — this session predates per-row provenance, so a\n"
+              "              caption the LLM declined is stored exactly like one it produced.\n"
+              "              Treat a comparison against it as approximate.")
 
     if args.baseline:
         before, before_label = _load_run(args.baseline)

@@ -11,6 +11,7 @@ from stt.translation_replay import (
     ReplayResult,
     as_dict,
     compare,
+    engine_breakdown,
     from_dict,
     load_session_pairs,
     render_comparison,
@@ -318,3 +319,73 @@ class TestRendering:
         text = render_comparison(compare(before, after))
         assert "broken: 1" in text
         assert "Псалом 23" in text
+
+
+PROVENANCE_SCHEMA = """
+CREATE TABLE transcriptions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    timestamp TEXT, text TEXT, translated_text TEXT,
+    denied INTEGER DEFAULT 0, is_final INTEGER DEFAULT 1,
+    ts_ms INTEGER, translation_ts_ms INTEGER,
+    asr_model TEXT, mt_engine TEXT, mt_model TEXT)
+"""
+
+
+def make_provenance_db(path, rows):
+    """A session database recorded since rows carry the model that produced them."""
+    conn = sqlite3.connect(str(path))
+    conn.execute(PROVENANCE_SCHEMA)
+    for index, (text, translated, engine, model) in enumerate(rows):
+        conn.execute(
+            "INSERT INTO transcriptions (timestamp, text, translated_text, denied, is_final,"
+            " ts_ms, translation_ts_ms, mt_engine, mt_model) VALUES (?,?,?,0,1,?,?,?,?)",
+            ("2026-08-02 10:%02d:00" % index, text, translated, 1000, 1400, engine, model))
+    conn.commit()
+    conn.close()
+    return str(path)
+
+
+class TestPerRowProvenance:
+    """Which engine produced a caption, so a replay is not scored against the wrong model."""
+
+    def test_engine_and_model_are_loaded(self, tmp_path):
+        db = make_provenance_db(tmp_path / "p.db", [
+            ("Мир вам.", "Peace be with you.", "llm", "gemma-3-4b.gguf"),
+        ])
+        pair = load_session_pairs(db)[0]
+        assert pair.shipped_engine == "llm"
+        assert pair.shipped_model == "gemma-3-4b.gguf"
+
+    def test_the_breakdown_separates_the_two_engines(self, tmp_path):
+        # The reason this exists: a session configured for the LLM contains NMT rows
+        # wherever the LLM declined, and they used to be indistinguishable.
+        db = make_provenance_db(tmp_path / "p.db", [
+            ("a", "A", "llm", "gguf"), ("b", "B", "llm", "gguf"),
+            ("c", "C", "nmt", "madlad"),
+        ])
+        assert engine_breakdown(load_session_pairs(db)) == {"llm": 2, "nmt": 1}
+
+    def test_an_untranslated_row_counts_for_no_engine(self, tmp_path):
+        db = make_provenance_db(tmp_path / "p.db", [("a", None, None, None)])
+        assert engine_breakdown(load_session_pairs(db)) == {}
+
+    def test_an_older_database_still_loads(self, session_db):
+        # Sessions recorded before these columns existed must stay replayable.
+        pairs = load_session_pairs(session_db)
+        assert [p.source for p in pairs] == ["Мир вам.", "Аминь.", "Господь благ."]
+        assert all(p.shipped_engine is None for p in pairs)
+
+    def test_an_older_database_reports_unknown_rather_than_zero(self, session_db):
+        # "not recorded" and "nothing fell back" must not look the same.
+        assert engine_breakdown(load_session_pairs(session_db)) == {}
+
+    def test_the_cli_says_when_provenance_is_missing(self, session_db, capsys):
+        translation_replay.main([session_db])
+        assert "predates per-row provenance" in capsys.readouterr().out
+
+    def test_the_cli_reports_the_breakdown_when_present(self, tmp_path, capsys):
+        db = make_provenance_db(tmp_path / "p.db", [
+            ("a", "A", "llm", "gguf"), ("b", "B", "nmt", "madlad"),
+        ])
+        translation_replay.main([db])
+        assert "shipped by: llm=1, nmt=1" in capsys.readouterr().out

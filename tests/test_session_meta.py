@@ -3,6 +3,13 @@
 import pytest
 
 from stt.session_meta import (
+    MT_ENGINE_LLM,
+    MT_ENGINE_NMT,
+    MT_ENGINE_NONE,
+    MT_ENGINE_REMOTE,
+    MT_ENGINE_WHISPER,
+    asr_row_label,
+    mt_row_label,
     build_session_meta,
     changed_keys,
     content_digest,
@@ -851,3 +858,90 @@ class TestReadHistory:
 
     def test_absent_key_is_empty(self):
         assert read_history({}, "mt.target_language") == []
+
+
+class TestAsrRowLabel:
+    """What transcribed a row, recorded on the row itself.
+
+    session_meta says what a session was configured with; a row says what actually
+    ran. The two part company whenever a model is swapped mid-session.
+    """
+
+    def test_implementation_and_model_together(self):
+        # Neither half identifies a decode alone: faster-whisper and openai-whisper
+        # do not decode "large-v3" the same way.
+        cfg = {"model": {"type": "whisper", "backend": "faster-whisper",
+                         "whisper": {"model": "large-v3"}}}
+        assert asr_row_label(cfg) == "faster-whisper/large-v3"
+
+    def test_openai_whisper_is_named_distinctly(self):
+        cfg = {"model": {"type": "whisper", "backend": "", "whisper": {"model": "small"}}}
+        assert asr_row_label(cfg) == "openai-whisper/small"
+
+    def test_a_huggingface_model(self):
+        cfg = {"model": {"type": "huggingface", "huggingface": {"model_id": "org/asr"}}}
+        assert asr_row_label(cfg) == "huggingface/org/asr"
+
+    def test_a_missing_model_still_names_the_implementation(self):
+        assert asr_row_label({"model": {"type": "whisper", "backend": "faster-whisper"}}) \
+            == "faster-whisper"
+
+    def test_absent_config_does_not_raise(self):
+        assert asr_row_label(None)
+        assert asr_row_label({})
+
+
+class TestMtRowLabel:
+    """What translated a row — passed by the leg that ran, not derived from config.
+
+    The whole point: config records which engine was *asked*. A session set to "llm"
+    still contains NMT rows wherever the LLM declined, and those are exactly the rows
+    a comparison must not confuse.
+    """
+
+    LT = {
+        "llm": {"provider": "local", "gguf_repo": "ggml-org/gemma-3-4b-it-GGUF",
+                "gguf_file": "gemma-3-4b-it-Q4_K_M.gguf"},
+        "remote": {"endpoint": "192.168.2.52:8080"},
+    }
+
+    def test_the_llm_is_named_by_its_gguf(self):
+        assert mt_row_label(self.LT, MT_ENGINE_LLM) == \
+            "ggml-org/gemma-3-4b-it-GGUF/gemma-3-4b-it-Q4_K_M.gguf"
+
+    def test_an_endpoint_llm_is_named_by_its_model(self):
+        lt = {"llm": {"provider": "endpoint", "model": "qwen2.5:7b"}}
+        assert mt_row_label(lt, MT_ENGINE_LLM) == "qwen2.5:7b"
+
+    def test_the_nmt_model_comes_from_the_caller(self):
+        # Only the caller knows which NMT model is actually resident.
+        assert mt_row_label(self.LT, MT_ENGINE_NMT, model="google/madlad400-3b-mt") == \
+            "google/madlad400-3b-mt"
+
+    def test_the_same_config_yields_different_labels_per_engine(self):
+        # The regression this exists to prevent: a declined caption recorded as
+        # though the LLM had produced it.
+        llm = mt_row_label(self.LT, MT_ENGINE_LLM)
+        nmt = mt_row_label(self.LT, MT_ENGINE_NMT, model="google/madlad400-3b-mt")
+        assert llm != nmt
+
+    def test_a_remote_translation_names_the_machine(self):
+        assert mt_row_label(self.LT, MT_ENGINE_REMOTE) == "192.168.2.52:8080"
+
+    def test_a_remote_translation_names_its_model_when_known(self):
+        # Local config is not evidence about a box that can be reconfigured without
+        # this one restarting, so the model comes from what it reported.
+        label = mt_row_label(self.LT, MT_ENGINE_REMOTE,
+                             remote_status={"model": "gemma-3-4b-it-Q4_K_M.gguf"})
+        assert label == "192.168.2.52:8080 (gemma-3-4b-it-Q4_K_M.gguf)"
+
+    def test_whisper_translate_is_named_by_the_caller(self):
+        assert mt_row_label(self.LT, MT_ENGINE_WHISPER, model="faster-whisper/large-v3") \
+            == "faster-whisper/large-v3"
+
+    def test_nothing_translated_it(self):
+        assert mt_row_label(self.LT, MT_ENGINE_NONE) == ""
+
+    def test_absent_config_does_not_raise(self):
+        assert mt_row_label(None, MT_ENGINE_LLM) == ""
+        assert mt_row_label(None, MT_ENGINE_REMOTE) == "remote"
