@@ -50,6 +50,7 @@ module = [
     "stt.http_params",
     "stt.llm_translate",
     "stt.service_phase",
+    "stt.translation_replay",
 ]
 disallow_untyped_defs = true
 

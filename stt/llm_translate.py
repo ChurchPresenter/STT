@@ -404,6 +404,9 @@ def validate_translation(raw: Optional[str], source: str, target_lang: str, *,
                          max_slack_words: int = 24) -> Optional[str]:
     """The cleaned caption, or None if the output is not a usable translation.
 
+    Thin wrapper over :func:`check_translation`, which carries the rules and also
+    names the rule that fired. Callers on the caption path only need the text.
+
     None means "fall back to the NMT model" — never "show this". Rejects, in order:
     empty output; a refusal; a reasoning or narration opener; wrong-script output
     (the source language leaking through); multi-paragraph output; and output far
@@ -434,34 +437,66 @@ def validate_translation(raw: Optional[str], source: str, target_lang: str, *,
     against the ratio alone's 0.039% — two captions in 36,264, each of which falls
     back to the NMT model rather than being lost.
     """
+    text, _reason = check_translation(
+        raw, source, target_lang, max_expansion=max_expansion,
+        min_word_budget=min_word_budget, max_slack_words=max_slack_words)
+    return text
+
+
+# The rule names check_translation reports. Stable strings: they are counted and
+# compared across replay runs, so renaming one silently breaks a comparison against
+# an earlier report.
+REJECT_EMPTY = "empty"
+REJECT_REFUSAL = "refusal"
+REJECT_REASONING = "reasoning"
+REJECT_WRONG_SCRIPT = "wrong_script"
+REJECT_PARAGRAPHS = "paragraphs"
+REJECT_LIST = "list"
+REJECT_NUMBERS = "numbers"
+REJECT_TOO_LONG = "too_long"
+
+
+def check_translation(raw: Optional[str], source: str, target_lang: str, *,
+                      max_expansion: float = 3.0, min_word_budget: int = 8,
+                      max_slack_words: int = 24) -> Tuple[Optional[str], Optional[str]]:
+    """``(caption, None)`` if the output is usable, else ``(None, rule_name)``.
+
+    The rules and their order are documented on :func:`validate_translation`, which is
+    the caption path's entry point. This variant additionally names the rule that
+    fired, which is what the offline replay harness reports: "this prompt traded four
+    number-losses for two refusals" is a decision an operator can act on, where "six
+    rejections" is not. Keeping both behind one implementation is the point — a
+    harness that scored captions by its own copy of these rules would drift from the
+    thing it is supposed to be measuring.
+    """
     if raw is None:
-        return None
+        return None, REJECT_EMPTY
     text = _strip_wrappers(raw)
     if not text:
-        return None
+        return None, REJECT_EMPTY
 
     low = text.lower()
     if any(marker in low for marker in _REFUSAL_MARKERS):
-        return None
+        return None, REJECT_REFUSAL
     if low.startswith(_REASONING_OPENERS):
-        return None
+        return None, REJECT_REASONING
 
     wrong_script = _WRONG_SCRIPT_FOR_TARGET.get((target_lang or "").lower())
     if wrong_script is not None and wrong_script.search(text):
         # The model returned (some of) the source language instead of translating.
-        return None
+        return None, REJECT_WRONG_SCRIPT
 
     # A caption is one utterance. Blank-line-separated output means the model produced
     # a document — the scripture-recitation failure mode.
     if "\n\n" in text.strip():
-        return None
+        return None, REJECT_PARAGRAPHS
     if _looks_like_a_list(text):
-        return None
+        return None, REJECT_LIST
 
     # The figures the speaker gave are the one part of a reference that can be checked
     # mechanically, and both scripture failure modes move them.
     if not numbers_survived(source, text, target_lang):
-        return None
+        return None, REJECT_NUMBERS
 
     # Absolute floor as well as a ratio, so a short source still has a bounded budget —
     # and an absolute ceiling, so a long one does not buy unlimited room to hide in.
@@ -469,9 +504,18 @@ def validate_translation(raw: Optional[str], source: str, target_lang: str, *,
     allowed = max(min_word_budget, int(max_expansion * src_words))
     allowed = min(allowed, src_words + max_slack_words)
     if _word_count(text) > allowed:
-        return None
+        return None, REJECT_TOO_LONG
 
-    return text
+    return text, None
+
+
+def word_count(text: str) -> int:
+    """Words, ignoring digits and punctuation — the unit the length rules count in.
+
+    Public because the replay harness reports a source/output length distribution and
+    must measure it the same way the rules do, or its thresholds would not transfer.
+    """
+    return _word_count(text)
 
 
 # --- Input budgeting -------------------------------------------------------------
