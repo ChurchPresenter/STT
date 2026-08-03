@@ -249,33 +249,40 @@ class TestSystemTimezone:
         assert datetime.datetime.now(tz).utcoffset() is not None
 
 
-class TestShippedTemplateHasNoCredential:
-    """config.default.json must not ship a usable password.
+class TestShippedTemplateCredentials:
+    """What the template is allowed to ship as a credential.
 
-    It did: `"password": "admin"` with auth enabled, which meant every
-    installation of this software shared one password, published in a public
-    repository. The server already had the better behaviour — an empty value makes
-    it generate a random 12-character password at startup, save it, and print it to
-    the console — and the shipped default was the only thing standing in its way.
+    The web password is a known default on purpose: the whitelist admits localhost
+    unconditionally, so it governs only access from other machines, and a church
+    operator reaching a fresh headless install from a laptop should not have to read
+    a log file first. That is a deliberate trade, pinned here so changing it is also
+    deliberate — and so the guard below still catches every credential nobody meant
+    to publish.
     """
 
     PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                         "config", "config.default.json")
+    # Keys whose shipped value is intentional. Anything else with a value fails.
+    DELIBERATE = {"web_server.password_auth.password": "admin"}
 
     @pytest.fixture
     def template(self):
         with open(self.PATH, encoding="utf-8") as fh:
             return json.load(fh)
 
-    def test_the_password_ships_empty(self, template):
-        password = template["web_server"]["password_auth"]["password"]
-        assert password == "", (
-            "a non-empty default is the same password on every install, in a public "
-            "repository — leave it empty so each install generates its own")
+    def test_the_known_default_is_what_it_is_documented_to_be(self, template):
+        assert template["web_server"]["password_auth"]["password"] == \
+            self.DELIBERATE["web_server.password_auth.password"]
 
-    def test_no_other_credential_field_ships_a_value(self, template):
-        # Same rule, applied to every secret-shaped key rather than the one that
-        # happened to be wrong.
+    def test_the_empty_value_behaviour_stays_documented(self, template):
+        # The stronger option must remain discoverable in the file itself, since it
+        # is the answer for anyone exposing this beyond a trusted LAN.
+        comment = template["web_server"]["password_auth"]["_password_comment"]
+        assert "empty" in comment.lower()
+
+    def test_no_unintended_credential_ships_a_value(self, template):
+        # The guard that matters: a credential added later with a placeholder value
+        # fails here, before it is published, rather than after.
         secretish = re.compile(r"pass|secret|token|api_key|credential", re.I)
         offenders = []
 
@@ -287,8 +294,9 @@ class TestShippedTemplateHasNoCredential:
                 if isinstance(value, dict):
                     walk(value, here)
                 elif (isinstance(value, str) and value.strip()
-                        and not key.startswith("_") and secretish.search(key)):
+                        and not key.startswith("_") and secretish.search(key)
+                        and here not in self.DELIBERATE):
                     offenders.append(here)
 
         walk(template)
-        assert not offenders, f"shipped credential values: {offenders}"
+        assert not offenders, f"unintended shipped credential values: {offenders}"

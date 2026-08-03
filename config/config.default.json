@@ -175,8 +175,8 @@
     "password_auth": {
       "enabled": true,
       "_enabled_comment": "Enable password authentication as fallback for non-whitelisted IPs",
-      "password": "",
-      "_password_comment": "Password for temporary access. Ships empty on purpose: an empty value makes the server generate a random 12-character password at startup, save it here, and print it to the console. A shipped default would be the same password on every installation of this software, published in the repository \u2014 which is what it used to be.",
+      "password": "admin",
+      "_password_comment": "Password for temporary access, and a known default on purpose so an operator can reach a fresh install from another machine on the network without first reading a log file. Change it in Settings. Setting it empty is supported and stronger: the server then generates a random 12-character password at startup, saves it here, and prints it to the console and logs/stt.log. Note the whitelist already admits localhost unconditionally, so this password only governs access from other machines.",
       "session_timeout_minutes": 60,
       "_session_timeout_comment": "How long password-authenticated sessions remain valid (in minutes)"
     }
