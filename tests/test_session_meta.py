@@ -10,6 +10,7 @@ from stt.session_meta import (
     MT_ENGINE_WHISPER,
     asr_row_label,
     mt_row_label,
+    row_label_if_changed,
     build_session_meta,
     changed_keys,
     content_digest,
@@ -1006,3 +1007,35 @@ class TestRemoteLlmParameters:
     def test_an_unreachable_remote_still_leaves_no_claim(self):
         assert remote_provenance(None) == {}
         assert remote_provenance({"success": False, "llm_max_tokens": 160}) == {}
+
+
+class TestRowLabelIfChanged:
+    """A row records the exception, not the rule.
+
+    The session already records what was running when it started. Repeating that on
+    every row is the same string written a thousand times — 160 KB on a 3,500-row
+    service — for something one key already holds. So NULL means "what the session
+    says", and a value means "not that", which is the case a reader needs told.
+    """
+
+    def test_the_session_model_is_not_repeated(self):
+        assert row_label_if_changed("faster-whisper/large-v3",
+                                    "faster-whisper/large-v3") is None
+
+    def test_a_changed_model_is_recorded(self):
+        # A hot reload mid-service: every row from here on must say so, or it
+        # silently claims the model the session started with.
+        assert row_label_if_changed("faster-whisper/medium",
+                                    "faster-whisper/large-v3") == "faster-whisper/medium"
+
+    def test_without_a_baseline_every_row_carries_the_label(self):
+        # Provenance disabled, or a value the session never recorded: nothing is
+        # redundant, and an unattributed row is worse than a repeated one.
+        assert row_label_if_changed("faster-whisper/large-v3", "") == "faster-whisper/large-v3"
+
+    def test_an_empty_current_label_records_nothing(self):
+        assert row_label_if_changed("", "faster-whisper/large-v3") is None
+        assert row_label_if_changed("", "") is None
+
+    def test_surrounding_whitespace_is_not_a_change(self):
+        assert row_label_if_changed(" m ", "m") is None

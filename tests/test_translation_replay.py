@@ -16,6 +16,8 @@ from stt.translation_replay import (
     engine_breakdown,
     from_dict,
     load_session_pairs,
+    model_breakdown,
+    resolve_model,
     render_comparison,
     render_summary,
     replay,
@@ -556,3 +558,54 @@ class TestCliSettings:
     def test_the_cli_says_when_nothing_was_recorded(self, session_db, capsys):
         translation_replay.main([session_db])
         assert "predates session_meta" in capsys.readouterr().out
+
+
+class TestResolveModel:
+    """A NULL model column means "what the session says", not "unknown".
+
+    Rows carry a model name only once it stops matching what the session recorded at
+    start. Reading the column alone would report a hot reload as the only
+    attributable caption in a service and the rest as unattributed — backwards.
+    """
+
+    def pair(self, model=None, shipped="x"):
+        return CaptionPair(1, "t", "src", shipped, None, shipped_engine="llm",
+                           shipped_model=model)
+
+    def test_null_resolves_to_the_session_model(self):
+        assert resolve_model(self.pair(), {"model": "gemma.gguf"}) == "gemma.gguf"
+
+    def test_a_row_value_wins_over_the_session(self):
+        # The hot-reload case: this row is explicitly not what the session started with.
+        assert resolve_model(self.pair("qwen.gguf"), {"model": "gemma.gguf"}) == "qwen.gguf"
+
+    def test_an_untranslated_row_has_no_model(self):
+        assert resolve_model(self.pair(shipped=None), {"model": "gemma.gguf"}) is None
+
+    def test_no_session_model_leaves_it_unknown(self):
+        assert resolve_model(self.pair(), {}) is None
+
+    def test_the_breakdown_counts_the_session_model_for_null_rows(self, tmp_path):
+        db = make_provenance_db(tmp_path / "p.db", [
+            ("a", "A", "llm", None), ("b", "B", "llm", None),
+        ])
+        pairs = load_session_pairs(db)
+        assert model_breakdown(pairs, {"model": "gemma.gguf"}) == {"gemma.gguf": 2}
+
+    def test_a_mid_session_change_shows_as_two_models(self, tmp_path):
+        # The point of keeping the column: a service that changed model is a service
+        # measured as one configuration when it was two.
+        db = make_provenance_db(tmp_path / "p.db", [
+            ("a", "A", "llm", None), ("b", "B", "llm", "qwen.gguf"),
+        ])
+        pairs = load_session_pairs(db)
+        assert model_breakdown(pairs, {"model": "gemma.gguf"}) == \
+            {"gemma.gguf": 1, "qwen.gguf": 1}
+
+    def test_the_cli_warns_when_the_model_changed_mid_session(self, tmp_path, capsys):
+        db = make_provenance_db(tmp_path / "p.db", [
+            ("a", "A", "llm", None), ("b", "B", "llm", "qwen.gguf"),
+        ])
+        add_meta(db, {"mt.llm.model": "gemma.gguf", "mt.method": "llm"})
+        translation_replay.main([db])
+        assert "the model changed mid-session" in capsys.readouterr().out

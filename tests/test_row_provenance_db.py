@@ -1,10 +1,19 @@
 """The ASR-model stamp on a transcription row (speech_to_text.py's trigger).
 
-The row inserts live in nineteen statements with nineteen different column lists —
-segment batch, phrase timeout, stop flush, and a denied variant of each. Stamping
-from any of them means the twentieth, whenever it is written, silently produces
-rows that cannot be attributed. The trigger is checked here as the thing that
-cannot be bypassed, using the same SQL the monolith installs.
+Two things are being pinned here.
+
+That the stamp cannot be bypassed: the row inserts live in nineteen statements with
+nineteen different column lists — segment batch, phrase timeout, stop flush, and a
+denied variant of each — so stamping from any of them means the twentieth, whenever
+it is written, silently produces rows that cannot be attributed. A trigger has no
+such hole.
+
+And that it stays silent when it has nothing to add. While the transcribing model is
+the one the session recorded at start, rows are NULL and the value lives once in
+session_meta; repeating it per row measured 160 KB on a 3,500-row service. The
+trigger is installed only when a hot reload changes the model, so a value in the
+column means "not what the session started with" — and the boundary between the two
+is visible in the rows themselves.
 """
 
 import sqlite3
@@ -31,13 +40,20 @@ CREATE TABLE transcriptions (
 """
 
 
-def session_db(path, label):
+def session_db(path, label=None):
+    """A session database. ``label`` None = the baseline case (no stamp installed)."""
     conn = sqlite3.connect(str(path))
     conn.execute(SCHEMA)
+    set_stamp(conn, label)
+    return conn
+
+
+def set_stamp(conn, label):
+    """Mirror of _set_asr_row_stamp(): install, replace, or remove the trigger."""
+    conn.execute("DROP TRIGGER IF EXISTS stamp_asr_model")
     if label:
         conn.execute(TRIGGER_SQL % label.replace("'", "''"))
     conn.commit()
-    return conn
 
 
 @pytest.fixture()
@@ -47,7 +63,9 @@ def conn(tmp_path):
     c.close()
 
 
-class TestAsrStamp:
+class TestAsrStampAfterAChange:
+    """Once a hot reload has changed the model, every insert shape carries it."""
+
     @pytest.mark.parametrize("columns,values", [
         ("timestamp, text", ("t", "Мир вам.")),
         ("text", ("Мир вам.",)),
@@ -96,6 +114,49 @@ class TestAsrStamp:
         conn.execute("INSERT INTO transcriptions (text) VALUES ('x')")
         conn.commit()
         assert conn.execute("SELECT asr_model FROM transcriptions").fetchone()[0] is None
+        conn.close()
+
+
+class TestBaselineRowsStayNull:
+    """The normal case: nothing to add, so nothing is written."""
+
+    def test_a_session_running_its_own_model_writes_no_label(self, tmp_path):
+        conn = session_db(tmp_path / "baseline.db")
+        for _ in range(50):
+            conn.execute("INSERT INTO transcriptions (text) VALUES ('Мир вам.')")
+        conn.commit()
+        stamped = conn.execute(
+            "SELECT COUNT(*) FROM transcriptions WHERE asr_model IS NOT NULL").fetchone()[0]
+        assert stamped == 0, "the session's own model must not be repeated on every row"
+        conn.close()
+
+
+class TestHotReloadBoundary:
+    """A model swapped mid-service must be visible in the rows, not inferred."""
+
+    def test_rows_before_and_after_a_change_are_distinguishable(self, tmp_path):
+        conn = session_db(tmp_path / "reload.db")
+        conn.execute("INSERT INTO transcriptions (text) VALUES ('before')")
+        conn.commit()
+
+        set_stamp(conn, "faster-whisper/medium")          # the hot reload
+        conn.execute("INSERT INTO transcriptions (text) VALUES ('after')")
+        conn.commit()
+
+        rows = conn.execute("SELECT text, asr_model FROM transcriptions ORDER BY id").fetchall()
+        assert rows == [("before", None), ("after", "faster-whisper/medium")]
+        conn.close()
+
+    def test_changing_back_stops_stamping_again(self, tmp_path):
+        # Returning to the session's own model makes the label redundant once more.
+        conn = session_db(tmp_path / "back.db")
+        set_stamp(conn, "faster-whisper/medium")
+        conn.execute("INSERT INTO transcriptions (text) VALUES ('changed')")
+        set_stamp(conn, None)
+        conn.execute("INSERT INTO transcriptions (text) VALUES ('restored')")
+        conn.commit()
+        rows = conn.execute("SELECT text, asr_model FROM transcriptions ORDER BY id").fetchall()
+        assert rows == [("changed", "faster-whisper/medium"), ("restored", None)]
         conn.close()
 
 

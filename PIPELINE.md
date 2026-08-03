@@ -19,6 +19,7 @@ from `config/config.default.json`.
 - [Translation](#translation)
 - [Two machines](#two-machines)
 - [What flows back](#what-flows-back)
+- [What produced a caption](#what-produced-a-caption)
 - [Three timestamps](#three-timestamps)
 - [What is being measured](#what-is-being-measured)
 - [Batch file transcription is a different pipeline](#batch-file-transcription-is-a-different-pipeline)
@@ -565,6 +566,47 @@ hidden, and it exists so a mis-heard caption never reaches the audience or the t
 
 ---
 
+## What produced a caption
+
+Two layers answer this, and they are split by whether the answer changes between rows.
+
+**`session_meta` — once per session, ~80 keys.** Every model and decode setting in
+force at start: the ASR model and its decode parameters, the translation method and
+model, and for an LLM session the generation settings and the *effective* system
+prompt, built exactly as the caption path builds it. The live config is not the
+shipped default, so this is recorded from what is actually running rather than
+assumed. It is written once, so its size does not scale with the service — 82 keys
+including two full prompts measured **8 KB**. Recording another setting is free;
+record it.
+
+When translation is offloaded these settings live on the *other* machine, so the
+paired box is asked for them (`/api/translation/status`) and its answer is stored
+under `mt.remote.effective.*`. Without that a transcript names the model that
+translated every caption and says nothing about the configuration that shaped them.
+
+**`transcriptions` — per row, only what the session cannot already tell you.**
+
+| column | written | why |
+|--------|---------|-----|
+| `mt_engine` | always | It genuinely varies caption to caption: a rejected caption is translated by a different engine (`nmt`) than the one beside it (`llm`), and that is the distinction a later comparison depends on. Three characters, absorbed by existing page slack — **0 KB** measured |
+| `mt_model` | only when it differs from the session's | The name is the same string on every row otherwise. Repeating it measured **160 KB on a 3,500-row service**, for something one `session_meta` key already holds |
+| `asr_model` | only when it differs from the session's | Same rule, applied by a trigger rather than by the nineteen INSERT statements — an approach that has to touch all nineteen is one that misses the twentieth |
+
+**NULL means "what the session says", not "unknown".** A value means *this row is not
+that*, which is the case a reader needs pointed out. Resolve it with
+`stt.translation_replay.resolve_model()`; reading the column alone reports a hot
+reload as the only attributable caption in the service and the rest as unattributed,
+which is exactly backwards.
+
+**Hot reload is what the columns are for.** Change the transcribing model mid-service
+and the worker reinstalls the stamp, so rows before the change stay NULL and rows
+after carry the new model — the boundary is visible in the data instead of being
+inferred from `session_meta`'s timestamps. Change it back and stamping stops again.
+The replay harness warns when a service contains more than one model, because such a
+service is two configurations being measured as one.
+
+---
+
 ## Three timestamps
 
 All three are written from the same instant, but they are not interchangeable.
@@ -677,6 +719,7 @@ anyone edits the file, and these did. Search for the name.
 | Review queue · mark · deny | `get_review_queue` · `handle_set_segment_marked` · `handle_set_segment_denied` |
 | Remote pairing + heartbeat | `/api/translate/pair/*` · `_remote_heartbeat_loop` |
 | Session provenance | `stt/session_meta.py` · `_current_session_meta` |
+| Per-row model, and the rule for when it is written | `stt/session_meta.py` — `asr_row_label`, `mt_row_label`, `row_label_if_changed` · `_set_asr_row_stamp` · `_record_mt_engine` |
 | Service phase detector | `stt/service_phase.py` · `_service_phase_tick` |
 | Metrics + access log | `stt/metrics.py` · `stt/request_log.py` · `_access_log_record` |
 | Watchdog + self-update | `stt/watchdog.py` — `CrashRecoveryThread`, `AutoUpdater` · `stt/self_update.py` |

@@ -223,8 +223,43 @@ def settings_mismatch(session: Mapping[str, str], candidate: Mapping[str, str]) 
     return differences
 
 
+def resolve_model(pair: CaptionPair, settings: Mapping[str, str]) -> Optional[str]:
+    """The model that produced ``pair``, resolving the row's NULL to the session's.
+
+    A row carries a model name only when it stopped matching what the session
+    recorded at start — a hot reload — so NULL is not "unknown", it is "what the
+    session says". Reading the column alone would report a mid-session change as
+    the only attributable caption in the service and the rest as unattributed,
+    which is exactly backwards.
+    """
+    if pair.shipped_model:
+        return pair.shipped_model
+    if pair.shipped is None:
+        return None
+    return settings.get("model") or None
+
+
+def model_breakdown(pairs: Sequence[CaptionPair],
+                    settings: Mapping[str, str]) -> Dict[str, int]:
+    """How many captions each model produced, once NULLs are resolved.
+
+    More than one entry means the model changed while the service was running, and
+    a comparison that treats the session as one configuration is measuring two.
+    """
+    counts: Dict[str, int] = {}
+    for pair in pairs:
+        model = resolve_model(pair, settings)
+        if model:
+            counts[model] = counts.get(model, 0) + 1
+    return counts
+
+
 def engine_breakdown(pairs: Sequence[CaptionPair]) -> Dict[str, int]:
     """How many captions each engine produced, for a session that recorded it.
+
+    Unlike the model, the engine is stored on every row: it genuinely varies caption
+    to caption, because a rejected caption is translated by a different engine than
+    the one beside it. There is nothing redundant to leave out.
 
     An empty result means the session predates per-row provenance, which is worth
     saying out loud in a report rather than showing as a clean-looking zero: it is
@@ -521,6 +556,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     else:
         print("  recorded settings: none — this session predates session_meta, so a replay\n"
               "                     cannot be checked against what actually produced it.")
+
+    models = model_breakdown(pairs, settings)
+    if len(models) > 1:
+        # Two models in one service means the comparison below is measuring two
+        # configurations as though they were one. Say so before the numbers.
+        print("  WARNING: the model changed mid-session — %s" % ", ".join(
+            "%s=%d" % (name, count) for name, count in sorted(models.items())))
 
     engines = engine_breakdown(pairs)
     if engines:

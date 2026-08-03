@@ -210,6 +210,32 @@ def asr_row_label(config: Optional[Mapping[str, Any]]) -> str:
     return "%s/%s" % (implementation, model)
 
 
+def row_label_if_changed(current: str, baseline: str) -> Optional[str]:
+    """``current`` when it differs from the session's baseline, else None.
+
+    A row records what produced it, but the session already records what was running
+    when it started, and repeating that on every row is the same string written a
+    thousand times — measured at 160 KB on a 3,500-row service, for information one
+    key already holds. So a row stores the *exception*: NULL means "whatever the
+    session says", and a value means "this row is not that", which is exactly the
+    case a reader needs pointed out.
+
+    That is what makes a mid-session model change legible. Rows before it are NULL,
+    rows after it carry the new model, and the boundary is visible in the data
+    instead of having to be inferred from session_meta's timestamps.
+
+    A caller with no baseline to compare against (an older session, a value the
+    session never recorded) passes "" and gets the current label back, because
+    unattributed rows are worse than repeated ones.
+    """
+    current = (current or "").strip()
+    if not current:
+        return None
+    if not baseline or current != baseline.strip():
+        return current
+    return None
+
+
 def mt_row_label(lt_cfg: Optional[Mapping[str, Any]], engine: str,
                  *, remote_status: Optional[Mapping[str, Any]] = None,
                  model: str = "") -> str:

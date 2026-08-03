@@ -870,6 +870,7 @@ from stt.session_meta import (
     changed_keys as _session_meta_changed_keys,
     glossary_provenance as _glossary_provenance,
     is_offloaded as _translation_is_offloaded,
+    uses_llm as _translation_uses_llm,
     latest_values as _session_meta_latest,
     load_session_meta as _load_session_meta,
     remote_provenance as _remote_provenance,
@@ -877,6 +878,7 @@ from stt.session_meta import (
     write_session_meta as _write_session_meta,
     asr_row_label as _session_asr_row_label,
     mt_row_label as _session_mt_row_label,
+    row_label_if_changed as _session_row_label_if_changed,
     MT_ENGINE_LLM,
     MT_ENGINE_NMT,
     MT_ENGINE_NONE,
@@ -3506,6 +3508,32 @@ def finalized_audio_type(process_config, state):
     return classify_audio_type(state.get("audio_db"), cfg)
 
 
+def _set_asr_row_stamp(db_connection, label):
+    """Make new rows carry ``label`` as asr_model, or nothing when it is None.
+
+    A trigger rather than an addition to the INSERT statements: there are nineteen
+    of those with nineteen different column lists — the segment batch, the phrase
+    timeout, the stop flush, and a denied variant of each — and an approach that has
+    to touch all nineteen is one that silently misses the twentieth when it is
+    added. A trigger cannot be bypassed by a writer that does not know about it.
+
+    Called with None at session start, so rows stay NULL while the session's own
+    model is transcribing and the value lives once in session_meta. Called with a
+    label after a hot reload, so every row from that point says what changed. The
+    boundary between the two is then visible in the rows themselves.
+    """
+    cursor = db_connection.cursor()
+    cursor.execute("DROP TRIGGER IF EXISTS stamp_asr_model")
+    if label:
+        cursor.execute(
+            "CREATE TRIGGER stamp_asr_model AFTER INSERT ON transcriptions"
+            " WHEN NEW.asr_model IS NULL"
+            " BEGIN UPDATE transcriptions SET asr_model = '%s' WHERE id = NEW.id; END"
+            % label.replace("'", "''")
+        )
+    db_connection.commit()
+
+
 def initialize_database(session_config=None):
     """Initialize database only when transcription starts (lazy loading)
 
@@ -3773,28 +3801,16 @@ def initialize_database(session_config=None):
                 db_connection.commit()
                 print("[DB] OK: Migration complete (added asr_model, mt_engine, mt_model columns)")
 
-            # Stamp every row with the model that transcribed it, from a trigger rather
-            # than from the INSERT statements. There are nineteen of those, each with a
-            # different column list — the segment batch, the phrase timeout, the stop
-            # flush, and a denied variant of each — and an approach that has to touch
-            # all nineteen is one that silently misses the twentieth when it is added.
-            # The trigger cannot be bypassed by a writer that does not know about it.
-            #
-            # The label is the session's: a model swapped mid-session leaves this stale,
-            # which session_meta's timestamped change keys already record properly.
+            # A row's asr_model is left NULL while the session's own model is the one
+            # transcribing, because session_meta already records that and repeating it
+            # per row is the same string written a thousand times (160 KB on a 3,500-row
+            # service). It is stamped only after a hot reload changes the model, so a
+            # value means "not what the session started with" — see
+            # _set_asr_row_stamp(), which installs the trigger at that point.
             try:
-                _asr_label = _session_asr_row_label(config)
-                db_cursor.execute("DROP TRIGGER IF EXISTS stamp_asr_model")
-                if _asr_label:
-                    db_cursor.execute(
-                        "CREATE TRIGGER stamp_asr_model AFTER INSERT ON transcriptions"
-                        " WHEN NEW.asr_model IS NULL"
-                        " BEGIN UPDATE transcriptions SET asr_model = '%s' WHERE id = NEW.id; END"
-                        % _asr_label.replace("'", "''")
-                    )
-                db_connection.commit()
+                _set_asr_row_stamp(db_connection, None)
             except Exception as _asr_err:
-                print(f"[DB] WARNING: could not stamp the ASR model on rows ({_asr_err})")
+                print(f"[DB] WARNING: could not prepare the ASR row stamp ({_asr_err})")
 
             # Service-phase tables. Created here, inside the init transaction, so the
             # detector's tick (which runs in the web process, on its own connection)
@@ -3824,6 +3840,21 @@ def initialize_database(session_config=None):
         # is restarted or retuned. Written after the init transaction closes so
         # there is only ever one writer, and non-fatal by contract: a session must
         # start even when provenance can't be recorded.
+        # The baseline every row is measured against. Set unconditionally, not only
+        # when session_meta is enabled: it decides whether a row repeats the model
+        # name or stays NULL, and a session with provenance turned off must still
+        # produce rows that a reader can attribute — there, nothing is redundant,
+        # so every row carries the label.
+        _set_mt_baseline_label(
+            _session_mt_row_label(
+                cfg.get("live_translation", {}),
+                MT_ENGINE_REMOTE if _translation_is_offloaded(cfg.get("live_translation", {}))
+                else (MT_ENGINE_LLM if _translation_uses_llm(cfg.get("live_translation", {}))
+                      else MT_ENGINE_NMT),
+                remote_status=_remote_effective_status(),
+                model=_resolve_live_translation_model_id(cfg.get("live_translation", {})))
+            if _session_meta_enabled(cfg) else "")
+
         if _session_meta_enabled(cfg):
             _session_provenance = _current_session_meta(cfg)
             if _write_session_meta(db_name, _session_provenance):
@@ -15110,12 +15141,31 @@ def _translate_via_llm(text, source_lang, target_lang, timeout_override=None,
 _mt_provenance = threading.local()
 
 
+# What the session recorded as its translating model at start. A row repeats this
+# only when it stops being true — see stt.session_meta.row_label_if_changed.
+_mt_baseline_label = {"value": ""}
+
+
+def _set_mt_baseline_label(label):
+    """Remember the session's translating model, so rows can record only changes."""
+    _mt_baseline_label["value"] = (label or "").strip()
+
+
 def _record_mt_engine(engine, model=""):
-    """Note the engine that produced the translation being returned."""
+    """Note the engine that produced the translation being returned.
+
+    The engine is stored on every row: it genuinely varies caption to caption, since
+    a rejected caption is translated by a different engine than the one beside it,
+    and it costs nothing (three characters, absorbed by existing page slack). The
+    model name is stored only when it differs from the session's baseline — the same
+    string on every row measured 160 KB on one service, for something session_meta
+    already holds.
+    """
     _mt_provenance.engine = engine
-    _mt_provenance.model = _session_mt_row_label(
+    label = _session_mt_row_label(
         config.get("live_translation", {}), engine,
         remote_status=_remote_effective_status(), model=model)
+    _mt_provenance.model = _session_row_label_if_changed(label, _mt_baseline_label["value"])
     return engine
 
 
@@ -16153,7 +16203,13 @@ def thread1_function(ts, cq, cfq, cal_state, cal_data, cal_step1, asq):
                     # In whisper_translate modes the translation is a second decode by
                     # the ASR model itself, so the model that produced a row's
                     # translated_text is the one that produced its text.
-                    _whisper_mt_model = _session_asr_row_label(process_config)
+                    #
+                    # _asr_baseline_label is what session_meta recorded at session start
+                    # and never changes; _asr_session_label tracks the model actually in
+                    # use, so a hot reload can be spotted by comparing the two.
+                    _asr_baseline_label = _session_asr_row_label(process_config)
+                    _asr_session_label = _asr_baseline_label
+                    _whisper_mt_model = _asr_baseline_label
                     # Get defaults from config file
                     # Note: model config is at model.whisper, not whisper
                     whisper_config = process_config.get("model", {}).get("whisper", {})
@@ -17062,6 +17118,27 @@ def thread1_function(ts, cq, cfq, cal_state, cal_data, cal_step1, asq):
                                             vad_threshold = new_config["vad"].get(
                                                 "threshold", vad_threshold
                                             )
+
+                                        # A hot reload can change the transcribing model
+                                        # itself. Rows are NULL while it matches what the
+                                        # session recorded at start, so from here on they
+                                        # must carry the new one — otherwise every row
+                                        # after the change silently claims the old model.
+                                        _asr_now = _session_asr_row_label(process_config)
+                                        if _asr_now != _asr_session_label:
+                                            print(f"[DB] ASR model changed mid-session: "
+                                                  f"{_asr_session_label!r} -> {_asr_now!r}; "
+                                                  f"stamping it on new rows")
+                                            _asr_session_label = _asr_now
+                                            _whisper_mt_model = _asr_now
+                                            try:
+                                                _set_asr_row_stamp(
+                                                    persistent_db_conn,
+                                                    _session_row_label_if_changed(
+                                                        _asr_now, _asr_baseline_label))
+                                            except Exception as _stamp_err:
+                                                print(f"[DB] WARNING: could not update the "
+                                                      f"ASR row stamp ({_stamp_err})")
 
                                         print(
                                             f"[OK] Config hot-reloaded: energy={recorder.energy_threshold}, vad_threshold={vad_threshold}, process_config updated"
