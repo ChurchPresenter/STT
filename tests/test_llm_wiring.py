@@ -15,6 +15,7 @@ import pytest
 
 from conftest import extract_definitions
 from stt.model_disk import dir_has_weights
+from stt.session_meta import row_label_if_changed
 
 
 class _StubTorchCuda:
@@ -462,3 +463,67 @@ class TestNoFallbackModelConfigured:
             True, model_id="facebook/nllb-200-distilled-600M")
         assert (model, tokenizer) == ("model", "tokenizer")
         assert len(calls) == 1
+
+
+class TestMtBaselineEstablishesItself:
+    """Which caption carries the model name, and which are left NULL.
+
+    The baseline used to be set in initialize_database — the spawned transcription
+    worker — while the rows are written by the web process. A global set in one is
+    invisible in the other, so the web process saw an empty baseline and repeated
+    the label on every row. Safe, but not the deduplication it was meant to be, and
+    only visible after a real service. Deriving it from the first caption needs no
+    cross-process channel and says the same thing.
+    """
+
+    def ns(self, baseline="", label="192.168.2.52:8080 (gemma.gguf)"):
+        state = {"value": baseline}
+        recorded = {}
+
+        class Local:
+            pass
+
+        return extract_definitions(
+            "speech_to_text.py", ["_record_mt_engine", "_set_mt_baseline_label"],
+            {"config": {"live_translation": {}},
+             "_mt_provenance": Local(),
+             "_mt_baseline_label": state,
+             "_session_mt_row_label": lambda *a, **k: label,
+             "_session_row_label_if_changed": row_label_if_changed,
+             "_remote_effective_status": lambda: None,
+             "_recorded": recorded}), state
+
+    def test_the_first_caption_carries_the_label(self):
+        ns, state = self.ns()
+        ns["_record_mt_engine"]("remote")
+        assert ns["_mt_provenance"].model == "192.168.2.52:8080 (gemma.gguf)"
+        assert state["value"] == "192.168.2.52:8080 (gemma.gguf)", "and becomes the baseline"
+
+    def test_every_identical_caption_after_it_is_null(self):
+        ns, _ = self.ns()
+        ns["_record_mt_engine"]("remote")
+        for _ in range(5):
+            ns["_record_mt_engine"]("remote")
+            assert ns["_mt_provenance"].model is None
+
+    def test_a_changed_model_reasserts_itself(self):
+        ns, _state = self.ns(baseline="192.168.2.52:8080 (old.gguf)")
+        ns["_record_mt_engine"]("remote")
+        assert ns["_mt_provenance"].model == "192.168.2.52:8080 (gemma.gguf)"
+
+    def test_clearing_the_baseline_starts_a_new_session(self):
+        # start_transcription resets it, so one session's model cannot become the
+        # next one's baseline and silently make a changed setup look unchanged.
+        ns, _state = self.ns()
+        ns["_record_mt_engine"]("remote")
+        assert ns["_record_mt_engine"]("remote") == "remote"
+        assert ns["_mt_provenance"].model is None
+        ns["_set_mt_baseline_label"]("")
+        ns["_record_mt_engine"]("remote")
+        assert ns["_mt_provenance"].model == "192.168.2.52:8080 (gemma.gguf)"
+
+    def test_an_empty_label_never_becomes_the_baseline(self):
+        ns, state = self.ns(label="")
+        ns["_record_mt_engine"]("none")
+        assert ns["_mt_provenance"].model is None
+        assert state["value"] == "", "an untranslated caption must not fix the baseline"

@@ -3900,21 +3900,6 @@ def initialize_database(session_config=None):
         # is restarted or retuned. Written after the init transaction closes so
         # there is only ever one writer, and non-fatal by contract: a session must
         # start even when provenance can't be recorded.
-        # The baseline every row is measured against. Set unconditionally, not only
-        # when session_meta is enabled: it decides whether a row repeats the model
-        # name or stays NULL, and a session with provenance turned off must still
-        # produce rows that a reader can attribute — there, nothing is redundant,
-        # so every row carries the label.
-        _set_mt_baseline_label(
-            _session_mt_row_label(
-                cfg.get("live_translation", {}),
-                MT_ENGINE_REMOTE if _translation_is_offloaded(cfg.get("live_translation", {}))
-                else (MT_ENGINE_LLM if _translation_uses_llm(cfg.get("live_translation", {}))
-                      else MT_ENGINE_NMT),
-                remote_status=_remote_effective_status(),
-                model=_resolve_live_translation_model_id(cfg.get("live_translation", {})))
-            if _session_meta_enabled(cfg) else "")
-
         if _session_meta_enabled(cfg):
             _session_provenance = _current_session_meta(cfg)
             if _write_session_meta(db_name, _session_provenance):
@@ -10287,6 +10272,11 @@ def start_transcription():
         trans_cfg = config.get("live_translation", {})
         remote_cfg = trans_cfg.get("remote", {})
         remote_active = bool(remote_cfg.get("enabled") and remote_cfg.get("endpoint"))
+        # New session, new baseline: the first caption below establishes it, and
+        # without this reset the previous session's model would still be standing
+        # in this process and the first rows of a changed setup would look
+        # unchanged. Reset here because this is the process that writes the rows.
+        _set_mt_baseline_label("")
         if remote_active:
             def _notify_remote_preload():
                 try:
@@ -10299,6 +10289,12 @@ def start_transcription():
                     r2 = _req.post(ep + "/api/translate/sync-dictionary",
                                    json=_dictionary_sync_payload(), timeout=10)
                     print(f"[START] Remote dictionary sync: {r2.json()}")
+                    # Ask the remote what it translates with, in THIS process. The
+                    # session-start probe runs in the transcription worker and
+                    # populates its copy of the cache, not this one — so without
+                    # this the row label named the endpoint and not the model
+                    # running on it.
+                    _fetch_remote_provenance()
                 except Exception as e:
                     print(f"[START] Remote translation preload/sync failed: {e}")
             import threading
@@ -15059,13 +15055,25 @@ def _translate_via_llm(text, source_lang, target_lang, timeout_override=None,
 _mt_provenance = threading.local()
 
 
-# What the session recorded as its translating model at start. A row repeats this
-# only when it stops being true — see stt.session_meta.row_label_if_changed.
+# What this session's translating model is, so a row repeats it only when it stops
+# being true — see stt.session_meta.row_label_if_changed.
+#
+# Established by the first caption rather than at session start, because the two
+# happen in different processes. initialize_database() runs in the spawned
+# transcription worker; captions are translated in the web process, and a global
+# set in one is invisible in the other. Setting it at start therefore left the web
+# process with an empty baseline, so every row repeated the label — safe, but not
+# the deduplication it was meant to be, and measured only after a real service.
+#
+# Deriving it from the first caption needs no cross-process channel and says the
+# same thing: the first row carries the label, every identical row after it is
+# NULL, and a mid-session change reasserts itself. Reset per session by
+# start_transcription so one session's model cannot become the next one's baseline.
 _mt_baseline_label = {"value": ""}
 
 
 def _set_mt_baseline_label(label):
-    """Remember the session's translating model, so rows can record only changes."""
+    """Set (or with "" clear) the session's translating model."""
     _mt_baseline_label["value"] = (label or "").strip()
 
 
@@ -15084,6 +15092,10 @@ def _record_mt_engine(engine, model=""):
         config.get("live_translation", {}), engine,
         remote_status=_remote_effective_status(), model=model)
     _mt_provenance.model = _session_row_label_if_changed(label, _mt_baseline_label["value"])
+    # First caption of the session establishes the baseline, so it is the one row
+    # that carries the label and the rest are NULL against it.
+    if label and not _mt_baseline_label["value"]:
+        _mt_baseline_label["value"] = label
     return engine
 
 
