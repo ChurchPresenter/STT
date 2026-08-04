@@ -527,3 +527,105 @@ class TestMtBaselineEstablishesItself:
         ns["_record_mt_engine"]("none")
         assert ns["_mt_provenance"].model is None
         assert state["value"] == "", "an untranslated caption must not fix the baseline"
+
+
+class TestPreloadWarmsTheRightEngine:
+    """/api/translate/preload runs on the offload server when its client starts.
+
+    It loaded the NMT model unconditionally — on an LLM box that is the fallback,
+    several GB for a model serving about one caption in a hundred, while the model
+    doing the work stayed cold. Loading is lazy, so the cost landed on whoever
+    spoke first: a measured service opened with six untranslated captions, 56
+    seconds, because the GGUF only began loading when the first caption arrived.
+    """
+
+    def call(self, live_translation):
+        loaded = {"nmt": 0, "llm": 0}
+
+        class Thread:
+            def __init__(self, target=None, daemon=None):
+                self._t = target
+
+            def start(self):
+                self._t()
+
+        ns = extract_definitions(
+            "speech_to_text.py", ["translate_preload"],
+            {"config": {"live_translation": live_translation},
+             "request": type("R", (), {"remote_addr": "192.168.2.62"})(),
+             "jsonify": lambda p: p,
+             "_is_trusted_translation_client": lambda ip: True,
+             "get_live_translation_model": lambda *a, **k: loaded.__setitem__("nmt", loaded["nmt"] + 1),
+             "_warm_local_llm": lambda *a, **k: loaded.__setitem__("llm", loaded["llm"] + 1),
+             "threading": type("T", (), {"Thread": Thread}),
+             "is_local_llm_loaded": lambda: False,
+             "is_live_translation_model_loaded": lambda: False,
+             "is_live_translation_model_loading": lambda: False,
+             "_live_translation_model_wanted": False})
+        return ns["translate_preload"](), loaded
+
+    LLM_LOCAL = {"enabled": True, "translation_method": "llm",
+                 "llm": {"provider": "local", "gguf_file": "m.gguf"}}
+
+    def test_an_llm_box_warms_the_llm_and_not_the_fallback(self):
+        body, loaded = self.call(self.LLM_LOCAL)
+        assert loaded == {"nmt": 0, "llm": 1}
+        assert body["engine"] == "llm"
+
+    def test_an_endpoint_llm_loads_nothing_locally(self):
+        body, loaded = self.call({"enabled": True, "translation_method": "llm",
+                                  "llm": {"provider": "endpoint", "endpoint": "http://h"}})
+        assert loaded == {"nmt": 0, "llm": 0}
+        assert body["engine"] == "llm" and body["loaded"] is False
+        assert body["success"] is True, "nothing to load is not a failure"
+
+    @pytest.mark.parametrize("method", ["whisper_translate", "whisper_forced_lang"])
+    def test_whisper_has_nothing_to_preload(self, method):
+        body, loaded = self.call({"enabled": True, "translation_method": method})
+        assert loaded == {"nmt": 0, "llm": 0}
+        assert body["engine"] == "none"
+
+    @pytest.mark.parametrize("method", ["nllb", "madlad"])
+    def test_an_nmt_box_still_loads_its_model(self, method):
+        # The regression pin: every existing offload server goes down this path.
+        body, loaded = self.call({"enabled": True, "translation_method": method,
+                                  "translation_model": "facebook/nllb-200-distilled-600M"})
+        assert loaded == {"nmt": 1, "llm": 0}
+        assert body["engine"] == "nmt"
+
+    def test_translation_disabled_is_refused(self):
+        body, loaded = self.call({"enabled": False})
+        assert loaded == {"nmt": 0, "llm": 0}
+        assert body["success"] is False
+
+    def test_a_resident_fallback_does_not_suppress_the_warm_up(self):
+        """The NMT-loaded check describes the fallback, not the engine in use.
+
+        Asked first, it answered "already loaded" on an LLM box and warmed
+        nothing — leaving the model that does the work cold.
+        """
+        loaded = {"nmt": 0, "llm": 0}
+
+        class Thread:
+            def __init__(self, target=None, daemon=None):
+                self._t = target
+
+            def start(self):
+                self._t()
+
+        ns = extract_definitions(
+            "speech_to_text.py", ["translate_preload"],
+            {"config": {"live_translation": self.LLM_LOCAL},
+             "request": type("R", (), {"remote_addr": "192.168.2.62"})(),
+             "jsonify": lambda p: p,
+             "_is_trusted_translation_client": lambda ip: True,
+             "get_live_translation_model": lambda *a, **k: loaded.__setitem__("nmt", loaded["nmt"] + 1),
+             "_warm_local_llm": lambda *a, **k: loaded.__setitem__("llm", loaded["llm"] + 1),
+             "threading": type("T", (), {"Thread": Thread}),
+             "is_local_llm_loaded": lambda: False,
+             "is_live_translation_model_loaded": lambda: True,   # the fallback IS resident
+             "is_live_translation_model_loading": lambda: False,
+             "_live_translation_model_wanted": False})
+        body = ns["translate_preload"]()
+        assert loaded == {"nmt": 0, "llm": 1}
+        assert body["engine"] == "llm"

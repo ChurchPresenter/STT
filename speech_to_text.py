@@ -7423,20 +7423,47 @@ def translate_preload():
     if not _is_trusted_translation_client(client_ip):
         return jsonify({"error": "Not paired"}), 403
 
+    cfg = config.get("live_translation", {})
+    if not cfg.get("enabled", False):
+        return jsonify({"success": False, "message": "Translation not enabled on this machine"})
+
+    # Which engine to warm is this machine's business, not the client's — and it has
+    # to be decided before the model-loaded checks below, which describe the NMT
+    # model only. Asking them first meant an LLM box with the fallback resident
+    # answered "already loaded" and warmed nothing.
+    #
+    # This route used to load the NMT model unconditionally: on an LLM box that is
+    # the fallback, several GB for a model serving about one caption in a hundred,
+    # while the model doing the work stayed cold. Loading is lazy, so the cost
+    # landed on whoever spoke first — a measured service opened with six
+    # untranslated captions, 56 seconds, while the GGUF loaded.
+    method = (cfg.get("translation_method") or "nllb").strip().lower()
+    if method in ("whisper_translate", "whisper_forced_lang"):
+        return jsonify({"success": True, "engine": "none", "loaded": False,
+                        "message": "Whisper translates during transcription; nothing to preload"})
+
+    if method == "llm":
+        if (cfg.get("llm", {}) or {}).get("provider", "endpoint").strip().lower() != "local":
+            return jsonify({"success": True, "engine": "llm", "loaded": False,
+                            "message": "LLM runs on another server; nothing to load here"})
+        if is_local_llm_loaded():
+            return jsonify({"success": True, "engine": "llm", "loaded": True,
+                            "message": "LLM already loaded"})
+        threading.Thread(target=_warm_local_llm, daemon=True).start()
+        print(f"[PRELOAD] Warming the translation LLM for remote client {client_ip}...")
+        return jsonify({"success": True, "engine": "llm", "loaded": True,
+                        "message": "Warming the translation LLM"})
+
     # Mark wanted BEFORE the early returns: a queued unload (quick stop->start)
     # would otherwise remove the model right after we ack "already loaded"
     global _live_translation_model_wanted
     _live_translation_model_wanted = True
 
     if is_live_translation_model_loaded():
-        return jsonify({"success": True, "message": "Model already loaded"})
+        return jsonify({"success": True, "engine": "nmt", "message": "Model already loaded"})
 
     if is_live_translation_model_loading():
-        return jsonify({"success": True, "message": "Model already loading"})
-
-    cfg = config.get("live_translation", {})
-    if not cfg.get("enabled", False):
-        return jsonify({"success": False, "message": "Translation not enabled on this machine"})
+        return jsonify({"success": True, "engine": "nmt", "message": "Model already loading"})
 
     use_gpu = cfg.get("use_gpu", True)
     model_id = cfg.get("translation_model")
@@ -7446,9 +7473,9 @@ def translate_preload():
         get_live_translation_model(use_gpu, model_id)
         print("[PRELOAD] Translation model loaded and ready")
 
-    import threading
     threading.Thread(target=_preload, daemon=True).start()
-    return jsonify({"success": True, "message": "Loading translation model"})
+    return jsonify({"success": True, "engine": "nmt", "loaded": True,
+                    "message": "Loading translation model"})
 
 
 @app.route("/api/translate/sync-dictionary", methods=["POST"])
@@ -10309,22 +10336,8 @@ def start_transcription():
             # out into the fallback — the LLM never ran at all. The NMT model still
             # loads lazily the first time the LLM declines, so the fallback survives;
             # it just stops pre-paying for itself.
-            def _warm_llm():
-                try:
-                    target = trans_cfg.get("target_language", "en")
-                    warm_s = coerce_float(
-                        (trans_cfg.get("llm") or {}).get("warmup_timeout_ms"), 180000,
-                        lo=5000, hi=600000) / 1000.0
-                    if _translate_via_llm("Здравствуйте.", "ru", target,
-                                          timeout_override=warm_s) is not None:
-                        print("[START] LLM translation warmed and pinned")
-                    else:
-                        print("[START] LLM warm-up returned no usable text; "
-                              "captions will fall back to the NMT model")
-                except Exception as e:
-                    print(f"[START] LLM warm-up failed: {e}")
             import threading
-            threading.Thread(target=_warm_llm, daemon=True).start()
+            threading.Thread(target=_warm_local_llm, daemon=True).start()
         elif trans_cfg.get("enabled") and trans_cfg.get("translation_method", "nllb") not in (
             "whisper_translate", "whisper_forced_lang"
         ):
@@ -14930,6 +14943,39 @@ def _llm_fallback_is_skip():
     """
     llm_cfg = config.get("live_translation", {}).get("llm") or {}
     return (llm_cfg.get("fallback") or "nmt").strip().lower() == "skip"
+
+
+def _warm_local_llm(target_lang=None):
+    """Load and pin the translation LLM by translating one throwaway caption.
+
+    Loading is lazy, so without this the cost lands on whoever speaks first. A
+    6.8 GB GGUF takes ~15 s cold, and a measured service opened with six captions
+    — 56 seconds — shown untranslated while it loaded, because nothing warmed it
+    and the fallback is deliberately absent.
+
+    Called at transcription start on the machine that translates: locally by
+    start_transcription, and on an offload server by /api/translate/preload when
+    its paired client starts. The operator's lead time before the service is when
+    this should be paid, and it usually is.
+
+    Deliberately does NOT warm the NMT fallback. Measured on a 10 GB card, holding
+    Whisper (4202 MiB) and the NMT model (3558 MiB) left 1976 MiB, the LLM could
+    not fit, and every caption timed out into the fallback — the LLM never ran.
+    The fallback still loads lazily if it is ever needed.
+    """
+    lt = config.get("live_translation", {})
+    target = target_lang or lt.get("target_language", "en")
+    warm_s = coerce_float((lt.get("llm") or {}).get("warmup_timeout_ms"), 180000,
+                          lo=5000, hi=600000) / 1000.0
+    try:
+        if _translate_via_llm("Здравствуйте.", "ru", target,
+                              timeout_override=warm_s) is not None:
+            print("[WARM] LLM translation warmed and pinned")
+            return True
+        print("[WARM] LLM warm-up returned no usable text; captions will fall back")
+    except Exception as e:
+        print(f"[WARM] LLM warm-up failed: {e}")
+    return False
 
 
 def _translate_via_llm(text, source_lang, target_lang, timeout_override=None,
