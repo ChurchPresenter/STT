@@ -10629,7 +10629,16 @@ def correct_transcription():
                 """UPDATE transcriptions
                    SET original_text = COALESCE(original_text, text),
                        text = ?,
-                       corrected_by = ?
+                       corrected_by = ?,
+                       -- Same reason as the socket handler: emit_translated_entries
+                       -- re-seeds its cache from this column on a miss, so leaving
+                       -- the old translation here means the edited caption keeps
+                       -- the translation of the text it replaced.
+                       translated_text = NULL,
+                       translation_language = NULL,
+                       translation_ts_ms = NULL,
+                       mt_engine = NULL,
+                       mt_model = NULL
                    WHERE id = ?""",
                 (new_text, correction_type, segment_id),
             )
@@ -13869,17 +13878,44 @@ def handle_submit_correction(data):
         return
 
     try:
-        with sqlite3.connect(current_db_name) as conn:
-            cursor = conn.cursor()
-            cursor.execute(
-                """UPDATE transcriptions
-                   SET original_text = COALESCE(original_text, text),
-                       text = ?,
-                       corrected_by = ?
-                   WHERE id = ?""",
-                (new_text, correction_type, segment_id),
-            )
-            conn.commit()
+        # Through _db_lock/_open_db_writer like every other handler on this page
+        # (deny, mark, mark_reviewed). This one opened its own connection with
+        # sqlite's default 5s timeout and no busy_timeout, so during a live session
+        # — when the transcription worker holds the database and writes constantly —
+        # an edit raced it, raised "database is locked", and was lost behind an
+        # error toast. Editing the translation appeared to work only because that
+        # path never touches the database at all.
+        with _db_lock:
+            conn = _open_db_writer()
+            if conn is None:
+                emit("correction_error", {"error": "No active database"})
+                return
+            try:
+                cursor = conn.cursor()
+                cursor.execute(
+                    """UPDATE transcriptions
+                       SET original_text = COALESCE(original_text, text),
+                           text = ?,
+                           corrected_by = ?,
+                           -- Drop the translation of the text that was just replaced.
+                           -- emit_translated_entries re-seeds its cache from this
+                           -- column when the cache misses, so leaving it would
+                           -- resurrect the old translation and the edited caption
+                           -- would never be re-translated.
+                           translated_text = NULL,
+                           translation_language = NULL,
+                           translation_ts_ms = NULL,
+                           mt_engine = NULL,
+                           mt_model = NULL
+                       WHERE id = ?""",
+                    (new_text, correction_type, segment_id),
+                )
+                if cursor.rowcount == 0:
+                    emit("correction_error", {"error": f"Segment {segment_id} not found"})
+                    return
+                conn.commit()
+            finally:
+                conn.close()
 
         # Invalidate caches
         with _cache_lock:
