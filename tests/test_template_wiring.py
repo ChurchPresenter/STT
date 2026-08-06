@@ -95,3 +95,24 @@ def test_element_ids_are_unique(path):
 
 def test_templates_are_actually_being_checked():
     assert len(TEMPLATES) >= 8
+
+
+def test_pollfetch_users_load_the_script_that_defines_it():
+    """A page calling pollFetch must actually have it.
+
+    It is defined in static/poll-fetch.js rather than inline, because index.html
+    is the one page that does not extend base.html — and it is also the page most
+    likely to be left open on a machine that is not whitelisted, which is what
+    pollFetch exists for. A page that calls it without loading it throws a
+    ReferenceError that stops the rest of that page's JavaScript.
+    """
+    tag = "poll-fetch.js"
+    for path in TEMPLATES:
+        html = path.read_text(encoding="utf-8")
+        if "pollFetch" not in html:
+            continue
+        extends_base = '{% extends "base.html" %}' in html
+        loads_it = tag in html
+        base_loads_it = tag in (TEMPLATE_DIR / "base.html").read_text(encoding="utf-8")
+        assert loads_it or (extends_base and base_loads_it), (
+            f"{path.name} calls pollFetch but never loads {tag}")

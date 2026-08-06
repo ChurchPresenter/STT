@@ -24,6 +24,7 @@
     <link rel="icon" type="image/svg+xml" href="{{ url_for('static', filename='favicon.svg') }}">
     <link rel="stylesheet" href="{{ url_for('static', filename='fonts/inter.css') }}">
     <script src="{{ url_for('static', filename='socket.io.js') }}"></script>
+    <script src="{{ url_for('static', filename='poll-fetch.js') }}"></script>
     <style>
         :root {
             /* Backgrounds */
@@ -1097,7 +1098,7 @@
             }
 
             function poll() {
-                fetch('/api/translation/status')
+                pollFetch('/api/translation/status')
                     .then(function (r) { return r.json(); })
                     .then(function (d) {
                         var t = (d && d.trusted_clients) || [];

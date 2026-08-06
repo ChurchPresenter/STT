@@ -691,7 +691,7 @@
 
         // === Review queue ===
         function loadReview() {
-            fetch('/api/transcription/review-queue')
+            pollFetch('/api/transcription/review-queue')
                 .then(r => r.json())
                 .then(d => { if (d.success) { reviewSegments = d.segments || []; renderReview(); } })
                 .catch(() => {});

@@ -1146,7 +1146,7 @@
 
         // Check transcription status and switch between iframe/placeholder
         function checkPreviewTranscriptionStatus() {
-            fetch('/api/transcription/status')
+            pollFetch('/api/transcription/status')
                 .then(response => response.json())
                 .then(data => {
                     const iframe = document.getElementById('live-iframe');

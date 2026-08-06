@@ -621,7 +621,7 @@
 
     async function loadRemote() {
         try {
-            const res = await fetch("/api/health/remote");
+            const res = await pollFetch("/api/health/remote");
             const data = await res.json();
             if (data.configured === false) { updateRemoteGate(false); return; }
             if (data.success && data.health) {
@@ -636,7 +636,7 @@
 
     async function load() {
         try {
-            const res = await fetch("/api/health");
+            const res = await pollFetch("/api/health");
             const data = await res.json();
             if (data.success) render(data.health);
         } catch (err) { /* transient; keep last values */ }

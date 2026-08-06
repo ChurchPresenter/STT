@@ -761,7 +761,7 @@
         }
 
         async function getFileMoverConfig() {
-            const response = await fetch('/api/file-mover/status');
+            const response = await pollFetch('/api/file-mover/status');
             const data = await response.json();
             return data.success ? data.config : {};
         }
@@ -1237,7 +1237,7 @@
             if (window.location.protocol === 'file:') return;
 
             try {
-                const response = await fetch('/api/disk-space');
+                const response = await pollFetch('/api/disk-space');
                 const data = await response.json();
 
                 if (data.success) {
@@ -2383,7 +2383,7 @@
         // File Mover Functions
         async function loadFileMoverConfig() {
             try {
-                const response = await fetch('/api/file-mover/status');
+                const response = await pollFetch('/api/file-mover/status');
                 const data = await response.json();
 
                 if (data.success) {
@@ -2473,7 +2473,7 @@
         // in the background (e.g. when live transcription is stopped).
         async function pollFileMoverRuntime() {
             try {
-                const response = await fetch('/api/file-mover/status');
+                const response = await pollFetch('/api/file-mover/status');
                 const data = await response.json();
                 if (data.success) {
                     renderFileMoverRuntime(data.runtime);

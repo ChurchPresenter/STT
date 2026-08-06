@@ -12,6 +12,7 @@
     />
     <script src="{{ url_for('static', filename='jquery-3.6.0.min.js') }}"></script>
     <script src="{{ url_for('static', filename='socket.io.js') }}"></script>
+    <script src="{{ url_for('static', filename='poll-fetch.js') }}"></script>
 
 
     <script type="text/javascript">
@@ -1789,7 +1790,7 @@
       // Socket.IO Connection Monitoring
       // Check transcription status on page load and periodically
       function checkTranscriptionStatus() {
-        fetch('/api/transcription/status')
+        pollFetch('/api/transcription/status')
           .then(response => response.json())
           .then(data => {
             // Pass the full state object if available, otherwise fall back to boolean

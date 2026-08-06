@@ -583,7 +583,7 @@
         // Load disk space information
         async function loadDiskSpace() {
             try {
-                const response = await fetch('/api/disk-space');
+                const response = await pollFetch('/api/disk-space');
                 const data = await response.json();
 
                 if (data.success) {
@@ -1115,7 +1115,7 @@
         // Check transcription status and lock/unlock fields
         async function checkTranscriptionStatus() {
             try {
-                const response = await fetch('/api/transcription/status');
+                const response = await pollFetch('/api/transcription/status');
                 const data = await response.json();
 
                 if (data.success) {

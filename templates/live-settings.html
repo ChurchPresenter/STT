@@ -1474,7 +1474,7 @@
 
         async function updateStatus() {
             try {
-                const response = await fetch('/api/transcription/status');
+                const response = await pollFetch('/api/transcription/status');
                 const data = await response.json();
                 if (data.success) {
                     const state = data.state;
@@ -1989,7 +1989,7 @@
         // Check audio device availability and update status
         async function checkAudioDeviceStatus() {
             try {
-                const response = await fetch('/api/audio-devices');
+                const response = await pollFetch('/api/audio-devices');
                 const data = await response.json();
 
                 const liveStatus = document.getElementById('live_model_status');
@@ -2011,7 +2011,7 @@
         // Load audio devices
         async function loadAudioDevices() {
             try {
-                const response = await fetch('/api/audio-devices');
+                const response = await pollFetch('/api/audio-devices');
                 const data = await response.json();
 
                 const select = document.getElementById('audio_device');

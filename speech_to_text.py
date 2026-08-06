@@ -5099,6 +5099,7 @@ def get_config():
 # log and drown out meaningful traffic, so the log viewer hides them by default.
 POLLING_LOG_PATHS = [
     "/api/logs",
+    "/api/audio-devices",
     "/api/health",
     "/api/health/remote",
     "/api/transcription/status",

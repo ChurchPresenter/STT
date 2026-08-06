@@ -212,7 +212,7 @@
         if ($("hide-polling").checked) params.set("hide_polling", "1");
         let rows = [];
         try {
-            const res = await fetch("/api/logs/ips?" + params.toString());
+            const res = await pollFetch("/api/logs/ips?" + params.toString());
             const data = await res.json();
             if (!data.success) return;
             rows = data.ips || [];
@@ -247,7 +247,7 @@
         if ($("hide-polling").checked) params.set("hide_polling", "1");
         params.set("limit", limit);
         try {
-            const res = await fetch("/api/logs?" + params.toString());
+            const res = await pollFetch("/api/logs?" + params.toString());
             const data = await res.json();
             const body = $("logs-body");
             if (!data.success) {
@@ -286,7 +286,14 @@
         refresh();
     }
 
-    function refresh() { loadIps(); load(); }
+    // A pressed button retries the server even if the auto-refresh has paused
+    // itself against a denied endpoint.
+    function refresh() {
+        pollFetch.reset("/api/logs");
+        pollFetch.reset("/api/logs/ips");
+        loadIps();
+        load();
+    }
 
     $("refresh-btn").addEventListener("click", refresh);
     $("clear-btn").addEventListener("click", clearLogs);

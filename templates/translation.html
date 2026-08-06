@@ -1166,7 +1166,7 @@
 
         async function checkStatus() {
             try {
-                const response = await fetch('/api/translation/status');
+                const response = await pollFetch('/api/translation/status');
                 const data = await response.json();
 
                 if (data.success) {

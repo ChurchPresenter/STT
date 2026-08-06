@@ -607,7 +607,7 @@
   async function loadPhases(recompute) {
     const status = document.getElementById('sp-status');
     try {
-      const resp = await fetch('/api/service-phase' + (recompute ? '?recompute=1' : ''));
+      const resp = await pollFetch('/api/service-phase' + (recompute ? '?recompute=1' : ''));
       const data = await resp.json();
       if (!data.success) {
         status.textContent = data.error || 'Could not load.';
@@ -619,6 +619,8 @@
         + (data.enabled ? '' : ' · detection disabled in settings');
       render();
     } catch (e) {
+      // A paused poll is not an error to report — the last loaded view stays.
+      if (e && e.pollingPaused) return;
       status.textContent = 'Could not load: ' + e;
     }
   }
