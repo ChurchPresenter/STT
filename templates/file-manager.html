@@ -493,6 +493,7 @@
                     <button class="btn btn-secondary" id="devPickTest" onclick="devSelectVerdict('test')">☑ Test</button>
                     <button class="btn btn-secondary" id="devPickFragment" onclick="devSelectVerdict('fragment')">☑ Fragment</button>
                     <button class="btn btn-secondary" id="devPickUnusual" onclick="devSelectVerdict('unusual')">☑ Unusual</button>
+                    <button class="btn btn-secondary" id="devPickOrphan" onclick="devSelectVerdict('orphan')">☑ Orphan</button>
                     <button class="btn btn-secondary" id="devClearBtn" onclick="devClearSelection()">✕ Clear selection</button>
                     <button class="btn" style="background: var(--danger); color: white;" onclick="devDelete()">🗑 Delete selected</button>
                     <span id="devSelectionInfo" style="color: var(--text-secondary); font-size: 0.85em;"></span>
@@ -1312,6 +1313,7 @@
             'in progress': 'var(--danger)',
             'fragment': 'var(--warning)',
             'unusual': 'var(--warning)',
+            'orphan': 'var(--text-secondary)',
             'test': 'var(--success)',
         };
 
@@ -1329,7 +1331,16 @@
                     results.innerHTML = `<p style="color: var(--danger);">${data.error}</p>`;
                     return;
                 }
-                devSessions = data.sessions;
+                // Orphans join the same table as rows of their own. They are
+                // files a session sweep can never reach — the leftovers of a
+                // database that is already gone — so listing them separately
+                // would just be a second thing to remember to clear.
+                devSessions = data.sessions.concat((data.orphans || []).map(o => ({
+                    db_path: null, orphan_path: o.path, name: o.name,
+                    verdict: o.verdict, why: o.why, deletable: o.deletable,
+                    bytes: o.bytes, minutes: '—', rows: '—', file_count: 1,
+                    recording: /\.(wav|ts)$/i.test(o.name) ? o.path : null,
+                })));
                 renderDevResults(data);
             } catch (e) {
                 results.innerHTML = `<p style="color: var(--danger);">Scan failed: ${e.message}</p>`;
@@ -1344,13 +1355,13 @@
                     ? ` — ${data.small_session_count} sessions, ${devBytes(data.small_bytes)}`
                     : '');
 
-            if (!data.sessions.length) {
+            if (!devSessions.length) {
                 results.innerHTML = '<p style="color: var(--text-muted);">No sessions in this folder.</p>';
                 document.getElementById('devActions').style.display = 'none';
                 return;
             }
 
-            const rows = data.sessions.map((s, i) => {
+            const rows = devSessions.map((s, i) => {
                 const colour = DEV_COLOURS[s.verdict] || 'var(--text-secondary)';
                 // Disabled here for the same reason the server refuses it; the
                 // checkbox is a convenience, not the protection.
@@ -1415,7 +1426,8 @@
         function devUpdateVerdictButtons() {
             [['test', 'devPickTest', 'Test'],
              ['fragment', 'devPickFragment', 'Fragment'],
-             ['unusual', 'devPickUnusual', 'Unusual']].forEach(([verdict, id, label]) => {
+             ['unusual', 'devPickUnusual', 'Unusual'],
+             ['orphan', 'devPickOrphan', 'Orphan']].forEach(([verdict, id, label]) => {
                 const n = devSessions.filter(s => s.verdict === verdict && s.deletable).length;
                 const btn = document.getElementById(id);
                 btn.textContent = n ? `☑ ${label} (${n})` : `☑ ${label}`;
@@ -1445,7 +1457,8 @@
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
                         path: currentPath,
-                        db_paths: picked.map(s => s.db_path),
+                        db_paths: picked.filter(s => s.db_path).map(s => s.db_path),
+                        orphan_paths: picked.filter(s => s.orphan_path).map(s => s.orphan_path),
                         service_minutes: document.getElementById('devServiceMinutes').value,
                         substantial_rows: document.getElementById('devSubstantialRows').value,
                     }),

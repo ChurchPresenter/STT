@@ -9687,8 +9687,7 @@ def _dev_scan_sessions(root, thresholds):
             "verdict": verdict,
             "why": why,
             "deletable": verdict not in _session_cleanup.UNDELETABLE,
-            "recording": next((f for f in s.files
-                               if f.lower().endswith((".wav", ".ts"))), None),
+            "recording": _session_cleanup.pick_recording(s.files),
         })
     return out, orphans
 
@@ -9720,7 +9719,27 @@ def file_manager_dev_scan():
             return jsonify({"success": False, "error": "Path is not a directory"}), 400
 
         thresholds = _dev_thresholds(request.args)
-        sessions, orphans = _dev_scan_sessions(root, thresholds)
+        sessions, orphan_paths = _dev_scan_sessions(root, thresholds)
+
+        # Orphans are reported as rows of their own, not just counted. They are
+        # the leftovers of a session whose database is already gone, so nothing
+        # groups them and a session sweep cannot reach them — which is exactly
+        # how "related files" get left behind. A file still being written is a
+        # recording whose database does not exist yet, and is held back.
+        now = time.time()
+        orphans = []
+        for p in orphan_paths:
+            idle_min = (now - _session_cleanup.last_written([p])) / 60.0
+            live = idle_min < _session_cleanup.LIVE_MINUTES
+            orphans.append({
+                "path": p,
+                "name": os.path.basename(p),
+                "bytes": os.path.getsize(p) if os.path.exists(p) else 0,
+                "verdict": "in progress" if live else "orphan",
+                "why": (f"written {idle_min:.0f} min ago" if live
+                        else "no database within 30 minutes"),
+                "deletable": not live,
+            })
 
         totals = {}
         for s in sessions:
@@ -9728,19 +9747,23 @@ def file_manager_dev_scan():
             bucket["count"] += 1
             bucket["bytes"] += s["bytes"]
         sweepable = [s for s in sessions if s["deletable"]]
+        loose = [o for o in orphans if o["deletable"]]
 
         return jsonify({
             "success": True,
             "path": root,
             "sessions": sessions,
+            "orphans": orphans,
             "totals": totals,
             "orphan_count": len(orphans),
-            # What the page reports as "N small files found" — the files that a
-            # sweep could actually remove, not the session count, because one
-            # session is up to six files.
-            "small_file_count": sum(s["file_count"] for s in sweepable),
+            # What the page reports as "N small files found" — the files a sweep
+            # could actually remove, not the session count, because one session
+            # is up to six files. Orphans count too: they are files on disk that
+            # nothing else will ever clear.
+            "small_file_count": sum(s["file_count"] for s in sweepable) + len(loose),
             "small_session_count": len(sweepable),
-            "small_bytes": sum(s["bytes"] for s in sweepable),
+            "small_bytes": (sum(s["bytes"] for s in sweepable)
+                            + sum(o["bytes"] for o in loose)),
             "thresholds": thresholds,
         })
     except Exception as e:
@@ -9760,14 +9783,17 @@ def file_manager_dev_delete():
     try:
         data = request.get_json() or {}
         wanted = data.get("db_paths") or []
-        if not isinstance(wanted, list) or not wanted:
-            return jsonify({"success": False, "error": "db_paths is required"}), 400
+        wanted_orphans = data.get("orphan_paths") or []
+        if not isinstance(wanted, list) or not isinstance(wanted_orphans, list):
+            return jsonify({"success": False, "error": "db_paths must be a list"}), 400
+        if not wanted and not wanted_orphans:
+            return jsonify({"success": False, "error": "nothing selected"}), 400
 
         root = safe_managed_path(data.get("path", APP_DIR))
         if root is None or not os.path.isdir(root):
             return jsonify({"success": False, "error": "Access denied"}), 403
 
-        sessions, _orphans = _dev_scan_sessions(root, _dev_thresholds(data))
+        sessions, orphan_paths = _dev_scan_sessions(root, _dev_thresholds(data))
 
         # Every safety decision is made in stt.session_cleanup.plan_deletion, so
         # it is covered by tests rather than only by whatever this handler does.
@@ -9778,6 +9804,14 @@ def file_manager_dev_delete():
         targets = [safe_managed_path(raw) or raw for raw in wanted]
         to_delete, refused = _session_cleanup.plan_deletion(
             sessions, targets, live_db=_ts_get("db_name") or "")
+
+        # Orphans are planned separately: they have no session to belong to, and
+        # the guard that protects them is age, not verdict.
+        orphan_targets = [safe_managed_path(raw) or raw for raw in wanted_orphans]
+        orphan_delete, orphan_refused = _session_cleanup.plan_orphan_deletion(
+            orphan_paths, orphan_targets)
+        to_delete += orphan_delete
+        refused += orphan_refused
 
         deleted, freed, failed = 0, 0, []
         for f in to_delete:

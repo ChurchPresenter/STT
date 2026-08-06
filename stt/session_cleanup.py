@@ -405,3 +405,56 @@ def plan_deletion(sessions: Sequence[Dict[str, Any]], wanted: Iterable[str],
                 continue
             to_delete.append(path)
     return to_delete, refused
+
+
+def pick_recording(files: Iterable[str]) -> Optional[str]:
+    """The audio file of a session, preferring the ``.wav``.
+
+    Both are the same service: the ``.ts`` is the capture, the ``.wav`` is what
+    was made from it to feed the recogniser. The ``.wav`` is the one to hand to
+    another tool — it is plain PCM, and it is what a re-run transcribes.
+
+    Choosing it has to be explicit rather than "the first audio file in the
+    set". A session's files are sorted, and the capture is named for when
+    recording began while everything else is named for when the session did —
+    seconds earlier, but enough that ``2026-08-05_182841.ts`` sorts ahead of
+    ``2026-08-05_182905.wav`` and a first-match picker silently returns the
+    capture instead.
+    """
+    audio = [f for f in files if f.lower().endswith((".wav", ".ts"))]
+    if not audio:
+        return None
+    wavs = [f for f in audio if f.lower().endswith(".wav")]
+    return sorted(wavs)[0] if wavs else sorted(audio)[0]
+
+
+def plan_orphan_deletion(orphans: Iterable[str], wanted: Iterable[str],
+                         now: Optional[float] = None,
+                         live_minutes: float = LIVE_MINUTES) -> Tuple[List[str], List[Refusal]]:
+    """Split requested orphan files into ones to remove and refusals.
+
+    An orphan is a recording or export with no database near it in time — the
+    leftovers of a session whose record was already deleted. Nothing groups
+    them, so a session sweep cannot reach them and they sit on disk unnoticed;
+    they are usually the largest files in the folder.
+
+    Two refusals, and the second is the one that matters: **a recording being
+    made right now is an orphan.** Its database does not exist yet, so it looks
+    exactly like an abandoned file, and the only thing separating them is that
+    one of them is still being written.
+    """
+    known = set(orphans)
+    current = time.time() if now is None else now
+
+    to_delete: List[str] = []
+    refused: List[Refusal] = []
+    for path in wanted:
+        if path not in known:
+            refused.append(Refusal(os.path.basename(path or "?"), "not an orphan here"))
+            continue
+        written = last_written([path])
+        if written > 0.0 and (current - written) / 60.0 < live_minutes:
+            refused.append(Refusal(os.path.basename(path), "still being written"))
+            continue
+        to_delete.append(path)
+    return to_delete, refused

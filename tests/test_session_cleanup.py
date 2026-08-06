@@ -14,6 +14,7 @@ import pytest
 from stt.session_cleanup import (
     Refusal,
     plan_deletion,
+    plan_orphan_deletion,
     DEFAULT_SLOTS,
     UNDELETABLE,
     Session,
@@ -25,6 +26,7 @@ from stt.session_cleanup import (
     nearest_db,
     parse_slots,
     parse_started_at,
+    pick_recording,
     read_session_span,
     scan,
     wav_seconds,
@@ -548,3 +550,67 @@ class TestPlanDeletion:
     def test_nothing_requested_deletes_nothing(self, tmp_path):
         s = scanned(tmp_path, "t.db", "test")
         assert plan_deletion([s], []) == ([], [])
+
+
+class TestPickRecording:
+    """The .wav is the one to hand out, and sort order does not choose it."""
+
+    def test_prefers_the_wav_over_the_capture(self):
+        # The real trap: the .ts is named for when capture began, so it sorts
+        # first, and "the first audio file" returns the wrong one.
+        files = ["/a/2026-08-05_182841.ts", "/a/2026-08-05_182905.db",
+                 "/a/2026-08-05_182905.html", "/a/2026-08-05_182905.wav"]
+        assert pick_recording(files) == "/a/2026-08-05_182905.wav"
+
+    def test_falls_back_to_the_capture_when_there_is_no_wav(self):
+        assert pick_recording(["/a/x.db", "/a/x.ts"]) == "/a/x.ts"
+
+    def test_none_when_there_is_no_audio(self):
+        assert pick_recording(["/a/x.db", "/a/x.srt", "/a/x.html"]) is None
+
+    def test_empty_input(self):
+        assert pick_recording([]) is None
+
+    def test_case_insensitive(self):
+        assert pick_recording(["/a/X.TS", "/a/X.WAV"]) == "/a/X.WAV"
+
+    def test_deterministic_with_several_wavs(self):
+        assert pick_recording(["/a/b.wav", "/a/a.wav"]) == "/a/a.wav"
+
+
+class TestPlanOrphanDeletion:
+    """Leftovers with no database — including the recording that has none yet."""
+
+    def test_a_known_orphan_is_removed(self, tmp_path):
+        p = tmp_path / "old.wav"
+        p.write_bytes(b"x")
+        os.utime(str(p), (1000, 1000))
+        go, refused = plan_orphan_deletion([str(p)], [str(p)], now=1_000_000)
+        assert go == [str(p)] and refused == []
+
+    def test_a_path_the_scan_did_not_report_is_refused(self, tmp_path):
+        p = tmp_path / "old.wav"
+        p.write_bytes(b"x")
+        go, refused = plan_orphan_deletion([], [str(p)], now=1_000_000)
+        assert go == []
+        assert refused[0].reason == "not an orphan here"
+        assert p.exists()
+
+    def test_a_recording_in_progress_is_refused(self, tmp_path):
+        # The case this guard exists for: a service being recorded right now has
+        # no database yet, so it is an orphan by every other measure.
+        p = tmp_path / "live.ts"
+        p.write_bytes(b"x")
+        os.utime(str(p), (10_000, 10_000))
+        go, refused = plan_orphan_deletion([str(p)], [str(p)], now=10_120)
+        assert go == []
+        assert refused[0].reason == "still being written"
+
+    def test_an_idle_orphan_is_allowed(self, tmp_path):
+        p = tmp_path / "old.ts"
+        p.write_bytes(b"x")
+        os.utime(str(p), (10_000, 10_000))
+        assert plan_orphan_deletion([str(p)], [str(p)], now=10_000 + 3600)[0] == [str(p)]
+
+    def test_nothing_requested_removes_nothing(self, tmp_path):
+        assert plan_orphan_deletion([str(tmp_path / "a")], []) == ([], [])
