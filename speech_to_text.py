@@ -9905,6 +9905,40 @@ def file_manager_wav_analyze():
         return jsonify({"success": False, "error": str(e)}), 500
 
 
+@app.route("/api/file-manager/wav-peaks", methods=["POST"])
+def file_manager_wav_peaks():
+    """Loudness envelope of a range, for drawing the waveform. Read-only.
+
+    Zooming asks for a narrower range rather than more detail over the whole
+    file, so only the part being looked at is ever read.
+    """
+    if not check_ip_whitelist():
+        return jsonify({"success": False, "error": "Access denied"}), 403
+    try:
+        data = request.get_json() or {}
+        path = safe_managed_path(data.get("path"))
+        if path is None or not os.path.isfile(path):
+            return jsonify({"success": False, "error": "Access denied"}), 403
+        if not path.lower().endswith(".wav"):
+            return jsonify({"success": False, "error": "Only .wav files"}), 400
+
+        info = _wav_edit.read_info(path)
+        buckets = coerce_int(data.get("buckets"), 900, lo=16, hi=4000)
+        start = coerce_float(data.get("start"), 0.0, lo=0.0, hi=86400.0)
+        end_raw = data.get("end")
+        end = None if end_raw in (None, "") else coerce_float(end_raw, 0.0, lo=0.0, hi=86400.0)
+
+        return jsonify({"success": True,
+                        "peaks": _wav_edit.peaks(path, buckets, start, end, info=info),
+                        "start": start,
+                        "end": info.seconds if end is None else end,
+                        "seconds": round(info.seconds, 2)})
+    except _wav_edit.WavError as e:
+        return jsonify({"success": False, "error": str(e)}), 400
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
 @app.route("/api/file-manager/wav-trim", methods=["POST"])
 def file_manager_wav_trim():
     """Write a trimmed copy of a recording beside it. Never edits in place.

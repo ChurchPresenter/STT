@@ -493,12 +493,23 @@
                         <button class="btn btn-secondary" style="margin-left: auto; padding: 2px 10px; font-size: 0.8em;" onclick="devCloseWavEditor()">✕ Close</button>
                     </div>
                     <div id="devWavInfo" style="margin: 8px 0; font-size: 0.85em; color: var(--text-secondary);"></div>
+                    <canvas id="devWavCanvas" height="120"
+                            style="width: 100%; height: 120px; display: block; cursor: crosshair; border: 1px solid var(--border); border-radius: var(--radius-sm);"
+                            onmousedown="devWaveDown(event)" onmousemove="devWaveMove(event)"
+                            onmouseup="devWaveUp()" onmouseleave="devWaveUp()"></canvas>
+                    <div style="display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin: 8px 0;">
+                        <span style="font-size: 0.8em; color: var(--text-muted);">drag on the waveform to select</span>
+                        <button class="btn btn-secondary" style="margin-left: auto; padding: 2px 10px; font-size: 0.8em;" onclick="devZoomSelection()">🔍 Zoom to selection</button>
+                        <button class="btn btn-secondary" style="padding: 2px 10px; font-size: 0.8em;" onclick="devZoom(0.5)">＋ In</button>
+                        <button class="btn btn-secondary" style="padding: 2px 10px; font-size: 0.8em;" onclick="devZoom(2)">－ Out</button>
+                        <button class="btn btn-secondary" style="padding: 2px 10px; font-size: 0.8em;" onclick="devZoomFit()">⤢ Fit</button>
+                    </div>
                     <div style="display: flex; gap: 10px; align-items: center; flex-wrap: wrap;">
                         <button class="btn btn-primary" onclick="devTrimSilence()" title="Keep from the first word to the last. A pause in the middle of a service is never cut out.">✂ Trim silence</button>
                         <label style="font-size: 0.85em; color: var(--text-secondary);">from
-                            <input type="number" id="devWavStart" step="0.1" min="0" style="width: 95px; padding: 3px;"> s</label>
+                            <input type="number" id="devWavStart" step="0.1" min="0" oninput="devDrawWave()" style="width: 95px; padding: 3px;"> s</label>
                         <label style="font-size: 0.85em; color: var(--text-secondary);">to
-                            <input type="number" id="devWavEnd" step="0.1" min="0" style="width: 95px; padding: 3px;"> s</label>
+                            <input type="number" id="devWavEnd" step="0.1" min="0" oninput="devDrawWave()" style="width: 95px; padding: 3px;"> s</label>
                         <button class="btn btn-secondary" onclick="devTrimRange()">✂ Trim to range</button>
                         <span style="font-size: 0.8em; color: var(--text-muted);">writes a new file beside the original</span>
                     </div>
@@ -999,6 +1010,15 @@
                     ? `<button class="action-btn action-preview" onclick="previewFile('${item.path.replace(/\\/g, '\\\\')}', '${item.name.replace(/'/g, "\\'")}')">Preview</button>`
                     : '';
 
+                // Trimming sits with the other per-file actions rather than
+                // behind a scan, so a recording can be trimmed straight from the
+                // listing. Dev mode only: it writes files, and it is not
+                // something an operator browsing the archive needs on screen.
+                const trimButton = (devModeOn() && !isRemote && item.type === 'file'
+                                    && /\.wav$/i.test(item.name))
+                    ? `<button class="action-btn" style="background: var(--warning); color: var(--text-primary);" onclick="devOpenWavEditorFor('${item.path.replace(/\\/g, '\\\\')}')">✂ Trim</button>`
+                    : '';
+
                 const isChecked = selectedPaths.has(item.path);
                 const selectCell = showSelect
                     ? `<td class="select-cell"><input type="checkbox" ${isChecked ? 'checked' : ''} onclick="onRowCheck(event, '${item.path.replace(/\\/g, '\\\\')}')"></td>`
@@ -1018,6 +1038,7 @@
                         <td>
                             <div class="file-actions">
                                 ${previewButton}
+                                ${trimButton}
                                 ${downloadButton}
                                 ${hideButton}
                                 ${!isRemote ? `<button class="action-btn action-rename" onclick="showRenameModal('${item.path.replace(/\\/g, '\\\\')}', '${item.name.replace(/'/g, "\\'")}')">Rename</button>` : ''}
@@ -1300,6 +1321,9 @@
             const on = !devModeOn();
             localStorage.setItem('fmDevMode', on ? '1' : '0');
             applyDevMode();
+            // The Trim action is rendered per row, so the listing has to be
+            // redrawn for it to appear or disappear with the toggle.
+            loadFiles(currentPath);
             if (on) devScan();
         }
 
@@ -1310,6 +1334,7 @@
             btn.classList.toggle('btn-primary', on);
             btn.classList.toggle('btn-secondary', !on);
             if (!on) {
+                devCloseWavEditor();
                 devSessions = [];
                 document.getElementById('devResults').innerHTML = '';
                 document.getElementById('devSummary').textContent = '';
@@ -1387,17 +1412,14 @@
                 const box = s.deletable
                     ? `<input type="checkbox" class="devPick" data-index="${i}" onchange="devSelectionChanged()">`
                     : `<input type="checkbox" disabled title="${s.verdict} — never swept">`;
-                const isWav = s.recording && /\.wav$/i.test(s.recording);
                 const copy = s.recording
                     ? `<button class="btn btn-secondary" style="padding: 2px 8px; font-size: 0.8em;"
                          onclick="devCopyToRoot(${i})">📋 Copy to root</button>`
                     : '';
-                // Only .wav — the .ts capture is a transport stream, and cutting
-                // a byte range out of one does not give a playable file.
-                const edit = isWav
-                    ? `<button class="btn btn-secondary" style="padding: 2px 8px; font-size: 0.8em;"
-                         onclick="devOpenWavEditor(${i})">✂ Trim</button>`
-                    : '';
+                // Trimming lives in the file listing's Actions column, not here:
+                // it applies to a file, not to a session, and wanting to trim a
+                // recording should not mean running a scan first.
+                const edit = '';
                 return `<tr>
                     <td style="padding: 4px 8px;">${box}</td>
                     <td style="padding: 4px 8px; color: ${colour}; font-weight: 600;">${s.verdict}</td>
@@ -1521,14 +1543,19 @@
         // not something to edit in place.
 
         let devWavPath = null;
+        // The stretch the waveform is currently showing. Zooming changes this
+        // and re-asks the server, so detail is real at every depth rather than
+        // a stretched picture of the first draw.
+        let devWavView = { start: 0, end: 0 };
+        let devWavPeaks = [];
+        let devWavDrag = null;
 
-        async function devOpenWavEditor(index) {
-            const s = devSessions[index];
-            if (!s || !s.recording) return;
-            devWavPath = s.recording;
+        async function devOpenWavEditorFor(path) {
+            devWavPath = path;
             const panel = document.getElementById('devWavPanel');
             panel.style.display = 'block';
-            document.getElementById('devWavName').textContent = s.recording.split('/').pop();
+            panel.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+            document.getElementById('devWavName').textContent = path.split(/[\\/]/).pop();
             document.getElementById('devWavInfo').textContent = 'Analysing…';
             document.getElementById('devWavStart').value = '';
             document.getElementById('devWavEnd').value = '';
@@ -1556,9 +1583,134 @@
                     + stale;
                 document.getElementById('devWavStart').value = d.speech_start.toFixed(1);
                 document.getElementById('devWavEnd').value = d.speech_end.toFixed(1);
+                devWavView = { start: 0, end: d.seconds };
+                await devLoadPeaks();
             } catch (e) {
                 document.getElementById('devWavInfo').textContent = 'Analyse failed: ' + e.message;
             }
+        }
+
+        // --- Waveform -------------------------------------------------------
+
+        async function devLoadPeaks() {
+            const canvas = document.getElementById('devWavCanvas');
+            const buckets = Math.max(64, Math.min(2000, canvas.clientWidth || 900));
+            try {
+                const resp = await fetch('/api/file-manager/wav-peaks', {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ path: devWavPath, buckets: buckets,
+                                           start: devWavView.start, end: devWavView.end }),
+                });
+                const d = await resp.json();
+                devWavPeaks = d.success ? d.peaks : [];
+            } catch (e) {
+                devWavPeaks = [];
+            }
+            devDrawWave();
+        }
+
+        function devWaveX(seconds) {
+            const canvas = document.getElementById('devWavCanvas');
+            const span = devWavView.end - devWavView.start;
+            if (span <= 0) return 0;
+            return ((seconds - devWavView.start) / span) * canvas.width;
+        }
+
+        function devWaveTime(x) {
+            const canvas = document.getElementById('devWavCanvas');
+            const span = devWavView.end - devWavView.start;
+            return devWavView.start + (x / canvas.width) * span;
+        }
+
+        function devDrawWave() {
+            const canvas = document.getElementById('devWavCanvas');
+            const css = getComputedStyle(document.body);
+            // Match the backing store to the CSS size so the trace is crisp and
+            // the pixel-to-time mapping is one-to-one.
+            const ratio = window.devicePixelRatio || 1;
+            canvas.width = (canvas.clientWidth || 900) * ratio;
+            canvas.height = (canvas.clientHeight || 120) * ratio;
+            const ctx = canvas.getContext('2d');
+            const w = canvas.width, h = canvas.height, mid = h / 2;
+
+            ctx.clearRect(0, 0, w, h);
+            ctx.fillStyle = css.getPropertyValue('--bg-elevated') || '#1a1a1a';
+            ctx.fillRect(0, 0, w, h);
+
+            // The selection, drawn under the trace so it never hides it.
+            const start = parseFloat(document.getElementById('devWavStart').value);
+            const end = parseFloat(document.getElementById('devWavEnd').value);
+            if (!isNaN(start) && !isNaN(end) && end > start) {
+                const x1 = devWaveX(start), x2 = devWaveX(end);
+                ctx.fillStyle = 'rgba(245, 158, 11, 0.20)';
+                ctx.fillRect(x1, 0, x2 - x1, h);
+                ctx.strokeStyle = css.getPropertyValue('--warning') || '#f59e0b';
+                ctx.lineWidth = 2 * ratio;
+                [x1, x2].forEach(x => {
+                    ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, h); ctx.stroke();
+                });
+            }
+
+            ctx.strokeStyle = css.getPropertyValue('--border') || '#333';
+            ctx.lineWidth = 1;
+            ctx.beginPath(); ctx.moveTo(0, mid); ctx.lineTo(w, mid); ctx.stroke();
+
+            if (!devWavPeaks.length) return;
+            ctx.fillStyle = css.getPropertyValue('--accent') || '#3b82f6';
+            const step = w / devWavPeaks.length;
+            devWavPeaks.forEach((p, i) => {
+                // Minimum 1px so a silent stretch still reads as a line rather
+                // than as missing data.
+                const height = Math.max(1, p * mid);
+                ctx.fillRect(i * step, mid - height, Math.max(1, step), height * 2);
+            });
+        }
+
+        function devWaveMouse(e) {
+            const canvas = document.getElementById('devWavCanvas');
+            const rect = canvas.getBoundingClientRect();
+            const ratio = window.devicePixelRatio || 1;
+            return devWaveTime((e.clientX - rect.left) * ratio);
+        }
+
+        function devWaveDown(e) { devWavDrag = devWaveMouse(e); }
+
+        function devWaveMove(e) {
+            if (devWavDrag === null) return;
+            const now = devWaveMouse(e);
+            document.getElementById('devWavStart').value = Math.min(devWavDrag, now).toFixed(2);
+            document.getElementById('devWavEnd').value = Math.max(devWavDrag, now).toFixed(2);
+            devDrawWave();
+        }
+
+        function devWaveUp() { devWavDrag = null; }
+
+        async function devZoomSelection() {
+            const start = parseFloat(document.getElementById('devWavStart').value);
+            const end = parseFloat(document.getElementById('devWavEnd').value);
+            if (isNaN(start) || isNaN(end) || end <= start) return;
+            devWavView = { start: start, end: end };
+            await devLoadPeaks();
+        }
+
+        async function devZoom(factor) {
+            const span = devWavView.end - devWavView.start;
+            const centre = devWavView.start + span / 2;
+            const total = devWavAnalysis ? devWavAnalysis.seconds : devWavView.end;
+            // A quarter second is as far in as it is useful to go, and the view
+            // is always clamped back inside the file.
+            const next = Math.max(0.25, Math.min(total, span * factor));
+            let start = Math.max(0, centre - next / 2);
+            let end = Math.min(total, start + next);
+            start = Math.max(0, end - next);
+            devWavView = { start: start, end: end };
+            await devLoadPeaks();
+        }
+
+        async function devZoomFit() {
+            if (!devWavAnalysis) return;
+            devWavView = { start: 0, end: devWavAnalysis.seconds };
+            await devLoadPeaks();
         }
 
         let devWavAnalysis = null;

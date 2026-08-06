@@ -14,6 +14,7 @@ from stt.wav_edit import (
     WavError,
     clamp_range,
     find_speech_bounds,
+    peaks,
     read_info,
     trim,
     trimmed_name,
@@ -204,3 +205,39 @@ class TestTrimmedName:
         src.write_bytes(b"")
         (tmp_path / "a_trimmed.wav").write_bytes(b"")
         assert trimmed_name(str(src)).endswith("a_trimmed2.wav")
+
+
+class TestPeaks:
+    """The envelope a waveform is drawn from."""
+
+    def test_silence_reads_flat_and_speech_reads_loud(self, tmp_path):
+        p = write_wav(tmp_path / "a.wav", 0,
+                      samples=quiet(RATE) + tone(RATE, 16000) + quiet(RATE))
+        values = peaks(p, buckets=30)
+        assert len(values) == 30
+        assert max(values[:10]) == 0.0          # first second silent
+        assert min(values[10:20]) > 0.4         # second second loud
+        assert max(values[20:]) == 0.0          # third silent
+
+    def test_values_are_scaled_to_full_scale(self, tmp_path):
+        p = write_wav(tmp_path / "b.wav", 0, samples=tone(RATE, 32767))
+        assert max(peaks(p, buckets=10)) == pytest.approx(1.0, abs=0.001)
+
+    def test_a_range_reads_only_that_range(self, tmp_path):
+        # Zooming into the silent tail must not show the speech before it.
+        p = write_wav(tmp_path / "c.wav", 0, samples=tone(RATE, 16000) + quiet(RATE))
+        assert max(peaks(p, buckets=10, start_seconds=1.0)) == 0.0
+        assert max(peaks(p, buckets=10, end_seconds=1.0)) > 0.4
+
+    def test_bucket_count_is_honoured(self, tmp_path):
+        p = write_wav(tmp_path / "d.wav", RATE * 4)
+        assert len(peaks(p, buckets=200)) == 200
+
+    def test_more_buckets_than_frames_is_capped(self, tmp_path):
+        p = write_wav(tmp_path / "e.wav", 50)
+        assert len(peaks(p, buckets=5000)) == 50
+
+    def test_an_empty_range_raises(self, tmp_path):
+        p = write_wav(tmp_path / "f.wav", RATE)
+        with pytest.raises(WavError):
+            peaks(p, start_seconds=0.5, end_seconds=0.5)

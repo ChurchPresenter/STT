@@ -27,7 +27,7 @@ from __future__ import annotations
 
 import os
 import struct
-from typing import NamedTuple, Optional, Tuple
+from typing import List, NamedTuple, Optional, Tuple
 
 #: Read this much at a time when scanning for silence.
 _CHUNK_FRAMES = 1 << 16
@@ -242,3 +242,41 @@ def trimmed_name(path: str, suffix: str = "trimmed") -> str:
         candidate = f"{base}_{suffix}{n}{ext}"
         n += 1
     return candidate
+
+
+def peaks(path: str, buckets: int = 800, start_seconds: float = 0.0,
+          end_seconds: Optional[float] = None,
+          info: Optional[WavInfo] = None) -> List[float]:
+    """Loudness envelope of a range, as ``buckets`` values between 0 and 1.
+
+    One value per horizontal pixel of a waveform: the largest absolute sample in
+    that slice of time, scaled to full scale. Peak rather than average, because
+    a waveform drawn from averages of a 16 kHz signal is a flat smear — the
+    point of looking at one is to see where sound starts and stops.
+
+    Reading is confined to the requested range, which is what makes zooming
+    cheap: the first draw of a two-hour file reads all of it, and every zoom
+    after that reads only the part being looked at.
+    """
+    info = info or read_info(path)
+    if info.sample_width != 2 or not info.frames or buckets < 1:
+        return []
+
+    start_frame, count = clamp_range(info, start_seconds, end_seconds)
+    buckets = min(buckets, count) or 1
+    per_bucket = count / buckets
+    frame_size = info.frame_size
+
+    out: List[float] = []
+    with open(path, "rb") as fh:
+        for index in range(buckets):
+            begin = start_frame + int(index * per_bucket)
+            finish = start_frame + int((index + 1) * per_bucket)
+            span = max(1, finish - begin)
+            fh.seek(info.data_offset + begin * frame_size)
+            block = fh.read(span * frame_size)
+            if not block:
+                out.append(0.0)
+                continue
+            out.append(min(1.0, _peak(block, info.sample_width) / 32767.0))
+    return out
