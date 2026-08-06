@@ -440,9 +440,13 @@
       "max_text_chars": 8000,
       "_max_text_chars_comment": "Largest text /api/translate will accept from a paired machine, in characters. Over this it returns 413 rather than passing it to the model. Captions are short — the longest seen over 70k real captions was ~1100 chars — so this only catches a malformed or runaway payload, which would also be held whole as a server cache key.",
       "sync_dictionary_on_edit": true,
-      "_sync_dictionary_on_edit_comment": "When offloading, push glossary/dictionary edits to the remote server immediately so it doesn't keep translating with a stale glossary."
+      "_sync_dictionary_on_edit_comment": "When offloading, push glossary/dictionary edits to the remote server immediately so it doesn't keep translating with a stale glossary.",
+      "token": "",
+      "_token_comment": "Bearer token this machine presents to the paired remote (Machine B). Claimed automatically at pairing and stored here; empty until then. Delete it to force a fresh claim. Treat it as a secret — it is what proves this machine is the paired one."
     },
     "trusted_clients": [],
+    "trusted_client_tokens": {},
+    "_trusted_client_tokens_comment": "Tokens issued to paired clients, as {sha256-of-token: ip}. Only the fingerprint is kept, so this file cannot hand out anyone's token. An entry here means that client must present its token — its IP address alone no longer grants access. Unpairing deletes the entry, which revokes it.",
     "_trusted_client_ports_comment": "Web UI port of each paired client, keyed by IP (learned at pairing, refreshed by the heartbeat). Lets this machine link back to the machines it translates for. Managed automatically.",
     "trusted_client_ports": {},
     "_trusted_clients_comment": "IPs allowed to use this machine for remote translation (managed automatically via pairing)",

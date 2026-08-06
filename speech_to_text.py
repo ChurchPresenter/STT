@@ -58,6 +58,7 @@ for _mig_name in ("config.json", "custom_dictionary.json", "word_highlighting.js
 from stt import paths as _paths
 from stt.paths import safe_model_path  # noqa: F401
 from stt.coercion import coerce_float, coerce_int
+from stt import pair_tokens as _pair_tokens_mod
 from stt.http_params import merge_request_params, parse_json_body as _parse_json_body
 from stt.model_disk import dir_has_weights, dir_is_writable, has_weight_file, is_weight_file  # noqa: F401
 
@@ -690,7 +691,79 @@ _a_pushed = {"language": False, "glossary": False}
 
 
 def _is_trusted_translation_client(ip):
+    """Whether ``ip`` is on the paired list. Address only — see _paired_client_ok."""
     return ip in _trusted_translation_clients
+
+
+# A token this machine has just issued but whose owner may not have stored it:
+# for this long, that address may ask again. Long enough for Machine A's ~20 s
+# heartbeat to retry, short enough that it is not a standing way in. In memory
+# only — a restart ends the window, which is the safe direction.
+PAIR_TOKEN_GRACE_SECONDS = 120
+_pair_token_grace = {}         # {ip: expiry}
+_pair_token_grace_lock = threading.Lock()
+
+
+def _pair_token_grace_ips():
+    """Addresses still inside the re-claim window, dropping the expired ones."""
+    now = time.time()
+    with _pair_token_grace_lock:
+        for ip in [ip for ip, expiry in _pair_token_grace.items() if expiry <= now]:
+            del _pair_token_grace[ip]
+        return set(_pair_token_grace)
+
+
+def _pair_tokens():
+    """Fingerprint -> address, for the tokens this machine has handed out."""
+    stored = config.get("live_translation", {}).get("trusted_client_tokens")
+    return dict(stored) if isinstance(stored, dict) else {}
+
+
+def _save_pair_tokens(tokens):
+    """Persist the token store."""
+    config.setdefault("live_translation", {})["trusted_client_tokens"] = dict(tokens)
+    save_config(config)
+
+
+def _paired_client_ok(ip=None):
+    """Whether the request in hand may act as the paired Machine A.
+
+    The bearer token pairing handed out is the real answer; a machine that has
+    not been given one yet is still recognised by address, which is what lets an
+    older build keep working until it updates (see stt/pair_tokens). A token
+    arriving from a new address moves the pairing to that address, so a machine
+    that changed IP does not have to be paired again.
+    """
+    client_ip = request.remote_addr if ip is None else ip
+    tokens = _pair_tokens()
+    decision = _pair_tokens_mod.authorize(
+        tokens, _trusted_translation_clients, client_ip,
+        _pair_tokens_mod.parse_bearer(request.headers.get("Authorization")) if ip is None else None,
+    )
+    if decision.authorized and decision.rebind_from:
+        _rebind_trusted_client(decision.rebind_from, client_ip)
+    return decision.authorized
+
+
+def _rebind_trusted_client(old_ip, new_ip):
+    """Follow a paired machine to a new address, keeping what we knew about it."""
+    if not new_ip or old_ip == new_ip:
+        return
+    _trusted_translation_clients.discard(old_ip)
+    _trusted_translation_clients.add(new_ip)
+    live = config.setdefault("live_translation", {})
+    trusted = live.setdefault("trusted_clients", [])
+    if old_ip in trusted:
+        trusted.remove(old_ip)
+    if new_ip not in trusted:
+        trusted.append(new_ip)
+    port = _translation_client_ports.get(old_ip)
+    _forget_client_port(old_ip)
+    if port:
+        _remember_client_port(new_ip, port, persist=False)
+    live["trusted_client_tokens"] = _pair_tokens_mod.rebind(_pair_tokens(), old_ip, new_ip)
+    save_config(config)
+    print(f"[PAIR] Paired machine moved from {old_ip} to {new_ip}")
 
 
 def _add_trusted_client(ip, port=None):
@@ -1198,7 +1271,8 @@ def _fetch_remote_provenance():
         return {}
     try:
         import requests as _req
-        r = _req.get(endpoint + "/api/translation/status", timeout=5)
+        r = _req.get(endpoint + "/api/translation/status",
+                     headers=_remote_auth_headers(), timeout=5)
         provenance = _remote_provenance(r.json())
     except Exception as e:
         print(f"[SESSION-META] Could not read remote translation provenance: {e}")
@@ -6376,7 +6450,7 @@ def get_health():
     client only paints colours."""
     # A paired translation peer (Machine A) may read this box's health so it can
     # show it as "Machine B" — the same trust the /api/translate endpoints use.
-    if not (check_ip_whitelist() or _is_trusted_translation_client(request.remote_addr)):
+    if not (check_ip_whitelist() or _paired_client_ok()):
         return jsonify({"success": False, "error": "Access Denied"}), 403
     try:
         ts = _ts_snapshot()
@@ -6805,12 +6879,65 @@ def _propagate_dictionary_to_remote():
                 return
             _get_remote_http_session().post(
                 ep.rstrip("/") + "/api/translate/sync-dictionary",
-                json=payload, timeout=5,
+                json=payload, headers=_remote_auth_headers(), timeout=5,
             )
         except Exception as e:
             print(f"[REMOTE] Could not propagate dictionary to remote: {e}")
 
     threading.Thread(target=_push, daemon=True).start()
+
+
+def _remote_pair_token():
+    """The bearer token this machine holds for its paired Machine B, if any."""
+    remote = config.get("live_translation", {}).get("remote", {}) or {}
+    token = remote.get("token")
+    return token if isinstance(token, str) and token else None
+
+
+def _remote_auth_headers():
+    """Authorization header for every call to the paired Machine B.
+
+    Empty until this machine has claimed a token, which is what keeps a pairing
+    with an older B working: B falls back to recognising us by address until it
+    has handed one out."""
+    token = _remote_pair_token()
+    return {"Authorization": f"Bearer {token}"} if token else {}
+
+
+def _claim_remote_pair_token(endpoint, force=False):
+    """Ask the paired Machine B for a bearer token and store it.
+
+    Called when this machine is paired but holds no token — after pairing, and
+    once per heartbeat pass as a catch-up for a pairing that predates tokens
+    (or one whose B has only just updated). A B that is too old to know the
+    endpoint answers 404 and we simply keep using the address path.
+
+    Returns True when a token was stored.
+    """
+    if not endpoint or (_remote_pair_token() and not force):
+        return False
+    try:
+        r = _get_remote_http_session().post(
+            endpoint.rstrip("/") + "/api/translate/pair/token",
+            headers=_remote_auth_headers(), timeout=5)
+        if r.status_code != 200:
+            return False
+        token = (r.json() or {}).get("token")
+        if not isinstance(token, str) or not token:
+            return False
+    except Exception:
+        return False
+    config.setdefault("live_translation", {}).setdefault("remote", {})["token"] = token
+    save_config(config)
+    print("[REMOTE] Claimed a pairing token from the remote translation server")
+    return True
+
+
+def _forget_remote_pair_token():
+    """Drop our token — after unpairing, so a later re-pair starts clean."""
+    remote = config.get("live_translation", {}).get("remote", {})
+    if isinstance(remote, dict) and remote.pop("token", None) is not None:
+        save_config(config)
 
 
 def _remote_heartbeat_loop():
@@ -6829,6 +6956,9 @@ def _remote_heartbeat_loop():
             ep = _get_remote_endpoint_safe()
             if not ep:
                 continue
+            # Catch-up for a pairing made before tokens existed: claim one the
+            # first time we reach a B that offers them, then authenticate with it.
+            _claim_remote_pair_token(ep)
             # Tell B which port this machine's own UI is on. B sees only our IP
             # (request.remote_addr), so without this it cannot offer a link back
             # to us and would have to guess port 80.
@@ -6836,6 +6966,7 @@ def _remote_heartbeat_loop():
                 ep.rstrip("/") + "/api/translate/heartbeat",
                 json={"port": coerce_int(config.get("web_server", {}).get("port"), 8080,
                                          lo=1, hi=65535)},
+                headers=_remote_auth_headers(),
                 timeout=5)
         except Exception:
             pass  # best-effort; never let the heartbeat crash
@@ -6935,6 +7066,7 @@ def _apply_translation_language_switch(new_language):
                 _req.post(
                     _remote_ep.rstrip("/") + "/api/translate/language",
                     json={"target_language": new_language},
+                    headers=_remote_auth_headers(),
                     timeout=5,
                 )
             except Exception as _e:
@@ -7017,7 +7149,7 @@ def get_translation_status():
     trans_config = config.get("live_translation", {})
     caller_ip = request.remote_addr
     is_local = check_ip_whitelist()
-    is_paired = _is_trusted_translation_client(caller_ip)
+    is_paired = _paired_client_ok()
 
     # Collect active remote clients (last seen within 60s) and prune stale ones
     with _translation_clients_lock:
@@ -7158,6 +7290,10 @@ def get_translation_status():
         result["trusted_client_ports"] = {
             ip: _translation_client_ports[ip]
             for ip in _trusted_translation_clients if ip in _translation_client_ports}
+        # Which paired machines authenticate with a token rather than by address
+        # alone — the addresses, never the fingerprints. An operator can see at a
+        # glance whether a pairing has upgraded yet.
+        result["token_authenticated_clients"] = sorted(set(_pair_tokens().values()))
         result["pending_pairs"] = pending
     else:
         result["remote_clients"] = []
@@ -7191,7 +7327,7 @@ def translate_remote():
     Returns: {translated_text, confidence?, alternatives?}
     """
     client_ip = request.remote_addr
-    if not _is_trusted_translation_client(client_ip):
+    if not _paired_client_ok():
         return jsonify({"success": False, "error": "Not paired. Use the pairing flow in the Translations tab."}), 403
 
     data = request.get_json() or {}
@@ -7273,7 +7409,7 @@ def translate_unload():
     """Remote unload — called by a paired Machine A to ask this machine to unload its translation model.
     Only unloads if no other trusted clients have been active in the last 60 seconds."""
     client_ip = request.remote_addr
-    if not _is_trusted_translation_client(client_ip):
+    if not _paired_client_ok():
         return jsonify({"error": "Not paired"}), 403
 
     # Only unload if no other trusted clients are actively translating
@@ -7470,7 +7606,7 @@ def translate_preload():
     """Remote preload — called by a paired Machine A when it starts transcription.
     Loads the translation model in the background so it's ready for requests."""
     client_ip = request.remote_addr
-    if not _is_trusted_translation_client(client_ip):
+    if not _paired_client_ok():
         return jsonify({"error": "Not paired"}), 403
 
     cfg = config.get("live_translation", {})
@@ -7533,7 +7669,7 @@ def translate_sync_dictionary():
     """Remote dictionary sync — called by a paired Machine A to push its
     glossary for this session only. Held in memory; never written to this
     machine's own custom_dictionary.json, and cleared when the pairing ends."""
-    if not _is_trusted_translation_client(request.remote_addr):
+    if not _paired_client_ok():
         return jsonify({"error": "Not paired"}), 403
     global _session_glossary_override
     data = request.get_json() or {}
@@ -7616,11 +7752,42 @@ def translation_pair_respond():
     return jsonify({"success": True})
 
 
+@app.route("/api/translate/pair/token", methods=["POST"])
+def translation_pair_token():
+    """Hand a paired Machine A the bearer token it authenticates with from now on.
+
+    Claimable by an address that pairing already trusts and that holds no token
+    yet — the same trust it has been exercising, exchanged for something that
+    survives a change of address and that unpairing can actually revoke. Once a
+    machine holds one, a replacement has to be authorized with the current token,
+    so an address alone can never rotate someone else's out.
+
+    Returned exactly once: this machine keeps only the fingerprint.
+    """
+    client_ip = request.remote_addr
+    presented = _pair_tokens_mod.parse_bearer(request.headers.get("Authorization"))
+    tokens = _pair_tokens()
+    if presented:
+        if not _pair_tokens_mod.authorize(tokens, _trusted_translation_clients,
+                                          client_ip, presented).authorized:
+            return jsonify({"success": False, "error": "Not paired"}), 403
+    elif not _pair_tokens_mod.can_claim(tokens, _trusted_translation_clients, client_ip,
+                                        _pair_token_grace_ips()):
+        return jsonify({"success": False, "error": "Not paired"}), 403
+
+    tokens, token = _pair_tokens_mod.issue(tokens, client_ip)
+    with _pair_token_grace_lock:
+        _pair_token_grace[client_ip] = time.time() + PAIR_TOKEN_GRACE_SECONDS
+    _save_pair_tokens(tokens)
+    print(f"[PAIR] Issued a pairing token to {client_ip}")
+    return jsonify({"success": True, "token": token})
+
+
 @app.route("/api/translate/pair/status", methods=["GET"])
 def translation_pair_status():
     """Machine A polls this to check if it is paired."""
     client_ip = request.remote_addr
-    return jsonify({"paired": _is_trusted_translation_client(client_ip)})
+    return jsonify({"paired": _paired_client_ok()})
 
 
 @app.route("/api/translate/pair/unpair", methods=["POST"])
@@ -7637,6 +7804,10 @@ def translation_unpair():
     if ip in trusted:
         trusted.remove(ip)
     _forget_client_port(ip)
+    # Revoke the token too, or unpairing would only take away the address half
+    # and the machine would keep translating on the secret it still holds.
+    config.setdefault("live_translation", {})["trusted_client_tokens"] = \
+        _pair_tokens_mod.forget(_pair_tokens(), ip)
     save_config(config)
     if not _trusted_translation_clients:
         global _session_glossary_override
@@ -7653,7 +7824,7 @@ def translate_remote_heartbeat():
     offload server knows A is live even during silent stretches (no translate
     traffic). Refreshes the client's last-seen so it shows in remote_clients."""
     client_ip = request.remote_addr
-    if not _is_trusted_translation_client(client_ip):
+    if not _paired_client_ok():
         return jsonify({"error": "Not paired"}), 403
     _hb_port = coerce_int((request.get_json(silent=True) or {}).get("port"), 0,
                           lo=0, hi=65535)
@@ -7668,7 +7839,7 @@ def translate_remote_heartbeat():
 def translate_remote_language():
     """Paired Machine A calls this to switch Machine B's target translation language."""
     client_ip = request.remote_addr
-    if not _is_trusted_translation_client(client_ip):
+    if not _paired_client_ok():
         return jsonify({"error": "Not paired"}), 403
 
     global config
@@ -7727,13 +7898,15 @@ def translate_remote_language():
 def translation_unpair_me():
     """A paired Machine A calls this to remove itself from Machine B's trusted list."""
     client_ip = request.remote_addr
-    if not _is_trusted_translation_client(client_ip):
+    if not _paired_client_ok():
         return jsonify({"success": False, "error": "Not paired"}), 403
     _trusted_translation_clients.discard(client_ip)
     trusted = config.get("live_translation", {}).get("trusted_clients", [])
     if client_ip in trusted:
         trusted.remove(client_ip)
     _forget_client_port(client_ip)
+    config.setdefault("live_translation", {})["trusted_client_tokens"] = \
+        _pair_tokens_mod.forget(_pair_tokens(), client_ip)
     save_config(config)
     # Unload model if no other clients remain
     if not _trusted_translation_clients:
@@ -8108,7 +8281,8 @@ def _check_remote_reachable(endpoint, timeout=1.5, ttl=5.0):
         if cached and (now - cached[1]) < ttl:
             return cached[0]
     try:
-        r = _get_remote_http_session().get(endpoint.rstrip("/") + "/api/translation/status", timeout=timeout)
+        r = _get_remote_http_session().get(endpoint.rstrip("/") + "/api/translation/status",
+                                           headers=_remote_auth_headers(), timeout=timeout)
         reachable = r.status_code == 200
     except Exception:
         reachable = False
@@ -8163,7 +8337,8 @@ def proxy_remote_translation_status():
         return jsonify({"success": False, "error": "No remote endpoint configured"}), 400
     import requests as _req
     try:
-        r = _req.get(endpoint + "/api/translation/status", timeout=5)
+        r = _req.get(endpoint + "/api/translation/status",
+                     headers=_remote_auth_headers(), timeout=5)
         try:
             data = r.json()
         except ValueError:
@@ -8222,6 +8397,10 @@ def proxy_pair_confirm():
             data = r.json()
         except ValueError:
             data = {"error": "Invalid JSON from remote"}
+        if r.status_code == 200 and (data or {}).get("status") == "paired":
+            # A fresh pairing supersedes any token we held for the old one.
+            _forget_remote_pair_token()
+            _claim_remote_pair_token(endpoint)
         return jsonify(data), r.status_code
     except Exception as e:
         return jsonify({"error": str(e)}), 502
@@ -8240,11 +8419,16 @@ def proxy_pair_status():
         return jsonify({"paired": False}), 200
     import requests as _req
     try:
-        r = _req.get(endpoint + "/api/translate/pair/status", timeout=5)
+        r = _req.get(endpoint + "/api/translate/pair/status",
+                     headers=_remote_auth_headers(), timeout=5)
         try:
             data = r.json()
         except ValueError:
             data = {"paired": False, "error": "Invalid JSON from remote"}
+        if (data or {}).get("paired"):
+            # Covers the Allow-button flow, which never calls confirm, and any
+            # pairing made before tokens existed.
+            _claim_remote_pair_token(endpoint)
         return jsonify(data), r.status_code
     except Exception as e:
         return jsonify({"paired": False, "error": str(e)}), 200
@@ -8263,7 +8447,8 @@ def proxy_translate_unload():
         return jsonify({"success": False, "error": "No remote endpoint configured"}), 400
     import requests as _req
     try:
-        r = _req.post(endpoint + "/api/translate/unload", timeout=10)
+        r = _req.post(endpoint + "/api/translate/unload",
+                      headers=_remote_auth_headers(), timeout=10)
         try:
             data = r.json()
         except ValueError:
@@ -8286,7 +8471,8 @@ def proxy_translate_preload():
         return jsonify({"success": False, "error": "No remote endpoint configured"}), 400
     import requests as _req
     try:
-        r = _req.post(endpoint + "/api/translate/preload", timeout=10)
+        r = _req.post(endpoint + "/api/translate/preload",
+                      headers=_remote_auth_headers(), timeout=10)
         try:
             data = r.json()
         except ValueError:
@@ -8311,6 +8497,7 @@ def proxy_sync_dictionary():
     import requests as _req
     try:
         r = _req.post(endpoint + "/api/translate/sync-dictionary",
+                      headers=_remote_auth_headers(),
                       json=_dictionary_sync_payload(), timeout=10)
         try:
             data = r.json()
@@ -8334,7 +8521,9 @@ def proxy_translate_unpair():
         return jsonify({"success": False, "error": "No remote endpoint configured"}), 400
     import requests as _req
     try:
-        r = _req.post(endpoint + "/api/translate/pair/unpair-me", timeout=10)
+        r = _req.post(endpoint + "/api/translate/pair/unpair-me",
+                      headers=_remote_auth_headers(), timeout=10)
+        _forget_remote_pair_token()
         try:
             data = r.json()
         except ValueError:
@@ -10689,7 +10878,8 @@ def start_transcription():
                     if not ep:
                         return
                     import requests as _req
-                    r = _req.post(ep + "/api/translate/preload", timeout=10)
+                    r = _req.post(ep + "/api/translate/preload",
+                                  headers=_remote_auth_headers(), timeout=10)
                     print(f"[START] Remote translation preload: {r.json()}")
                     r2 = _req.post(ep + "/api/translate/sync-dictionary",
                                    json=_dictionary_sync_payload(), timeout=10)
@@ -10802,7 +10992,8 @@ def stop_transcription():
                     if not ep:
                         return
                     import requests as _req
-                    r = _req.post(ep + "/api/translate/unload", timeout=10)
+                    r = _req.post(ep + "/api/translate/unload",
+                                  headers=_remote_auth_headers(), timeout=10)
                     print(f"[STOP] Remote translation unload: {r.json()}")
                 except Exception as e:
                     print(f"[STOP] Remote translation unload failed: {e}")
@@ -15096,6 +15287,7 @@ def _translate_via_remote(text, source_lang, target_lang, endpoint,
         resp = _get_remote_http_session().post(
             endpoint.rstrip("/") + "/api/translate",
             json=payload,
+            headers=_remote_auth_headers(),
             timeout=15,
         )
         resp.raise_for_status()

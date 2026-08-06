@@ -58,6 +58,7 @@ module = [
     "stt.session_cleanup",
     "stt.wav_edit",
     "stt.hostname_lookup",
+    "stt.pair_tokens",
 ]
 disallow_untyped_defs = true
 

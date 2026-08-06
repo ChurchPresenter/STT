@@ -51,7 +51,7 @@ def call_translate(payload, *, remote=None, translated="TRANSLATED"):
             # cap relies on for an unusable configured value.
             "coerce_int": coerce_int,
             "coerce_float": coerce_float,
-            "_is_trusted_translation_client": lambda ip: True,
+            "_paired_client_ok": lambda ip=None: True,
             "_register_translation_client": lambda ip: None,
             "get_server_text_cache": _Cache,
             "translate_live_text": _translate_live_text,

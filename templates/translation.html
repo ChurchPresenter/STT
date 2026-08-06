@@ -1354,10 +1354,17 @@
                         // listed whether or not it is currently sending traffic,
                         // and its port is now known durably from pairing.
                         const trustedPorts = data.trusted_client_ports || {};
+                        // A machine that has claimed its pairing token can no
+                        // longer be impersonated by whatever holds its address —
+                        // worth showing, because the upgrade happens on its own.
+                        const withToken = data.token_authenticated_clients || [];
                         listEl.innerHTML = trustedClients.map(ip => {
                             const p = trustedPorts[ip];
                             const url = 'http://' + ip + (p && p !== 80 ? ':' + p : '') + '/translation';
-                            return `${escapeHtml(ip)} ` +
+                            const lock = withToken.indexOf(ip) >= 0
+                                ? ` <span title="Authenticates with a pairing token — its address alone no longer grants access" style="color: var(--success); font-size: 0.8em;">&#128274;</span>`
+                                : ` <span title="Recognised by IP address only; it will claim a token the next time it connects" style="color: var(--text-muted); font-size: 0.8em;">&#9679;</span>`;
+                            return `${escapeHtml(ip)}${lock} ` +
                                 `<button type="button" onclick="window.open('${escapeHtml(url)}', '_blank', 'noopener')" title="Open ${escapeHtml(url)}" style="margin-left:6px; padding:1px 8px; font-size:0.75em; background:var(--bg-tertiary); border:1px solid var(--border); border-radius:3px; color:var(--text-primary); cursor:pointer;">Open</button> ` +
                                 `<button type="button" onclick="unpairClient('${escapeHtml(ip)}')" style="margin-left:2px; padding:1px 6px; font-size:0.75em; background:var(--danger-bg); border:1px solid var(--danger); border-radius:3px; color:var(--danger); cursor:pointer;">Unpair</button>`;
                         }).join(' ');
