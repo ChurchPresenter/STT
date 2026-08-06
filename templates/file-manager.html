@@ -487,7 +487,13 @@
                      real audio makes hundreds of lines in ten minutes, so two runs of the
                      same clip can land either side of 300. The numbers have to be yours. -->
                 <div id="devResults" style="margin-top: 12px;"></div>
-                <div id="devActions" style="display: none; margin-top: 10px; gap: 10px; align-items: center;">
+                <div id="devActions" style="display: none; margin-top: 10px; gap: 8px; align-items: center; flex-wrap: wrap;">
+                    <!-- Additive on purpose: pick test, add fragment, then clear.
+                         Each only ever ticks rows the server would accept. -->
+                    <button class="btn btn-secondary" id="devPickTest" onclick="devSelectVerdict('test')">☑ Test</button>
+                    <button class="btn btn-secondary" id="devPickFragment" onclick="devSelectVerdict('fragment')">☑ Fragment</button>
+                    <button class="btn btn-secondary" id="devPickUnusual" onclick="devSelectVerdict('unusual')">☑ Unusual</button>
+                    <button class="btn btn-secondary" id="devClearBtn" onclick="devClearSelection()">✕ Clear selection</button>
                     <button class="btn" style="background: var(--danger); color: white;" onclick="devDelete()">🗑 Delete selected</button>
                     <span id="devSelectionInfo" style="color: var(--text-secondary); font-size: 0.85em;"></span>
                 </div>
@@ -1379,12 +1385,43 @@
                     <th style="text-align: left; padding: 4px 8px;">Why</th><th></th>
                 </tr></thead><tbody>${rows}</tbody></table></div>`;
             document.getElementById('devActions').style.display = 'flex';
+            devUpdateVerdictButtons();
             devSelectionChanged();
         }
 
         function devPicked() {
             return Array.from(document.querySelectorAll('.devPick:checked'))
                 .map(cb => devSessions[parseInt(cb.dataset.index, 10)]);
+        }
+
+        // Adds to the selection rather than replacing it, so the three buttons
+        // compose — and only ever ticks rows that are not disabled, which are
+        // exactly the ones the server would accept.
+        function devSelectVerdict(verdict) {
+            document.querySelectorAll('.devPick').forEach(cb => {
+                const s = devSessions[parseInt(cb.dataset.index, 10)];
+                if (s && s.verdict === verdict) cb.checked = true;
+            });
+            devSelectionChanged();
+        }
+
+        function devClearSelection() {
+            document.querySelectorAll('.devPick').forEach(cb => { cb.checked = false; });
+            devSelectionChanged();
+        }
+
+        // Count on each button, and greyed out when the scan found none of that
+        // kind — otherwise a button that does nothing looks like a broken one.
+        function devUpdateVerdictButtons() {
+            [['test', 'devPickTest', 'Test'],
+             ['fragment', 'devPickFragment', 'Fragment'],
+             ['unusual', 'devPickUnusual', 'Unusual']].forEach(([verdict, id, label]) => {
+                const n = devSessions.filter(s => s.verdict === verdict && s.deletable).length;
+                const btn = document.getElementById(id);
+                btn.textContent = n ? `☑ ${label} (${n})` : `☑ ${label}`;
+                btn.disabled = n === 0;
+                btn.style.opacity = n ? '' : '0.5';
+            });
         }
 
         function devSelectionChanged() {
