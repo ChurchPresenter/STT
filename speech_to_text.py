@@ -3456,7 +3456,12 @@ def compute_music_prob(audio_np, sr, cfg):
 from stt import segments as _segments
 from stt import session_cleanup as _session_cleanup
 from stt import wav_edit as _wav_edit
-from stt.segments import (  # noqa: F401
+
+# Waveform envelopes for the trim editor, kept so reopening a recording (or a
+# second operator opening the same one) does not re-read the file.
+_wav_peaks_cache = _wav_edit.PeaksCache()
+
+from stt.segments import (  # noqa: E402, F401
     attribute_words_to_sentences,
     panns_label_from_prob,
     words_json_or_none,
@@ -9978,7 +9983,7 @@ def file_manager_wav_peaks():
         end = None if end_raw in (None, "") else coerce_float(end_raw, 0.0, lo=0.0, hi=86400.0)
 
         return jsonify({"success": True,
-                        "peaks": _wav_edit.peaks(path, buckets, start, end, info=info),
+                        "peaks": _wav_peaks_cache.envelope(path, buckets, start, end, info=info),
                         "start": start,
                         "end": info.seconds if end is None else end,
                         "seconds": round(info.seconds, 2)})

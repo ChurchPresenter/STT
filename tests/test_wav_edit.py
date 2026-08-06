@@ -11,6 +11,7 @@ import struct
 import pytest
 
 from stt.wav_edit import (
+    PeaksCache,
     WavError,
     amplitude_to_db,
     clamp_range,
@@ -243,6 +244,111 @@ class TestPeaks:
         p = write_wav(tmp_path / "f.wav", RATE)
         with pytest.raises(WavError):
             peaks(p, start_seconds=0.5, end_seconds=0.5)
+
+    def test_a_wide_bucket_is_probed_not_read_whole(self, tmp_path):
+        # 40 seconds in 4 buckets is 10 seconds a bucket, far past the probe
+        # budget — the loud stretch must still show, on a fraction of the reads.
+        p = write_wav(tmp_path / "g.wav", 0,
+                      samples=quiet(RATE * 20) + tone(RATE * 20, 16000))
+        values = peaks(p, buckets=4)
+        assert values[0] == 0.0 and values[1] == 0.0
+        assert min(values[2:]) > 0.4
+
+    def test_probing_reads_far_less_than_the_range(self, tmp_path):
+        # The point of probing: a wide view must not read the whole file.
+        p = write_wav(tmp_path / "h.wav", 0, samples=tone(RATE * 60, 16000))
+        size = os.path.getsize(p)
+        total = [0]
+
+        class CountingFile:
+            def __init__(self, fh):
+                self._fh = fh
+
+            def seek(self, *a):
+                return self._fh.seek(*a)
+
+            def read(self, n=-1):
+                block = self._fh.read(n)
+                total[0] += len(block)
+                return block
+
+            def __getattr__(self, name):
+                return getattr(self._fh, name)
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                self._fh.close()
+                return False
+
+        import stt.wav_edit as we
+        real_open = we.open if hasattr(we, "open") else open
+        we.open = lambda path, mode="rb": CountingFile(real_open(path, mode))
+        try:
+            peaks(p, buckets=10)
+        finally:
+            we.open = real_open
+        assert total[0] < size // 4
+
+    def test_a_narrow_bucket_is_still_read_whole(self, tmp_path):
+        # Zoomed in, every sample is examined — a spike must not be missed.
+        loud = quiet(2000) + tone(200, 30000) + quiet(2000)
+        p = write_wav(tmp_path / "i.wav", 0, samples=loud)
+        values = peaks(p, buckets=1)
+        assert values[0] == pytest.approx(30000 / 32767.0, abs=0.01)
+
+
+class TestPeaksCache:
+    """Redrawing the same envelope should not re-read the recording."""
+
+    def test_second_call_is_served_from_cache(self, tmp_path):
+        p = write_wav(tmp_path / "a.wav", 0, samples=tone(RATE, 16000))
+        cache = PeaksCache()
+        first = cache.envelope(p, buckets=20)
+        second = cache.envelope(p, buckets=20)
+        assert first == second
+        assert (cache.hits, cache.misses) == (1, 1)
+
+    def test_a_different_range_is_a_different_entry(self, tmp_path):
+        p = write_wav(tmp_path / "b.wav", 0, samples=tone(RATE * 2, 16000))
+        cache = PeaksCache()
+        cache.envelope(p, buckets=20)
+        cache.envelope(p, buckets=20, end_seconds=1.0)
+        cache.envelope(p, buckets=40)
+        assert cache.misses == 3
+        assert cache.hits == 0
+
+    def test_a_grown_recording_is_re_read(self, tmp_path):
+        # A capture still being written must never serve a stale envelope.
+        path = tmp_path / "c.wav"
+        p = write_wav(path, 0, samples=quiet(RATE))
+        cache = PeaksCache()
+        assert max(cache.envelope(p, buckets=10)) == 0.0
+        write_wav(path, 0, samples=quiet(RATE) + tone(RATE, 16000))
+        assert max(cache.envelope(p, buckets=10)) > 0.4
+        assert cache.misses == 2
+
+    def test_the_cache_is_capped(self, tmp_path):
+        p = write_wav(tmp_path / "d.wav", 0, samples=tone(RATE, 16000))
+        cache = PeaksCache(max_entries=3)
+        for buckets in (10, 11, 12, 13):
+            cache.envelope(p, buckets=buckets)
+        # The oldest entry was dropped, so asking for it again is a miss.
+        cache.envelope(p, buckets=10)
+        assert cache.misses == 5
+
+    def test_a_returned_envelope_cannot_corrupt_the_cache(self, tmp_path):
+        p = write_wav(tmp_path / "e.wav", 0, samples=tone(RATE, 16000))
+        cache = PeaksCache()
+        got = cache.envelope(p, buckets=10)
+        got[0] = 999.0
+        assert cache.envelope(p, buckets=10)[0] != 999.0
+
+    def test_a_missing_file_still_raises(self, tmp_path):
+        cache = PeaksCache()
+        with pytest.raises(OSError):
+            cache.envelope(str(tmp_path / "nope.wav"), buckets=10)
 
 
 class TestDecibels:
