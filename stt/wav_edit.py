@@ -280,3 +280,33 @@ def peaks(path: str, buckets: int = 800, start_seconds: float = 0.0,
                 continue
             out.append(min(1.0, _peak(block, info.sample_width) / 32767.0))
     return out
+
+
+#: Default silence gate, in dBFS. -40 dB is 1% of full scale: below the noise
+#: floor of a desk microphone in a hall, above the quietest speech that matters.
+DEFAULT_SILENCE_DB = -40.0
+
+
+def db_to_amplitude(db: float) -> float:
+    """dBFS to a fraction of full scale — -40 dB is 0.01, 0 dB is 1.0.
+
+    The gate is set in dB because that is the unit the level actually behaves
+    in: halving the amplitude is -6 dB wherever you are on the scale, whereas
+    the same step expressed as a fraction means something different at 0.5 than
+    at 0.01. An operator nudging a threshold is thinking in dB whether or not
+    the box says so.
+
+    Clamped to (0, 1]: 0 dB is full scale and nothing can exceed it, and a gate
+    at exactly zero would call the whole recording speech.
+    """
+    if db >= 0:
+        return 1.0
+    return max(1e-6, min(1.0, 10.0 ** (db / 20.0)))
+
+
+def amplitude_to_db(amplitude: float) -> float:
+    """A fraction of full scale back to dBFS; silence reports as -inf."""
+    if amplitude <= 0:
+        return float("-inf")
+    import math
+    return 20.0 * math.log10(min(1.0, amplitude))

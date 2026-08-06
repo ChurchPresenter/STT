@@ -635,13 +635,33 @@
                         <input type="number" id="devWavStart" step="0.1" min="0" oninput="devDrawWave()" style="width: 100px; padding: 4px;"> s</label>
                     <label style="font-size: 0.85em; color: var(--text-secondary);">to
                         <input type="number" id="devWavEnd" step="0.1" min="0" oninput="devDrawWave()" style="width: 100px; padding: 4px;"> s</label>
-                    <span style="font-size: 0.8em; color: var(--text-muted);">writes a new file beside the original</span>
+                    <label style="font-size: 0.85em; color: var(--text-secondary); margin-left: auto;"
+                           title="Anything quieter than this counts as silence. Lower catches quieter speech; higher ignores more background noise. The dashed line on the waveform is this level.">
+                        silence below
+                        <input type="number" id="devWavGate" step="1" min="-90" max="0" value="-40"
+                               onchange="devReanalyse()" style="width: 75px; padding: 4px;"> dB</label>
                 </div>
             </div>
-            <div class="modal-footer">
-                <button class="btn btn-secondary" onclick="devCloseWavEditor()">Close</button>
-                <button class="btn btn-secondary" onclick="devTrimRange()">✂ Trim to range</button>
-                <button class="btn btn-primary" onclick="devTrimSilence()" title="Keep from the first word to the last. A pause in the middle of a service is never cut out.">✂ Trim silence</button>
+            <div class="modal-footer" style="flex-direction: column; align-items: stretch; gap: 12px;">
+                <div style="display: flex; gap: 12px; align-items: flex-start; padding: 10px 12px; background: var(--bg-elevated); border-radius: var(--radius-sm);">
+                    <button class="btn btn-primary" style="flex: none;" onclick="devTrimSilence()">✂ Cut the quiet ends</button>
+                    <span id="devTrimSilenceHint" style="font-size: 0.82em; color: var(--text-secondary); line-height: 1.45;">
+                        Finds the first and last sound above the gate and keeps everything between them.
+                        Use this to drop the dead air before the service starts and after it ends —
+                        a pause <em>during</em> the service is never removed.
+                    </span>
+                </div>
+                <div style="display: flex; gap: 12px; align-items: flex-start; padding: 10px 12px; background: var(--bg-elevated); border-radius: var(--radius-sm);">
+                    <button class="btn btn-secondary" style="flex: none;" onclick="devTrimRange()">✂ Keep only the selection</button>
+                    <span style="font-size: 0.82em; color: var(--text-secondary); line-height: 1.45;">
+                        Keeps exactly the shaded part — the <strong>from</strong> and <strong>to</strong> above —
+                        and discards the rest. Drag on the waveform to choose it.
+                    </span>
+                </div>
+                <div style="display: flex; justify-content: space-between; align-items: center;">
+                    <span style="font-size: 0.8em; color: var(--text-muted);">Both write a new file beside the original. The recording itself is never changed.</span>
+                    <button class="btn btn-secondary" onclick="devCloseWavEditor()">Close</button>
+                </div>
             </div>
         </div>
     </div>
@@ -1565,7 +1585,10 @@
             try {
                 const resp = await fetch('/api/file-manager/wav-analyze', {
                     method: 'POST', headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ path: devWavPath }),
+                    body: JSON.stringify({
+                        path: devWavPath,
+                        threshold_db: parseFloat(document.getElementById('devWavGate').value),
+                    }),
                 });
                 const d = await resp.json();
                 if (!d.success) {
@@ -1583,6 +1606,7 @@
                     `${devClock(d.seconds)} · ${d.sample_rate} Hz · ${devBytes(d.bytes)}`
                     + `  |  speech ${devClock(d.speech_start)} → ${devClock(d.speech_end)}`
                     + `  (${devClock(lead)} silent at the start, ${devClock(tail)} at the end)`
+                    + `  |  gate ${d.threshold_db} dB`
                     + stale;
                 document.getElementById('devWavStart').value = d.speech_start.toFixed(1);
                 document.getElementById('devWavEnd').value = d.speech_end.toFixed(1);
@@ -1591,6 +1615,18 @@
             } catch (e) {
                 document.getElementById('devWavInfo').textContent = 'Analyse failed: ' + e.message;
             }
+        }
+
+        // Changing the gate changes where speech is judged to start and stop, so
+        // the bounds and the suggested range are recomputed — but the zoom is
+        // left alone, because the operator is usually watching one edge closely
+        // while they tune it.
+        async function devReanalyse() {
+            if (!devWavPath) return;
+            const view = { start: devWavView.start, end: devWavView.end };
+            await devOpenWavEditorFor(devWavPath);
+            devWavView = view;
+            await devLoadPeaks();
         }
 
         // --- Waveform -------------------------------------------------------
@@ -1657,6 +1693,19 @@
             ctx.strokeStyle = css.getPropertyValue('--border') || '#333';
             ctx.lineWidth = 1;
             ctx.beginPath(); ctx.moveTo(0, mid); ctx.lineTo(w, mid); ctx.stroke();
+
+            // The gate itself. Without it the dB box is a number with no
+            // referent; drawn, it is obvious which humps will be kept.
+            if (devWavAnalysis && devWavAnalysis.threshold_amplitude) {
+                const gate = devWavAnalysis.threshold_amplitude * mid;
+                ctx.strokeStyle = css.getPropertyValue('--danger') || '#ef4444';
+                ctx.lineWidth = Math.max(1, ratio);
+                ctx.setLineDash([4 * ratio, 4 * ratio]);
+                [mid - gate, mid + gate].forEach(y => {
+                    ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(w, y); ctx.stroke();
+                });
+                ctx.setLineDash([]);
+            }
 
             if (!devWavPeaks.length) return;
             ctx.fillStyle = css.getPropertyValue('--accent') || '#3b82f6';

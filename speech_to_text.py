@@ -9885,8 +9885,16 @@ def file_manager_wav_analyze():
             return jsonify({"success": False, "error": "Only .wav files"}), 400
 
         info = _wav_edit.read_info(path)
-        first, last = _wav_edit.find_speech_bounds(path, info=info)
+        # The gate is the operator's: a hall with air conditioning sits higher
+        # than a quiet room, and the right value is the one that matches what
+        # they can see on the waveform.
+        threshold_db = coerce_float((request.get_json() or {}).get("threshold_db"),
+                                    _wav_edit.DEFAULT_SILENCE_DB, lo=-90.0, hi=0.0)
+        first, last = _wav_edit.find_speech_bounds(
+            path, _wav_edit.db_to_amplitude(threshold_db), info=info)
         return jsonify({
+            "threshold_db": threshold_db,
+            "threshold_amplitude": round(_wav_edit.db_to_amplitude(threshold_db), 6),
             "success": True,
             "name": os.path.basename(path),
             "seconds": round(info.seconds, 2),

@@ -12,7 +12,9 @@ import pytest
 
 from stt.wav_edit import (
     WavError,
+    amplitude_to_db,
     clamp_range,
+    db_to_amplitude,
     find_speech_bounds,
     peaks,
     read_info,
@@ -241,3 +243,38 @@ class TestPeaks:
         p = write_wav(tmp_path / "f.wav", RATE)
         with pytest.raises(WavError):
             peaks(p, start_seconds=0.5, end_seconds=0.5)
+
+
+class TestDecibels:
+    """The gate is set in dB, so the conversion has to be right at the edges."""
+
+    def test_the_shipped_default_is_one_percent(self):
+        assert db_to_amplitude(-40.0) == pytest.approx(0.01)
+
+    def test_minus_six_db_halves_the_amplitude(self):
+        assert db_to_amplitude(-6.0) == pytest.approx(0.501, abs=0.002)
+
+    def test_zero_db_is_full_scale(self):
+        assert db_to_amplitude(0.0) == 1.0
+
+    def test_positive_db_cannot_exceed_full_scale(self):
+        assert db_to_amplitude(12.0) == 1.0
+
+    def test_a_very_low_gate_stays_above_zero(self):
+        # A gate of exactly zero would call an entirely silent file "speech".
+        assert 0 < db_to_amplitude(-200.0) <= 1e-6
+
+    def test_round_trips(self):
+        for db in (-60.0, -40.0, -20.0, -6.0):
+            assert amplitude_to_db(db_to_amplitude(db)) == pytest.approx(db, abs=0.01)
+
+    def test_silence_is_negative_infinity(self):
+        assert amplitude_to_db(0.0) == float("-inf")
+
+
+class TestSilenceGateInPractice:
+    def test_a_quieter_gate_finds_quieter_speech(self, tmp_path):
+        # A hiss at roughly -50 dB: silence at the default gate, speech below it.
+        p = write_wav(tmp_path / "a.wav", 0, samples=quiet(RATE) + tone(RATE, 100))
+        assert find_speech_bounds(p, db_to_amplitude(-40.0))[0] == pytest.approx(0.0)
+        assert find_speech_bounds(p, db_to_amplitude(-60.0))[0] == pytest.approx(1.0, abs=0.1)
