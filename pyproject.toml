@@ -53,6 +53,8 @@ module = [
     "stt.llm_translate",
     "stt.service_phase",
     "stt.translation_replay",
+    "stt.translation_backfill",
+    "stt.tts_queue",
 ]
 disallow_untyped_defs = true
 

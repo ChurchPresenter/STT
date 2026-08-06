@@ -149,6 +149,21 @@ def is_whisper_hallucination(text: Optional[str], phrases: Sequence[str]) -> boo
     return False
 
 
+def classify_partial_row(text: Optional[str], phrases: Sequence[str]) -> Tuple[int, Optional[str]]:
+    """The ``(denied, denied_reason)`` a partial (is_final=0) row should be stored with.
+
+    Partial snapshots used to be written with ``denied=0`` unconditionally, so
+    Whisper's stock silence credits ("Продолжение следует…", the
+    "Субтитры сделал …" family) were archived as if they were real speech even
+    though the live display and the finalized rows both filter them out. The row
+    is flagged rather than dropped: the partial timeline still shows what the ASR
+    actually emitted, and replay tooling can tell suppressed text from kept text.
+    """
+    if is_whisper_hallucination(text, phrases):
+        return 1, "hallucination"
+    return 0, None
+
+
 def split_into_sentences(text: str) -> Tuple[List[str], str]:
     """
     Split text into complete sentences and remainder.

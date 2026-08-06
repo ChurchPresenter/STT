@@ -9,7 +9,7 @@ handles config/session-override/file resolution.
 import re
 import threading
 from collections import OrderedDict
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 
 def apply_glossary(text: str, source_lang: str, target_lang: str, dictionary: Optional[dict]) -> str:
@@ -124,6 +124,32 @@ class TranslationCache:
         """Highest integer segment id currently cached, or 0 if none"""
         with self._lock:
             return max((sid for sid in self._cache if isinstance(sid, int)), default=0)
+
+    def translated_segments(self) -> List[Tuple[int, str]]:
+        """Snapshot of (segment_id, translated_text) for integer-keyed entries.
+
+        Taken under the lock and returned as a plain list so consumers (TTS)
+        can iterate without holding it or touching the internals.
+        Entries with no usable translation yet are omitted.
+        """
+        with self._lock:
+            out: List[Tuple[int, str]] = []
+            for sid, entry in self._cache.items():
+                if not isinstance(sid, int):
+                    continue
+                translated = entry.get("translated", "")
+                if translated and translated.strip():
+                    out.append((sid, translated))
+            return out
+
+    def min_segment_id(self) -> int:
+        """Lowest integer segment id currently cached, or 0 if none.
+
+        The floor below which a consumer can never be offered a segment again,
+        so bounded consumer-side bookkeeping can be pruned against it.
+        """
+        with self._lock:
+            return min((sid for sid in self._cache if isinstance(sid, int)), default=0)
 
 
 class TextTranslationCache:

@@ -1087,6 +1087,8 @@ from stt.translation_utils import (
     should_use_fp16 as _should_use_fp16,
     translation_load_dtype as _translation_load_dtype,
 )
+from stt.tts_queue import SpokenTracker
+from stt.translation_backfill import BackfillAttempts, select_backfill_ids
 
 
 def _apply_glossary(text, source_lang, target_lang):
@@ -15217,18 +15219,24 @@ def translate_live_text(text, source_lang, target_lang, return_extras=False, num
         _dbg = _translation_debug_enabled()
         if _remote_ep:
             if _check_remote_reachable(_remote_ep):
+                _t0 = time.perf_counter()
                 try:
                     _res = _translate_via_remote(text, source_lang, target_lang, _remote_ep,
                                                  return_extras=return_extras, num_alternatives=num_alternatives,
                                                  generation_params=gen_params, raise_on_error=True)
                     if _dbg:
-                        print(f"[TRANS-DBG] remote result=ok ep={_remote_ep} text='{text[:40]}'", flush=True)
+                        # Round-trip only. Compare against the caption's end-to-end
+                        # ts_ms -> translation_ts_ms delta to see how much of the
+                        # lag is this call and how much is the emit loop around it.
+                        print(f"[TRANS-DBG] remote result=ok rtt={(time.perf_counter() - _t0) * 1000:.0f}ms "
+                              f"ep={_remote_ep} text='{text[:40]}'", flush=True)
                     _record_mt_engine(MT_ENGINE_REMOTE)
                     return _res
                 except _RemoteTranslateError as e:
                     print(f"[REMOTE_TRANSLATE] Call failed: {e}")
                     if _dbg:
-                        print(f"[TRANS-DBG] remote result=fail ep={_remote_ep} err={e} text='{text[:40]}'", flush=True)
+                        print(f"[TRANS-DBG] remote result=fail rtt={(time.perf_counter() - _t0) * 1000:.0f}ms "
+                              f"ep={_remote_ep} err={e} text='{text[:40]}'", flush=True)
                     remote_failed = True
             else:
                 print(f"[REMOTE_TRANSLATE] {_remote_ep} unreachable")
@@ -15321,6 +15329,7 @@ def emit_translated_entries():
         trans_config = config.get("live_translation", {})
         dbg = _translation_debug_enabled()
         _dbg_branches = []  # (seg_id, branch) collected this cycle when dbg on
+        _cycle_t0 = time.perf_counter()  # cycle wall time, reported with the emit line when dbg on
 
         # Surface a machine that is BOTH an offload client and a trusted-client
         # host — a leftover trusted client used to silently disable offload and
@@ -15728,8 +15737,13 @@ def emit_translated_entries():
             if dbg:
                 _brs = " ".join(f"{_sid}={_b}" for _sid, _b in _dbg_branches) or "(none)"
                 print(f"[TRANS-DBG] branches: {_brs}", flush=True)
+                # cycle_ms is the loop's own cost: everything from picking up the DB
+                # rows through the translate calls. Subtracting the rtt= lines above
+                # it attributes lag to the loop vs the remote model.
                 print(f"[TRANS-DBG] emit ids={[s['id'] for s in translated_segments]} "
-                      f"count={len(translated_segments)} in_progress={in_progress_translation is not None}", flush=True)
+                      f"count={len(translated_segments)} in_progress={in_progress_translation is not None} "
+                      f"cycle_ms={(time.perf_counter() - _cycle_t0) * 1000:.0f} "
+                      f"interval_ms={update_interval * 1000:.0f}", flush=True)
 
             # Emit translation update
             socketio.emit("translation_update", {
@@ -15745,6 +15759,12 @@ def emit_translated_entries():
                 "session_id": _ts_get("session_id"),
             })
 
+            # Repair captions the live window can no longer reach. Done after the
+            # emit so it never delays a live caption, and only while idle so it
+            # never competes with one for the model.
+            if not _backlogged and not _whisper_translation_active and is_live_translation_ready():
+                _run_translation_backfill(entries, source_lang, target_lang, dbg)
+
         except (BrokenPipeError, EOFError, ConnectionError):
             # Manager proxy gone — server restarting/shutting down. Exit quietly.
             _server_shutting_down.set()
@@ -15755,6 +15775,96 @@ def emit_translated_entries():
             traceback.print_exc()
 
         socketio.sleep(update_interval)
+
+
+_translation_backfill = BackfillAttempts()
+_translation_backfill_session = {"id": None}
+
+
+def _run_translation_backfill(entries, source_lang, target_lang, dbg=False):
+    """Translate one caption that has fallen behind the live translation window.
+
+    The live loop only sees the newest ``max_entries_to_send`` visible rows and
+    drains a backlog newest-first, so a long enough backlog can push an
+    untranslated row out of the window for good — leaving a caption that was
+    spoken permanently NULL in the session database and missing from the SRT and
+    HTML exports.
+
+    One row per cycle, idle cycles only, and the result is written to the
+    database *without* being emitted: the point is to repair the archive, not to
+    make an old caption reappear on a live display that has long moved past it.
+    """
+    try:
+        current_db = _ts_get("db_name")
+        if not current_db or not os.path.exists(current_db):
+            return
+
+        # Attempt counts belong to one session; a new session starts clean.
+        _session = _ts_get("session_id")
+        if _translation_backfill_session["id"] != _session:
+            _translation_backfill_session["id"] = _session
+            _translation_backfill.reset()
+
+        visible_ids = [e[0] for e in entries]
+        if not visible_ids:
+            return  # nothing visible yet — the window hasn't moved past anything
+
+        with sqlite3.connect(current_db, timeout=30.0) as _conn:
+            _conn.execute("PRAGMA busy_timeout=30000")
+            orphans = _conn.execute(
+                """
+                SELECT id, text FROM transcriptions
+                WHERE COALESCE(is_final, 1) = 1
+                  AND COALESCE(denied, 0) = 0
+                  AND translated_text IS NULL
+                  AND TRIM(text) != ''
+                  AND id < ?
+                ORDER BY id DESC
+                LIMIT 50
+                """,
+                (min(visible_ids),),
+            ).fetchall()
+        if not orphans:
+            return
+
+        text_by_id = {row[0]: row[1] for row in orphans}
+        eligible = _translation_backfill.eligible(text_by_id)
+        picked = select_backfill_ids(eligible, visible_ids, limit=1)
+        if not picked:
+            return
+
+        seg_id = picked[0]
+        _translation_backfill.record(seg_id)
+        translated = translate_live_text(text_by_id[seg_id], source_lang, target_lang)
+        if not translated or not translated.strip():
+            return  # counted as an attempt; gives up after DEFAULT_MAX_ATTEMPTS
+        if is_whisper_hallucination(translated):
+            return
+
+        _mt_engine, _mt_model = last_mt_provenance()
+        # With remote fallback "skip", translate_live_text hands back the source
+        # text unchanged. The live loop can afford to show that — the row is
+        # retried next cycle — but persisting it here would permanently mark the
+        # caption translated with its own source. Leave it NULL and retry.
+        if _mt_engine == MT_ENGINE_NONE:
+            return
+
+        with sqlite3.connect(current_db, timeout=30.0) as _conn:
+            _conn.execute("PRAGMA busy_timeout=30000")
+            _conn.execute(
+                "UPDATE transcriptions SET translated_text = ?, translation_language = ?,"
+                " translation_ts_ms = ?, mt_engine = ?, mt_model = ? WHERE id = ?",
+                (translated, target_lang, int(time.time() * 1000),
+                 _mt_engine, _mt_model, seg_id),
+            )
+            _conn.commit()
+        _translation_backfill.succeeded(seg_id)
+        print(f"[TRANSLATION] Backfilled segment {seg_id} "
+              f"({len(text_by_id)} behind the live window)", flush=True)
+    except Exception as e:
+        # Best-effort repair — never let it break the live emit loop
+        if dbg:
+            print(f"[TRANS-DBG] backfill failed: {e}", flush=True)
 
 
 # =============================================================================
@@ -15773,13 +15883,15 @@ def emit_audio_stream():
             print(f"[AUDIO-STREAM] emit error: {e}", flush=True)
 
 
-_tts_last_spoken_id = 0
+# Which segments have already been voiced. A set, not a high-water mark: the
+# translation loop drains newest-first under backlog, so a lower id can be
+# translated after a higher one and must still get spoken (see stt/tts_queue.py).
+_tts_spoken = SpokenTracker()
 
 def emit_tts_audio():
     """Background task that synthesizes speech from translated text and emits audio.
     Buffers segments until a sentence-ending punctuation is found so TTS speaks
     complete phrases rather than tiny fragments."""
-    global _tts_last_spoken_id
     import base64
 
     _tts_buffer = []  # Buffered segments waiting for sentence end
@@ -15803,12 +15915,10 @@ def emit_tts_audio():
         # so we don't replay everything from the beginning
         if _tts_was_off:
             _tts_was_off = False
-            max_id = get_translation_cache().max_segment_id()
-            if max_id > _tts_last_spoken_id:
-                _tts_last_spoken_id = max_id
+            _tts_spoken.prime(get_translation_cache().max_segment_id())
 
         if not _ts_get("running", False):
-            _tts_last_spoken_id = 0
+            _tts_spoken.reset()
             _tts_buffer.clear()
             socketio.sleep(1)
             continue
@@ -15817,25 +15927,23 @@ def emit_tts_audio():
             target_lang = trans_config.get("target_language", "en")
             cache = get_translation_cache()
 
-            # Get segments that have been translated but not yet spoken
-            new_segments = []
-            with cache._lock:
-                for seg_id, entry in cache._cache.items():
-                    if isinstance(seg_id, int) and seg_id > _tts_last_spoken_id:
-                        translated = entry.get("translated", "")
-                        if translated and translated.strip():
-                            new_segments.append({
-                                "id": seg_id,
-                                "translated_text": translated,
-                            })
+            # Get segments that have been translated but not yet spoken.
+            # Keyed off a spoken-id set rather than a high-water mark so a
+            # segment translated *after* a newer one (which is what the
+            # newest-first backlog drain produces) still gets voiced.
+            # Prune before snapshotting: an eviction racing between the two then
+            # only means we pruned less, never that a live id got folded away.
+            _tts_spoken.prune(cache.min_segment_id())
+            available = dict(cache.translated_segments())
+            new_segments = [
+                {"id": seg_id, "translated_text": available[seg_id]}
+                for seg_id in _tts_spoken.select_unspoken(available)
+            ]
 
-            # Sort by ID to speak in order
-            new_segments.sort(key=lambda s: s["id"])
-
-            # Add new segments to buffer
+            # Add new segments to buffer (select_unspoken already returns id order)
             for segment in new_segments:
                 _tts_buffer.append(segment)
-                _tts_last_spoken_id = segment["id"]
+                _tts_spoken.mark_spoken([segment["id"]])
                 _tts_buffer_last_update = time.time()
 
             # Check if buffer has a complete phrase to speak
@@ -15909,6 +16017,11 @@ def get_hallucination_phrases():
 def is_whisper_hallucination(text):
     """Check if text is a known Whisper hallucination (exact phrase match, case/punctuation insensitive)."""
     return _text_utils.is_whisper_hallucination(text, get_hallucination_phrases())
+
+
+def classify_partial_row(text):
+    """The (denied, denied_reason) a partial snapshot row should be stored with."""
+    return _text_utils.classify_partial_row(text, get_hallucination_phrases())
 
 
 def apply_profanity_filter(text):
@@ -18213,9 +18326,17 @@ def thread1_function(ts, cq, cfq, cal_state, cal_data, cal_step1, asq):
                                                     # Set database.partials_store_words to bring it back.
                                                     _p_words = (_live_update.get("live_word_confidences")
                                                                 if partials_store_words else None)
+                                                    # Whisper invents stock subtitle credits over silence
+                                                    # ("Продолжение следует…", the DimaTorzok family). The
+                                                    # live preview already hides them (_live_preview_suppressed)
+                                                    # and finals deny them, but the partial row used to store
+                                                    # them as clean text — so the artifacts survived in the
+                                                    # session DB and in anything replaying it. Flag rather
+                                                    # than drop, so the row still records what the ASR emitted.
+                                                    _p_denied, _p_denied_reason = classify_partial_row(current_text)
                                                     with _db_lock:
                                                         persistent_db_cursor.execute(
-                                                            "INSERT INTO transcriptions (timestamp, text, start_time, end_time, ts_ms, original_text, words_json, words_source, session_id, is_final, partial_seq, denied) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, 0)",
+                                                            "INSERT INTO transcriptions (timestamp, text, start_time, end_time, ts_ms, original_text, words_json, words_source, session_id, is_final, partial_seq, denied, denied_reason) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)",
                                                             (
                                                                 datetime.now(configured_timezone).strftime("%Y-%m-%d %H:%M:%S"),
                                                                 current_text,
@@ -18227,6 +18348,8 @@ def thread1_function(ts, cq, cfq, cal_state, cal_data, cal_step1, asq):
                                                                 model_type,
                                                                 live_session_id,
                                                                 current_partial_seq,
+                                                                _p_denied,
+                                                                _p_denied_reason,
                                                             ),
                                                         )
                                                         current_partial_row_ids.append(persistent_db_cursor.lastrowid)

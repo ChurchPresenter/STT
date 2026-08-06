@@ -118,6 +118,27 @@ class TestTranslationCache:
         c.set(7, "c", "z", "es")
         assert c.max_segment_id() == 7
 
+    def test_min_segment_id_ignores_non_int_keys(self):
+        c = TranslationCache()
+        assert c.min_segment_id() == 0
+        c.set(7, "c", "z", "es")
+        c.set("live", "b", "y", "es")
+        c.set(3, "a", "x", "es")
+        assert c.min_segment_id() == 3
+
+    def test_translated_segments_returns_int_keyed_pairs(self):
+        c = TranslationCache()
+        c.set(3, "a", "uno", "es")
+        c.set("live", "b", "dos", "es")
+        c.set(7, "c", "tres", "es")
+        assert sorted(c.translated_segments()) == [(3, "uno"), (7, "tres")]
+
+    def test_translated_segments_omits_blank_translations(self):
+        c = TranslationCache()
+        c.set(1, "a", "uno", "es")
+        c.set(2, "b", "   ", "es")
+        assert c.translated_segments() == [(1, "uno")]
+
 
 class TestTextTranslationCache:
     RESULT = {"text": "hola", "confidence": None, "alternatives": []}

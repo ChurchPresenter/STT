@@ -3,6 +3,7 @@
 from stt.text_utils import (
     DEFAULT_WHISPER_HALLUCINATIONS,
     apply_profanity_filter,
+    classify_partial_row,
     count_sentence_units,
     distribute_whisper_translation,
     extract_context_translation,
@@ -354,3 +355,44 @@ class TestContextPromptTruncation:
 
     def test_unbroken_run_discarded(self):
         assert self.truncate("a" * 300, 200) == ""
+
+
+class TestClassifyPartialRow:
+    """How a partial (is_final=0) snapshot row should be stored.
+
+    Partials were written with denied=0 unconditionally, so Whisper's stock
+    silence credits were archived as clean text even though the live preview
+    hid them and the finalized rows denied them.
+    """
+
+    def test_clean_speech_is_kept(self):
+        assert classify_partial_row(
+            "Доброе утро, братья и сестры!", DEFAULT_WHISPER_HALLUCINATIONS) == (0, None)
+
+    def test_hallucination_is_flagged_with_a_reason(self):
+        assert classify_partial_row(
+            "Продолжение следует...", DEFAULT_WHISPER_HALLUCINATIONS) == (1, "hallucination")
+
+    def test_every_observed_variant_is_flagged(self):
+        missed = [t for t in OBSERVED_HALLUCINATIONS
+                  if classify_partial_row(t, DEFAULT_WHISPER_HALLUCINATIONS)[0] != 1]
+        assert not missed, f"these would be archived as clean speech: {missed}"
+
+    def test_legitimate_speech_is_never_flagged(self):
+        wrongly = [t for t in LEGITIMATE_SPEECH
+                   if classify_partial_row(t, DEFAULT_WHISPER_HALLUCINATIONS)[0] != 0]
+        assert not wrongly, f"real speech would be marked denied: {wrongly}"
+
+    def test_credit_glued_onto_real_speech_is_flagged(self):
+        # The rolling window regularly emits a partial that is half hymn line,
+        # half invented credit; a whole-line match would miss it.
+        assert classify_partial_row(
+            "Строка песни, и ещё одна строка песни, Субтитры подогнал «Симон»",
+            DEFAULT_WHISPER_HALLUCINATIONS)[0] == 1
+
+    def test_empty_text_is_kept(self):
+        assert classify_partial_row("", DEFAULT_WHISPER_HALLUCINATIONS) == (0, None)
+        assert classify_partial_row(None, DEFAULT_WHISPER_HALLUCINATIONS) == (0, None)
+
+    def test_disabled_filter_flags_nothing(self):
+        assert classify_partial_row("Продолжение следует...", []) == (0, None)
