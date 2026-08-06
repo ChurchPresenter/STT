@@ -486,6 +486,24 @@
                      archive where a test meant a mic left open with 99 lines. Replaying
                      real audio makes hundreds of lines in ten minutes, so two runs of the
                      same clip can land either side of 300. The numbers have to be yours. -->
+                <!-- Trim editor, opened from a row's ✂ button -->
+                <div id="devWavPanel" style="display: none; margin-top: 12px; padding: 10px 12px; background: var(--bg-elevated); border: 1px solid var(--border); border-radius: var(--radius-sm);">
+                    <div style="display: flex; align-items: center; gap: 10px; flex-wrap: wrap;">
+                        <strong style="color: var(--text-primary);">✂ <span id="devWavName"></span></strong>
+                        <button class="btn btn-secondary" style="margin-left: auto; padding: 2px 10px; font-size: 0.8em;" onclick="devCloseWavEditor()">✕ Close</button>
+                    </div>
+                    <div id="devWavInfo" style="margin: 8px 0; font-size: 0.85em; color: var(--text-secondary);"></div>
+                    <div style="display: flex; gap: 10px; align-items: center; flex-wrap: wrap;">
+                        <button class="btn btn-primary" onclick="devTrimSilence()" title="Keep from the first word to the last. A pause in the middle of a service is never cut out.">✂ Trim silence</button>
+                        <label style="font-size: 0.85em; color: var(--text-secondary);">from
+                            <input type="number" id="devWavStart" step="0.1" min="0" style="width: 95px; padding: 3px;"> s</label>
+                        <label style="font-size: 0.85em; color: var(--text-secondary);">to
+                            <input type="number" id="devWavEnd" step="0.1" min="0" style="width: 95px; padding: 3px;"> s</label>
+                        <button class="btn btn-secondary" onclick="devTrimRange()">✂ Trim to range</button>
+                        <span style="font-size: 0.8em; color: var(--text-muted);">writes a new file beside the original</span>
+                    </div>
+                </div>
+
                 <div id="devResults" style="margin-top: 12px;"></div>
                 <div id="devActions" style="display: none; margin-top: 10px; gap: 8px; align-items: center; flex-wrap: wrap;">
                     <!-- Additive on purpose: pick test, add fragment, then clear.
@@ -494,6 +512,7 @@
                     <button class="btn btn-secondary" id="devPickFragment" onclick="devSelectVerdict('fragment')">☑ Fragment</button>
                     <button class="btn btn-secondary" id="devPickUnusual" onclick="devSelectVerdict('unusual')">☑ Unusual</button>
                     <button class="btn btn-secondary" id="devPickOrphan" onclick="devSelectVerdict('orphan')">☑ Orphan</button>
+                    <button class="btn btn-secondary" id="devPickService" onclick="devSelectVerdict('service')" style="border-color: var(--danger);" title="Real services. Selectable, but this is the one that loses a recording you cannot get back.">☑ Service</button>
                     <button class="btn btn-secondary" id="devClearBtn" onclick="devClearSelection()">✕ Clear selection</button>
                     <button class="btn" style="background: var(--danger); color: white;" onclick="devDelete()">🗑 Delete selected</button>
                     <span id="devSelectionInfo" style="color: var(--text-secondary); font-size: 0.85em;"></span>
@@ -1368,9 +1387,16 @@
                 const box = s.deletable
                     ? `<input type="checkbox" class="devPick" data-index="${i}" onchange="devSelectionChanged()">`
                     : `<input type="checkbox" disabled title="${s.verdict} — never swept">`;
+                const isWav = s.recording && /\.wav$/i.test(s.recording);
                 const copy = s.recording
                     ? `<button class="btn btn-secondary" style="padding: 2px 8px; font-size: 0.8em;"
                          onclick="devCopyToRoot(${i})">📋 Copy to root</button>`
+                    : '';
+                // Only .wav — the .ts capture is a transport stream, and cutting
+                // a byte range out of one does not give a playable file.
+                const edit = isWav
+                    ? `<button class="btn btn-secondary" style="padding: 2px 8px; font-size: 0.8em;"
+                         onclick="devOpenWavEditor(${i})">✂ Trim</button>`
                     : '';
                 return `<tr>
                     <td style="padding: 4px 8px;">${box}</td>
@@ -1381,7 +1407,7 @@
                     <td style="padding: 4px 8px; text-align: right;">${devBytes(s.bytes)}</td>
                     <td style="padding: 4px 8px; text-align: right;">${s.file_count} files</td>
                     <td style="padding: 4px 8px; color: var(--text-muted); font-size: 0.8em;">${s.why}</td>
-                    <td style="padding: 4px 8px;">${copy}</td>
+                    <td style="padding: 4px 8px; white-space: nowrap;">${copy} ${edit}</td>
                 </tr>`;
             }).join('');
 
@@ -1427,7 +1453,8 @@
             [['test', 'devPickTest', 'Test'],
              ['fragment', 'devPickFragment', 'Fragment'],
              ['unusual', 'devPickUnusual', 'Unusual'],
-             ['orphan', 'devPickOrphan', 'Orphan']].forEach(([verdict, id, label]) => {
+             ['orphan', 'devPickOrphan', 'Orphan'],
+             ['service', 'devPickService', 'Service']].forEach(([verdict, id, label]) => {
                 const n = devSessions.filter(s => s.verdict === verdict && s.deletable).length;
                 const btn = document.getElementById(id);
                 btn.textContent = n ? `☑ ${label} (${n})` : `☑ ${label}`;
@@ -1451,6 +1478,13 @@
             const names = picked.map(s => '  • ' + s.name + ' (' + s.verdict + ')').join('\n');
             if (!confirm(`Delete ${picked.length} sessions and everything belonging to them — `
                 + `${devBytes(bytes)}?\n\n${names}\n\nThis cannot be undone.`)) return;
+            // Services are selectable on purpose, but they are the one thing here
+            // that cannot be recovered or re-recorded, so they get named again.
+            const services = picked.filter(s => s.verdict === 'service');
+            if (services.length && !confirm(
+                    `${services.length} of these are real services:\n\n`
+                    + services.map(s => '  • ' + s.name).join('\n')
+                    + `\n\nDeleting a service loses the recording permanently. Continue?`)) return;
             try {
                 const resp = await fetch('/api/file-manager/dev-delete', {
                     method: 'POST',
@@ -1476,6 +1510,118 @@
                 devScan();
             } catch (e) {
                 showNotification('Delete failed: ' + e.message, 'error');
+            }
+        }
+
+        // --- Trim editor ----------------------------------------------------
+        //
+        // Deliberately small: the two cuts that are actually wanted on a service
+        // recording are "drop the silence before anyone spoke" and "keep this
+        // stretch". Both write a new file beside the original — a recording is
+        // not something to edit in place.
+
+        let devWavPath = null;
+
+        async function devOpenWavEditor(index) {
+            const s = devSessions[index];
+            if (!s || !s.recording) return;
+            devWavPath = s.recording;
+            const panel = document.getElementById('devWavPanel');
+            panel.style.display = 'block';
+            document.getElementById('devWavName').textContent = s.recording.split('/').pop();
+            document.getElementById('devWavInfo').textContent = 'Analysing…';
+            document.getElementById('devWavStart').value = '';
+            document.getElementById('devWavEnd').value = '';
+            try {
+                const resp = await fetch('/api/file-manager/wav-analyze', {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ path: devWavPath }),
+                });
+                const d = await resp.json();
+                if (!d.success) {
+                    document.getElementById('devWavInfo').textContent = d.error;
+                    return;
+                }
+                devWavAnalysis = d;
+                const lead = d.speech_start, tail = d.seconds - d.speech_end;
+                // The header claim is worth showing when it disagrees: these
+                // captures never patch their size fields, so players routinely
+                // report a two-hour recording as a few seconds long.
+                const stale = d.header_is_stale
+                    ? `  ⚠ header claims ${devClock(d.header_seconds)}` : '';
+                document.getElementById('devWavInfo').textContent =
+                    `${devClock(d.seconds)} · ${d.sample_rate} Hz · ${devBytes(d.bytes)}`
+                    + `  |  speech ${devClock(d.speech_start)} → ${devClock(d.speech_end)}`
+                    + `  (${devClock(lead)} silent at the start, ${devClock(tail)} at the end)`
+                    + stale;
+                document.getElementById('devWavStart').value = d.speech_start.toFixed(1);
+                document.getElementById('devWavEnd').value = d.speech_end.toFixed(1);
+            } catch (e) {
+                document.getElementById('devWavInfo').textContent = 'Analyse failed: ' + e.message;
+            }
+        }
+
+        let devWavAnalysis = null;
+
+        function devClock(seconds) {
+            const s = Math.max(0, Math.round(seconds));
+            const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = s % 60;
+            return h ? `${h}h ${m}m ${sec}s` : (m ? `${m}m ${sec}s` : `${sec}s`);
+        }
+
+        function devCloseWavEditor() {
+            document.getElementById('devWavPanel').style.display = 'none';
+            devWavPath = null;
+            devWavAnalysis = null;
+        }
+
+        // Silence-only: keep everything from the first word to the last, so a
+        // pause in the middle of a service is never cut out.
+        function devTrimSilence() {
+            if (!devWavAnalysis) return;
+            devDoTrim(devWavAnalysis.speech_start, devWavAnalysis.speech_end,
+                      'Trim to the speech');
+        }
+
+        function devTrimRange() {
+            const start = parseFloat(document.getElementById('devWavStart').value);
+            const end = parseFloat(document.getElementById('devWavEnd').value);
+            if (isNaN(start) || isNaN(end)) {
+                showNotification('Enter a start and end in seconds', 'error');
+                return;
+            }
+            devDoTrim(start, end, 'Trim to the range');
+        }
+
+        async function devDoTrim(start, end, what) {
+            if (!devWavPath) return;
+            if (end <= start) { showNotification('End must be after start', 'error'); return; }
+            if (!confirm(`${what}: keep ${devClock(start)} → ${devClock(end)}`
+                + ` (${devClock(end - start)}).\n\nWrites a new file beside the original;`
+                + ` the recording itself is not changed.`)) return;
+            const btns = document.querySelectorAll('#devWavPanel button');
+            btns.forEach(b => { b.disabled = true; });
+            document.getElementById('devWavInfo').textContent = 'Trimming…';
+            try {
+                const resp = await fetch('/api/file-manager/wav-trim', {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ path: devWavPath, start: start, end: end }),
+                });
+                const d = await resp.json();
+                if (d.success) {
+                    showNotification(`Wrote ${d.name} — ${devClock(d.seconds)},`
+                        + ` ${devClock(d.removed_seconds)} removed`);
+                    devCloseWavEditor();
+                    refreshFiles();
+                    devScan();
+                } else {
+                    showNotification(d.error, 'error');
+                    document.getElementById('devWavInfo').textContent = d.error;
+                }
+            } catch (e) {
+                showNotification('Trim failed: ' + e.message, 'error');
+            } finally {
+                btns.forEach(b => { b.disabled = false; });
             }
         }
 

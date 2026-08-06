@@ -323,7 +323,17 @@ def classify_live(session: Session, slots: Iterable[Slot] = DEFAULT_SLOTS, *,
 
 
 #: Verdicts a sweep must never remove, whatever the caller asks for.
-UNDELETABLE = frozenset({"service", "in progress"})
+#:
+#: Only one. ``service`` is not here: the CLI this came from refuses to delete a
+#: service because it runs unattended over a whole archive, but dev mode is an
+#: operator naming one session in front of them, and an operator who has decided
+#: a service recording can go is allowed to say so.
+#:
+#: ``in progress`` stays, and is not negotiable. That is not a judgement about
+#: the recording's worth — the file is open and being appended to, so removing it
+#: destroys a service *while it is being captured*, and no confirmation dialog
+#: can make that a considered choice.
+UNDELETABLE = frozenset({"in progress"})
 
 
 def wav_seconds(path: str) -> Optional[float]:

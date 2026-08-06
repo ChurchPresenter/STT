@@ -469,13 +469,14 @@ class TestClassifyLive:
 
 
 class TestUndeletable:
-    def test_service_and_in_progress_are_never_deletable(self):
-        assert "service" in UNDELETABLE
-        assert "in progress" in UNDELETABLE
+    def test_only_a_session_being_written_is_protected(self):
+        # The file is open and being appended to, so removing it destroys a
+        # service while it is being captured. No dialog makes that considered.
+        assert UNDELETABLE == frozenset({"in progress"})
 
-    def test_test_and_fragment_are_not_in_the_guard(self):
-        assert "test" not in UNDELETABLE
-        assert "fragment" not in UNDELETABLE
+    def test_every_finished_verdict_is_the_operators_call(self):
+        for verdict in ("test", "fragment", "unusual", "service", "orphan"):
+            assert verdict not in UNDELETABLE
 
 
 # --- What a sweep is allowed to remove ---------------------------------------
@@ -498,11 +499,13 @@ class TestPlanDeletion:
         assert sorted(go) == sorted(s["files"])
         assert refused == []
 
-    def test_a_service_is_refused_however_it_is_asked_for(self, tmp_path):
-        s = scanned(tmp_path, "s.db", "service")
+    def test_a_service_can_be_removed_when_explicitly_named(self, tmp_path):
+        # Deliberate: dev mode is an operator naming one session in front of
+        # them, not an unattended sweep over an archive.
+        s = scanned(tmp_path, "s.db", "service", (".wav",))
         go, refused = plan_deletion([s], [s["db_path"]])
-        assert go == []
-        assert refused == [Refusal("s.db", "service")]
+        assert sorted(go) == sorted(s["files"])
+        assert refused == []
 
     def test_a_session_being_written_is_refused(self, tmp_path):
         s = scanned(tmp_path, "p.db", "in progress")

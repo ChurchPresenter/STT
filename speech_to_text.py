@@ -3455,6 +3455,7 @@ def compute_music_prob(audio_np, sr, cfg):
 # (importable, unit-tested); names are re-imported so call sites stay unchanged.
 from stt import segments as _segments
 from stt import session_cleanup as _session_cleanup
+from stt import wav_edit as _wav_edit
 from stt.segments import (  # noqa: F401
     attribute_words_to_sentences,
     panns_label_from_prob,
@@ -9862,6 +9863,86 @@ def file_manager_copy_to_root():
         shutil.copy2(source, dest)
         return jsonify({"success": True, "path": dest,
                         "name": os.path.basename(dest), "bytes": size})
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@app.route("/api/file-manager/wav-analyze", methods=["POST"])
+def file_manager_wav_analyze():
+    """Length of a recording and where the speech in it starts and ends.
+
+    Read-only. The length is worth reporting on its own: these captures are
+    written as a stream and never patch their size fields, so the duration a
+    player shows can be wildly short of what is actually in the file.
+    """
+    if not check_ip_whitelist():
+        return jsonify({"success": False, "error": "Access denied"}), 403
+    try:
+        path = safe_managed_path((request.get_json() or {}).get("path"))
+        if path is None or not os.path.isfile(path):
+            return jsonify({"success": False, "error": "Access denied"}), 403
+        if not path.lower().endswith(".wav"):
+            return jsonify({"success": False, "error": "Only .wav files"}), 400
+
+        info = _wav_edit.read_info(path)
+        first, last = _wav_edit.find_speech_bounds(path, info=info)
+        return jsonify({
+            "success": True,
+            "name": os.path.basename(path),
+            "seconds": round(info.seconds, 2),
+            "sample_rate": info.sample_rate,
+            "channels": info.channels,
+            "bytes": os.path.getsize(path),
+            "header_is_stale": info.header_is_stale,
+            "header_seconds": round(info.header_frames / info.sample_rate, 2)
+            if info.sample_rate else 0,
+            "speech_start": round(first, 2),
+            "speech_end": round(last, 2),
+        })
+    except _wav_edit.WavError as e:
+        return jsonify({"success": False, "error": str(e)}), 400
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@app.route("/api/file-manager/wav-trim", methods=["POST"])
+def file_manager_wav_trim():
+    """Write a trimmed copy of a recording beside it. Never edits in place.
+
+    The cut is a byte range out of the PCM, so the output is sample-identical to
+    that stretch of the input — no decode, no re-encode, and no ffmpeg.
+    """
+    if not check_ip_whitelist():
+        return jsonify({"success": False, "error": "Access denied"}), 403
+    try:
+        data = request.get_json() or {}
+        path = safe_managed_path(data.get("path"))
+        if path is None or not os.path.isfile(path):
+            return jsonify({"success": False, "error": "Access denied"}), 403
+        if not path.lower().endswith(".wav"):
+            return jsonify({"success": False, "error": "Only .wav files"}), 400
+
+        start = coerce_float(data.get("start"), 0.0, lo=0.0, hi=86400.0)
+        end_raw = data.get("end")
+        end = None if end_raw in (None, "") else coerce_float(end_raw, 0.0, lo=0.0, hi=86400.0)
+
+        dest = _wav_edit.trimmed_name(path)
+        free = shutil.disk_usage(os.path.dirname(path)).free
+        info = _wav_edit.read_info(path)
+        _start_frame, count = _wav_edit.clamp_range(info, start, end)
+        needed = count * info.frame_size + 44
+        if needed > free:
+            return jsonify({"success": False,
+                            "error": f"Needs {needed // 1048576} MB, "
+                                     f"{free // 1048576} MB free"}), 507
+
+        out = _wav_edit.trim(path, dest, start, end)
+        return jsonify({"success": True, "name": os.path.basename(dest), "path": dest,
+                        "seconds": round(out.seconds, 2),
+                        "bytes": os.path.getsize(dest),
+                        "removed_seconds": round(info.seconds - out.seconds, 2)})
+    except _wav_edit.WavError as e:
+        return jsonify({"success": False, "error": str(e)}), 400
     except Exception as e:
         return jsonify({"success": False, "error": str(e)}), 500
 

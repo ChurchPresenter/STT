@@ -56,6 +56,7 @@ module = [
     "stt.translation_backfill",
     "stt.tts_queue",
     "stt.session_cleanup",
+    "stt.wav_edit",
 ]
 disallow_untyped_defs = true
 
