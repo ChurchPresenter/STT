@@ -22,16 +22,25 @@
 
       window.addEventListener("load", function () {
         var title_ref = window.document.getElementsByTagName("title")[0];
-        // Continuous marquee: rotate the whole "title + separator" as one string
-        // so the gap scrolls along with the text and wraps seamlessly, instead
-        // of the letters jumping past a fixed dash.
-        var full = title_ref.text + "   •   ";
+        // Continuous marquee: a fixed-width window sliding along an endlessly
+        // repeating "bullet + name + gap" strip.
+        //
+        // Rotating a single string instead (the obvious approach) puts every
+        // bullet on screen at once, so a string carrying two of them shows them
+        // back-to-back with nothing between — "•   •   STT". Sliding a window
+        // over a strip that carries only ONE bullet per period means the second
+        // bullet is visible only when the window is wide enough to reach the
+        // next period, which happens exactly when the name sits between the
+        // two. So the pair only ever appears flanking the name, never adjacent.
+        var unit = "•     " + title_ref.text + "     ";  // one bullet per period
+        var strip = unit + unit + unit;                   // any window slices whole
+        var width = unit.length + 4;                      // overlap = flanked frames
         var i = 0;
 
         setTimeout(function () {
           setInterval(function () {
-            title_ref.text = full.slice(i) + full.slice(0, i);
-            i = (i + 1) % full.length;
+            title_ref.text = strip.slice(i, i + width);
+            i = (i + 1) % unit.length;
           }, speed);
         }, start);
       });
