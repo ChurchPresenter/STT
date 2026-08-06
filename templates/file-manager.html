@@ -446,6 +446,7 @@
                     <button class="btn btn-secondary" onclick="showCreateFolderModal()">+ New Folder</button>
                     <button class="btn btn-secondary" onclick="cleanupSidecars()" title="Fold leftover -wal files into their databases and remove -shm files. Never deletes unmerged data, and skips a recording in progress.">🧹 Clean DB Sidecars</button>
                     <button class="btn btn-primary" onclick="refreshFiles()">🔄 Refresh</button>
+                    <button class="btn btn-secondary" id="devModeBtn" onclick="toggleDevMode()" title="Find short sessions and test runs in this folder so they can be cleared, and copy a recording to the root for re-testing.">🛠 Dev Mode</button>
                 </div>
             </div>
 
@@ -468,6 +469,28 @@
                 <button class="btn btn-primary" onclick="bulkDownload()">⬇ Download</button>
                 <button class="btn" style="background: var(--danger); color: white;" onclick="bulkDelete()">🗑 Delete</button>
                 <button class="btn btn-secondary" onclick="bulkHide()">🙈 Hide</button>
+            </div>
+
+            <!-- Dev mode: classify the sessions in this folder so test runs can be cleared -->
+            <div id="devPanel" style="display: none; background: var(--bg-card); border: 1px solid var(--warning); padding: 12px 15px; margin-top: 10px; border-radius: var(--radius-sm);">
+                <div style="display: flex; align-items: center; gap: 12px; flex-wrap: wrap;">
+                    <strong style="color: var(--warning);">🛠 Dev Mode</strong>
+                    <button class="btn btn-primary" onclick="devScan()">🔍 Scan this folder</button>
+                    <label style="font-size: 0.85em; color: var(--text-secondary);">Service ≥
+                        <input type="number" id="devServiceMinutes" value="90" min="1" max="600" style="width: 70px; padding: 3px;"> min</label>
+                    <label style="font-size: 0.85em; color: var(--text-secondary);">Substantial ≥
+                        <input type="number" id="devSubstantialRows" value="300" min="0" max="100000" style="width: 80px; padding: 3px;"> lines</label>
+                    <span id="devSummary" style="margin-left: auto; color: var(--text-primary); font-weight: 600;"></span>
+                </div>
+                <!-- Why the thresholds are here: the shipped defaults were tuned on an
+                     archive where a test meant a mic left open with 99 lines. Replaying
+                     real audio makes hundreds of lines in ten minutes, so two runs of the
+                     same clip can land either side of 300. The numbers have to be yours. -->
+                <div id="devResults" style="margin-top: 12px;"></div>
+                <div id="devActions" style="display: none; margin-top: 10px; gap: 10px; align-items: center;">
+                    <button class="btn" style="background: var(--danger); color: white;" onclick="devDelete()">🗑 Delete selected</button>
+                    <span id="devSelectionInfo" style="color: var(--text-secondary); font-size: 0.85em;"></span>
+                </div>
             </div>
 
             <!-- File Mover Configuration -->
@@ -632,6 +655,10 @@
         window.addEventListener('DOMContentLoaded', () => {
             loadFiles();
             loadDiskSpace();
+            // Restore the dev-mode toggle, but don't scan on load: the scan opens
+            // every session database in the folder, which is not what someone
+            // opening the file manager asked for.
+            applyDevMode();
             // Refresh disk space every 10 seconds
             setInterval(loadDiskSpace, 10000);
         });
@@ -1227,6 +1254,198 @@
                 refreshFiles();
             } catch (e) {
                 showNotification('Cleanup failed: ' + e.message, 'error');
+            }
+        }
+
+        // --- Dev mode -------------------------------------------------------
+        //
+        // Finds the sessions in a folder and says which are test runs, so the
+        // ones that accumulate from setting up and re-testing can be cleared
+        // without SSH. The server re-classifies before it deletes anything, so
+        // what is drawn here is a proposal, never the authority.
+
+        let devSessions = [];
+
+        function devModeOn() {
+            return localStorage.getItem('fmDevMode') === '1';
+        }
+
+        function toggleDevMode() {
+            const on = !devModeOn();
+            localStorage.setItem('fmDevMode', on ? '1' : '0');
+            applyDevMode();
+            if (on) devScan();
+        }
+
+        function applyDevMode() {
+            const on = devModeOn();
+            const btn = document.getElementById('devModeBtn');
+            document.getElementById('devPanel').style.display = on ? 'block' : 'none';
+            btn.classList.toggle('btn-primary', on);
+            btn.classList.toggle('btn-secondary', !on);
+            if (!on) {
+                devSessions = [];
+                document.getElementById('devResults').innerHTML = '';
+                document.getElementById('devSummary').textContent = '';
+                document.getElementById('devActions').style.display = 'none';
+            }
+        }
+
+        function devBytes(n) {
+            if (n < 1024) return n + ' B';
+            const units = ['KB', 'MB', 'GB', 'TB'];
+            let v = n / 1024, i = 0;
+            while (v >= 1024 && i < units.length - 1) { v /= 1024; i++; }
+            return v.toFixed(v >= 10 ? 0 : 1) + ' ' + units[i];
+        }
+
+        // Colour carries the same meaning as the server's guard: red cannot be
+        // deleted, amber is the operator's call, green is the safe sweep.
+        const DEV_COLOURS = {
+            'service': 'var(--danger)',
+            'in progress': 'var(--danger)',
+            'fragment': 'var(--warning)',
+            'unusual': 'var(--warning)',
+            'test': 'var(--success)',
+        };
+
+        async function devScan() {
+            const results = document.getElementById('devResults');
+            results.innerHTML = '<p style="color: var(--text-muted);">Scanning…</p>';
+            try {
+                const params = new URLSearchParams({
+                    path: currentPath,
+                    service_minutes: document.getElementById('devServiceMinutes').value,
+                    substantial_rows: document.getElementById('devSubstantialRows').value,
+                });
+                const data = await (await fetch('/api/file-manager/dev-scan?' + params)).json();
+                if (!data.success) {
+                    results.innerHTML = `<p style="color: var(--danger);">${data.error}</p>`;
+                    return;
+                }
+                devSessions = data.sessions;
+                renderDevResults(data);
+            } catch (e) {
+                results.innerHTML = `<p style="color: var(--danger);">Scan failed: ${e.message}</p>`;
+            }
+        }
+
+        function renderDevResults(data) {
+            const results = document.getElementById('devResults');
+            document.getElementById('devSummary').textContent =
+                `${data.small_file_count} small files found` +
+                (data.small_session_count
+                    ? ` — ${data.small_session_count} sessions, ${devBytes(data.small_bytes)}`
+                    : '');
+
+            if (!data.sessions.length) {
+                results.innerHTML = '<p style="color: var(--text-muted);">No sessions in this folder.</p>';
+                document.getElementById('devActions').style.display = 'none';
+                return;
+            }
+
+            const rows = data.sessions.map((s, i) => {
+                const colour = DEV_COLOURS[s.verdict] || 'var(--text-secondary)';
+                // Disabled here for the same reason the server refuses it; the
+                // checkbox is a convenience, not the protection.
+                const box = s.deletable
+                    ? `<input type="checkbox" class="devPick" data-index="${i}" onchange="devSelectionChanged()">`
+                    : `<input type="checkbox" disabled title="${s.verdict} — never swept">`;
+                const copy = s.recording
+                    ? `<button class="btn btn-secondary" style="padding: 2px 8px; font-size: 0.8em;"
+                         onclick="devCopyToRoot(${i})">📋 Copy to root</button>`
+                    : '';
+                return `<tr>
+                    <td style="padding: 4px 8px;">${box}</td>
+                    <td style="padding: 4px 8px; color: ${colour}; font-weight: 600;">${s.verdict}</td>
+                    <td style="padding: 4px 8px; font-family: monospace; font-size: 0.85em;">${s.name}</td>
+                    <td style="padding: 4px 8px; text-align: right;">${s.minutes} min</td>
+                    <td style="padding: 4px 8px; text-align: right;">${s.rows} lines</td>
+                    <td style="padding: 4px 8px; text-align: right;">${devBytes(s.bytes)}</td>
+                    <td style="padding: 4px 8px; text-align: right;">${s.file_count} files</td>
+                    <td style="padding: 4px 8px; color: var(--text-muted); font-size: 0.8em;">${s.why}</td>
+                    <td style="padding: 4px 8px;">${copy}</td>
+                </tr>`;
+            }).join('');
+
+            results.innerHTML = `<div style="overflow-x: auto;"><table style="width: 100%; border-collapse: collapse; font-size: 0.9em;">
+                <thead><tr style="border-bottom: 1px solid var(--border); color: var(--text-secondary); font-size: 0.8em;">
+                    <th></th><th style="text-align: left; padding: 4px 8px;">Verdict</th>
+                    <th style="text-align: left; padding: 4px 8px;">Session</th>
+                    <th style="text-align: right; padding: 4px 8px;">Length</th>
+                    <th style="text-align: right; padding: 4px 8px;">Lines</th>
+                    <th style="text-align: right; padding: 4px 8px;">Size</th>
+                    <th style="text-align: right; padding: 4px 8px;">Files</th>
+                    <th style="text-align: left; padding: 4px 8px;">Why</th><th></th>
+                </tr></thead><tbody>${rows}</tbody></table></div>`;
+            document.getElementById('devActions').style.display = 'flex';
+            devSelectionChanged();
+        }
+
+        function devPicked() {
+            return Array.from(document.querySelectorAll('.devPick:checked'))
+                .map(cb => devSessions[parseInt(cb.dataset.index, 10)]);
+        }
+
+        function devSelectionChanged() {
+            const picked = devPicked();
+            const bytes = picked.reduce((n, s) => n + s.bytes, 0);
+            document.getElementById('devSelectionInfo').textContent = picked.length
+                ? `${picked.length} sessions, ${devBytes(bytes)} to free`
+                : 'Nothing selected';
+        }
+
+        async function devDelete() {
+            const picked = devPicked();
+            if (!picked.length) return;
+            const bytes = picked.reduce((n, s) => n + s.bytes, 0);
+            const names = picked.map(s => '  • ' + s.name + ' (' + s.verdict + ')').join('\n');
+            if (!confirm(`Delete ${picked.length} sessions and everything belonging to them — `
+                + `${devBytes(bytes)}?\n\n${names}\n\nThis cannot be undone.`)) return;
+            try {
+                const resp = await fetch('/api/file-manager/dev-delete', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        path: currentPath,
+                        db_paths: picked.map(s => s.db_path),
+                        service_minutes: document.getElementById('devServiceMinutes').value,
+                        substantial_rows: document.getElementById('devSubstantialRows').value,
+                    }),
+                });
+                const data = await resp.json();
+                if (!data.success) { showNotification(data.error, 'error'); return; }
+                showNotification(`Deleted ${data.deleted} files, freed ${devBytes(data.bytes_freed)}`);
+                // Refusals and failures are shown, not swallowed: the server
+                // re-judges every session, so a refusal is real information.
+                (data.refused || []).forEach(r =>
+                    showNotification(`Kept ${r.path}: ${r.reason}`, 'error'));
+                (data.failed || []).forEach(f =>
+                    showNotification(`Failed ${f.path}: ${f.error}`, 'error'));
+                refreshFiles();
+                devScan();
+            } catch (e) {
+                showNotification('Delete failed: ' + e.message, 'error');
+            }
+        }
+
+        async function devCopyToRoot(index) {
+            const s = devSessions[index];
+            if (!s || !s.recording) return;
+            try {
+                const resp = await fetch('/api/file-manager/copy-to-root', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ path: s.recording }),
+                });
+                const data = await resp.json();
+                if (data.success) {
+                    showNotification(`Copied ${data.name} to root (${devBytes(data.bytes)})`);
+                } else {
+                    showNotification(data.error, 'error');
+                }
+            } catch (e) {
+                showNotification('Copy failed: ' + e.message, 'error');
             }
         }
 

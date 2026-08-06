@@ -3454,6 +3454,7 @@ def compute_music_prob(audio_np, sr, cfg):
 # Audio-type labels and word-attribution logic live in stt/segments.py
 # (importable, unit-tested); names are re-imported so call sites stay unchanged.
 from stt import segments as _segments
+from stt import session_cleanup as _session_cleanup
 from stt.segments import (  # noqa: F401
     attribute_words_to_sentences,
     panns_label_from_prob,
@@ -9657,6 +9658,178 @@ def file_manager_cleanup_sidecars():
         return jsonify({"success": False, "error": "Access Denied"}), 403
     result = sweep_db_sidecars()
     return jsonify({"success": True, **result})
+
+
+def _dev_scan_sessions(root, thresholds):
+    """(sessions, summary) for a directory — every session with its verdict.
+
+    Shared by the scan and the delete so both judge by the same rule; the delete
+    re-runs this rather than trusting the verdict the page was showing, which may
+    be minutes old and describe a session that has since started recording.
+    """
+    sessions, orphans = _session_cleanup.scan(root)
+    now = time.time()
+    out = []
+    for s in sessions:
+        verdict, why = _session_cleanup.classify_live(
+            s, now=now,
+            service_minutes=thresholds["service_minutes"],
+            substantial_rows=thresholds["substantial_rows"])
+        out.append({
+            "db_path": s.db_path,
+            "name": s.name,
+            "started_at": s.started_at.strftime("%Y-%m-%d %H:%M:%S"),
+            "minutes": round(s.minutes, 1),
+            "rows": s.rows,
+            "bytes": s.total_bytes,
+            "files": list(s.files),
+            "file_count": len(s.files),
+            "verdict": verdict,
+            "why": why,
+            "deletable": verdict not in _session_cleanup.UNDELETABLE,
+            "recording": next((f for f in s.files
+                               if f.lower().endswith((".wav", ".ts"))), None),
+        })
+    return out, orphans
+
+
+def _dev_thresholds(source):
+    """Operator-supplied classifier thresholds, clamped to sane bounds.
+
+    Exposed because the shipped defaults were tuned against an archive where a
+    test meant a microphone left open with 99 lines. A developer replaying real
+    audio produces hundreds of lines in twelve minutes, which lands on the wrong
+    side of the 300-row default — so the numbers have to be the operator's.
+    """
+    return {
+        "service_minutes": coerce_float(source.get("service_minutes"), 90.0, lo=1.0, hi=600.0),
+        "substantial_rows": coerce_int(source.get("substantial_rows"), 300, lo=0, hi=100000),
+    }
+
+
+@app.route("/api/file-manager/dev-scan", methods=["GET"])
+def file_manager_dev_scan():
+    """Classify the sessions under a directory. Read-only — deletes nothing."""
+    if not check_ip_whitelist():
+        return jsonify({"success": False, "error": "Access denied"}), 403
+    try:
+        root = safe_managed_path(request.args.get("path", APP_DIR))
+        if root is None:
+            return jsonify({"success": False, "error": "Access denied"}), 403
+        if not os.path.isdir(root):
+            return jsonify({"success": False, "error": "Path is not a directory"}), 400
+
+        thresholds = _dev_thresholds(request.args)
+        sessions, orphans = _dev_scan_sessions(root, thresholds)
+
+        totals = {}
+        for s in sessions:
+            bucket = totals.setdefault(s["verdict"], {"count": 0, "bytes": 0})
+            bucket["count"] += 1
+            bucket["bytes"] += s["bytes"]
+        sweepable = [s for s in sessions if s["deletable"]]
+
+        return jsonify({
+            "success": True,
+            "path": root,
+            "sessions": sessions,
+            "totals": totals,
+            "orphan_count": len(orphans),
+            # What the page reports as "N small files found" — the files that a
+            # sweep could actually remove, not the session count, because one
+            # session is up to six files.
+            "small_file_count": sum(s["file_count"] for s in sweepable),
+            "small_session_count": len(sweepable),
+            "small_bytes": sum(s["bytes"] for s in sweepable),
+            "thresholds": thresholds,
+        })
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@app.route("/api/file-manager/dev-delete", methods=["POST"])
+def file_manager_dev_delete():
+    """Delete whole sessions the caller names, after re-judging every one.
+
+    The request carries database paths, never verdicts: a page that has been
+    open for a while may be describing a session that has since started
+    recording, so the decision is made here against the state on disk.
+    """
+    if not check_ip_whitelist():
+        return jsonify({"success": False, "error": "Access denied"}), 403
+    try:
+        data = request.get_json() or {}
+        wanted = data.get("db_paths") or []
+        if not isinstance(wanted, list) or not wanted:
+            return jsonify({"success": False, "error": "db_paths is required"}), 400
+
+        root = safe_managed_path(data.get("path", APP_DIR))
+        if root is None or not os.path.isdir(root):
+            return jsonify({"success": False, "error": "Access denied"}), 403
+
+        sessions, _orphans = _dev_scan_sessions(root, _dev_thresholds(data))
+
+        # Every safety decision is made in stt.session_cleanup.plan_deletion, so
+        # it is covered by tests rather than only by whatever this handler does.
+        # Paths are confined first; one that escapes APP_DIR is passed through
+        # unresolved so it matches no session and comes back as a refusal —
+        # dropping it here instead would block it silently, and an operator who
+        # asked for something impossible should be told.
+        targets = [safe_managed_path(raw) or raw for raw in wanted]
+        to_delete, refused = _session_cleanup.plan_deletion(
+            sessions, targets, live_db=_ts_get("db_name") or "")
+
+        deleted, freed, failed = 0, 0, []
+        for f in to_delete:
+            try:
+                size = os.path.getsize(f)
+                os.remove(f)
+                deleted += 1
+                freed += size
+            except OSError as e:
+                # Report each failure and carry on: the NAS mount refuses writes
+                # per file, and pretending otherwise is worse.
+                failed.append({"path": os.path.basename(f), "error": str(e)})
+
+        return jsonify({"success": True, "deleted": deleted, "bytes_freed": freed,
+                        "refused": [{"path": r.name, "reason": r.reason} for r in refused],
+                        "failed": failed})
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@app.route("/api/file-manager/copy-to-root", methods=["POST"])
+def file_manager_copy_to_root():
+    """Copy one recording into the app root, beside the other test recordings.
+
+    A copy, not a move: the archive keeps its own. Refuses to overwrite, so a
+    second copy of the same session cannot quietly replace the first.
+    """
+    if not check_ip_whitelist():
+        return jsonify({"success": False, "error": "Access denied"}), 403
+    try:
+        source = safe_managed_path((request.get_json() or {}).get("path"))
+        if source is None or not os.path.isfile(source):
+            return jsonify({"success": False, "error": "Access denied"}), 403
+        if not source.lower().endswith((".wav", ".ts")):
+            return jsonify({"success": False, "error": "Only .wav and .ts recordings"}), 400
+
+        dest = os.path.join(os.path.realpath(APP_DIR), os.path.basename(source))
+        if os.path.exists(dest):
+            return jsonify({"success": False,
+                            "error": f"{os.path.basename(dest)} is already in the root"}), 409
+
+        free = shutil.disk_usage(os.path.realpath(APP_DIR)).free
+        size = os.path.getsize(source)
+        if size > free:
+            return jsonify({"success": False,
+                            "error": f"Needs {size // 1048576} MB, {free // 1048576} MB free"}), 507
+
+        shutil.copy2(source, dest)
+        return jsonify({"success": True, "path": dest,
+                        "name": os.path.basename(dest), "bytes": size})
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
 
 
 @app.route("/api/file-manager/hidden-items", methods=["GET"])

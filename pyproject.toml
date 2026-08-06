@@ -55,6 +55,7 @@ module = [
     "stt.translation_replay",
     "stt.translation_backfill",
     "stt.tts_queue",
+    "stt.session_cleanup",
 ]
 disallow_untyped_defs = true
 
