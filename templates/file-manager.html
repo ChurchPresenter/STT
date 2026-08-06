@@ -486,35 +486,6 @@
                      archive where a test meant a mic left open with 99 lines. Replaying
                      real audio makes hundreds of lines in ten minutes, so two runs of the
                      same clip can land either side of 300. The numbers have to be yours. -->
-                <!-- Trim editor, opened from a row's ✂ button -->
-                <div id="devWavPanel" style="display: none; margin-top: 12px; padding: 10px 12px; background: var(--bg-elevated); border: 1px solid var(--border); border-radius: var(--radius-sm);">
-                    <div style="display: flex; align-items: center; gap: 10px; flex-wrap: wrap;">
-                        <strong style="color: var(--text-primary);">✂ <span id="devWavName"></span></strong>
-                        <button class="btn btn-secondary" style="margin-left: auto; padding: 2px 10px; font-size: 0.8em;" onclick="devCloseWavEditor()">✕ Close</button>
-                    </div>
-                    <div id="devWavInfo" style="margin: 8px 0; font-size: 0.85em; color: var(--text-secondary);"></div>
-                    <canvas id="devWavCanvas" height="120"
-                            style="width: 100%; height: 120px; display: block; cursor: crosshair; border: 1px solid var(--border); border-radius: var(--radius-sm);"
-                            onmousedown="devWaveDown(event)" onmousemove="devWaveMove(event)"
-                            onmouseup="devWaveUp()" onmouseleave="devWaveUp()"></canvas>
-                    <div style="display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin: 8px 0;">
-                        <span style="font-size: 0.8em; color: var(--text-muted);">drag on the waveform to select</span>
-                        <button class="btn btn-secondary" style="margin-left: auto; padding: 2px 10px; font-size: 0.8em;" onclick="devZoomSelection()">🔍 Zoom to selection</button>
-                        <button class="btn btn-secondary" style="padding: 2px 10px; font-size: 0.8em;" onclick="devZoom(0.5)">＋ In</button>
-                        <button class="btn btn-secondary" style="padding: 2px 10px; font-size: 0.8em;" onclick="devZoom(2)">－ Out</button>
-                        <button class="btn btn-secondary" style="padding: 2px 10px; font-size: 0.8em;" onclick="devZoomFit()">⤢ Fit</button>
-                    </div>
-                    <div style="display: flex; gap: 10px; align-items: center; flex-wrap: wrap;">
-                        <button class="btn btn-primary" onclick="devTrimSilence()" title="Keep from the first word to the last. A pause in the middle of a service is never cut out.">✂ Trim silence</button>
-                        <label style="font-size: 0.85em; color: var(--text-secondary);">from
-                            <input type="number" id="devWavStart" step="0.1" min="0" oninput="devDrawWave()" style="width: 95px; padding: 3px;"> s</label>
-                        <label style="font-size: 0.85em; color: var(--text-secondary);">to
-                            <input type="number" id="devWavEnd" step="0.1" min="0" oninput="devDrawWave()" style="width: 95px; padding: 3px;"> s</label>
-                        <button class="btn btn-secondary" onclick="devTrimRange()">✂ Trim to range</button>
-                        <span style="font-size: 0.8em; color: var(--text-muted);">writes a new file beside the original</span>
-                    </div>
-                </div>
-
                 <div id="devResults" style="margin-top: 12px;"></div>
                 <div id="devActions" style="display: none; margin-top: 10px; gap: 8px; align-items: center; flex-wrap: wrap;">
                     <!-- Additive on purpose: pick test, add fragment, then clear.
@@ -637,6 +608,40 @@
             <div class="modal-footer">
                 <button class="btn btn-secondary" onclick="closeRenameModal()">Cancel</button>
                 <button class="btn btn-primary" onclick="confirmRename()">Rename</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Trim editor. A modal rather than a panel inside dev mode: it belongs to
+         a file, is opened from the file listing, and needs the width. -->
+    <div class="modal" id="devWavModal" role="dialog" aria-modal="true" aria-labelledby="devWavName">
+        <div class="modal-content" style="max-width: 900px;">
+            <div class="modal-header" id="devWavName">✂ Trim recording</div>
+            <div class="modal-body">
+                <div id="devWavInfo" style="margin-bottom: 10px; font-size: 0.85em; color: var(--text-secondary);"></div>
+                <canvas id="devWavCanvas" height="140"
+                        style="width: 100%; height: 140px; display: block; cursor: crosshair; border: 1px solid var(--border); border-radius: var(--radius-sm);"
+                        onmousedown="devWaveDown(event)" onmousemove="devWaveMove(event)"
+                        onmouseup="devWaveUp()" onmouseleave="devWaveUp()"></canvas>
+                <div style="display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin: 10px 0;">
+                    <span style="font-size: 0.8em; color: var(--text-muted);">drag on the waveform to select</span>
+                    <button class="btn btn-secondary" style="margin-left: auto; padding: 3px 10px; font-size: 0.8em;" onclick="devZoomSelection()">🔍 Zoom to selection</button>
+                    <button class="btn btn-secondary" style="padding: 3px 10px; font-size: 0.8em;" onclick="devZoom(0.5)">＋ In</button>
+                    <button class="btn btn-secondary" style="padding: 3px 10px; font-size: 0.8em;" onclick="devZoom(2)">－ Out</button>
+                    <button class="btn btn-secondary" style="padding: 3px 10px; font-size: 0.8em;" onclick="devZoomFit()">⤢ Fit</button>
+                </div>
+                <div style="display: flex; gap: 10px; align-items: center; flex-wrap: wrap;">
+                    <label style="font-size: 0.85em; color: var(--text-secondary);">from
+                        <input type="number" id="devWavStart" step="0.1" min="0" oninput="devDrawWave()" style="width: 100px; padding: 4px;"> s</label>
+                    <label style="font-size: 0.85em; color: var(--text-secondary);">to
+                        <input type="number" id="devWavEnd" step="0.1" min="0" oninput="devDrawWave()" style="width: 100px; padding: 4px;"> s</label>
+                    <span style="font-size: 0.8em; color: var(--text-muted);">writes a new file beside the original</span>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-secondary" onclick="devCloseWavEditor()">Close</button>
+                <button class="btn btn-secondary" onclick="devTrimRange()">✂ Trim to range</button>
+                <button class="btn btn-primary" onclick="devTrimSilence()" title="Keep from the first word to the last. A pause in the middle of a service is never cut out.">✂ Trim silence</button>
             </div>
         </div>
     </div>
@@ -1552,9 +1557,7 @@
 
         async function devOpenWavEditorFor(path) {
             devWavPath = path;
-            const panel = document.getElementById('devWavPanel');
-            panel.style.display = 'block';
-            panel.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+            document.getElementById('devWavModal').classList.add('active');
             document.getElementById('devWavName').textContent = path.split(/[\\/]/).pop();
             document.getElementById('devWavInfo').textContent = 'Analysing…';
             document.getElementById('devWavStart').value = '';
@@ -1722,7 +1725,7 @@
         }
 
         function devCloseWavEditor() {
-            document.getElementById('devWavPanel').style.display = 'none';
+            document.getElementById('devWavModal').classList.remove('active');
             devWavPath = null;
             devWavAnalysis = null;
         }
@@ -1751,7 +1754,7 @@
             if (!confirm(`${what}: keep ${devClock(start)} → ${devClock(end)}`
                 + ` (${devClock(end - start)}).\n\nWrites a new file beside the original;`
                 + ` the recording itself is not changed.`)) return;
-            const btns = document.querySelectorAll('#devWavPanel button');
+            const btns = document.querySelectorAll('#devWavModal button');
             btns.forEach(b => { b.disabled = true; });
             document.getElementById('devWavInfo').textContent = 'Trimming…';
             try {
@@ -1814,6 +1817,27 @@
         document.getElementById('renameModal').addEventListener('click', (e) => {
             if (e.target.id === 'renameModal') {
                 closeRenameModal();
+            }
+        });
+
+        document.getElementById('devWavModal').addEventListener('click', (e) => {
+            if (e.target.id === 'devWavModal') {
+                devCloseWavEditor();
+            }
+        });
+
+        document.addEventListener('keydown', (e) => {
+            if (e.key === 'Escape'
+                && document.getElementById('devWavModal').classList.contains('active')) {
+                devCloseWavEditor();
+            }
+        });
+
+        // The waveform is drawn to a fixed pixel buffer, so it has to be redrawn
+        // at the new width or it stretches.
+        window.addEventListener('resize', () => {
+            if (document.getElementById('devWavModal').classList.contains('active')) {
+                devDrawWave();
             }
         });
 
