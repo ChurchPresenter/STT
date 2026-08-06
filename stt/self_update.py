@@ -90,6 +90,45 @@ def _sync_marker_path(repo_dir: str) -> str:
     return os.path.join(repo_dir, ".venv", ".requirements-synced")
 
 
+def find_uv(repo_dir: str) -> str:
+    """Absolute path to the ``uv`` executable, or '' if it cannot be found.
+
+    ``shutil.which`` alone is not enough: the server usually runs as a service,
+    and a service's PATH is not a login shell's. macOS launchd hands the process
+    ``/usr/bin:/bin:/usr/sbin:/sbin``, and systemd is similarly bare — neither
+    includes ``~/.local/bin``, which is where uv's own installer puts it. The
+    result was a box that pulled new code every hour and silently skipped the
+    dependency sync every time, because a bare ``["uv", ...]`` raised
+    FileNotFoundError that the caller logged and swallowed.
+
+    Looks in the venv first: a uv installed beside the interpreter that is being
+    synced is the one that belongs to it.
+    """
+    exe = "uv.exe" if os.name == "nt" else "uv"
+    venv_bin = "Scripts" if os.name == "nt" else "bin"
+
+    candidates = [
+        os.path.join(repo_dir, ".venv", venv_bin, exe),
+        # Alongside the running interpreter — covers a venv anywhere on disk
+        os.path.join(os.path.dirname(sys.executable), exe),
+    ]
+    found = shutil.which(exe)
+    if found:
+        candidates.append(found)
+    home = os.path.expanduser("~")
+    candidates += [
+        os.path.join(home, ".local", "bin", exe),   # uv's own installer default
+        os.path.join(home, ".cargo", "bin", exe),   # cargo install uv
+        "/opt/homebrew/bin/" + exe,                 # Homebrew, Apple silicon
+        "/usr/local/bin/" + exe,                    # Homebrew, Intel / manual
+    ]
+
+    for path in candidates:
+        if path and os.path.isfile(path) and os.access(path, os.X_OK):
+            return path
+    return ""
+
+
 def _sync_deps(repo_dir: str) -> bool:
     """Best-effort dependency sync; returns True on success.
 
@@ -99,9 +138,18 @@ def _sync_deps(repo_dir: str) -> bool:
     req = os.path.join(repo_dir, "requirements.txt")
     if not os.path.isfile(req):
         return False
+    uv = find_uv(repo_dir)
+    if not uv:
+        # Loud, and names the fix: silently skipping this is what let a box run
+        # new code against old dependencies for weeks.
+        log.warning("[self-update] dependency sync skipped: uv not found "
+                    "(looked in the venv, on PATH, ~/.local/bin, ~/.cargo/bin, "
+                    "/opt/homebrew/bin, /usr/local/bin). Install uv or add it to "
+                    "the service's PATH.")
+        return False
     try:
         r = subprocess.run(
-            ["uv", "pip", "install", "-r", req],
+            [uv, "pip", "install", "-r", req],
             cwd=repo_dir,
             capture_output=True,
             text=True,

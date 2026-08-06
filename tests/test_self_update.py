@@ -330,8 +330,15 @@ class FakeCompleted:
         self.stdout = stdout
 
 
+def _stub_uv(monkeypatch, path="/stub/bin/uv"):
+    """Pin uv resolution so these tests don't depend on the host having uv."""
+    monkeypatch.setattr(self_update, "find_uv", lambda repo: path)
+    return path
+
+
 def test_sync_deps_success(tmp_path, monkeypatch):
     (tmp_path / "requirements.txt").write_text("flask\n")
+    uv = _stub_uv(monkeypatch)
     seen = {}
 
     def fake_run(cmd, **kw):
@@ -341,18 +348,21 @@ def test_sync_deps_success(tmp_path, monkeypatch):
 
     monkeypatch.setattr(self_update.subprocess, "run", fake_run)
     assert self_update._sync_deps(str(tmp_path)) is True
-    assert seen["cmd"][:3] == ["uv", "pip", "install"]
+    # The resolved absolute path, not a bare "uv" the service's PATH can't find
+    assert seen["cmd"][:3] == [uv, "pip", "install"]
     assert seen["cwd"] == str(tmp_path)
 
 
 def test_sync_deps_nonzero_exit_returns_false(tmp_path, monkeypatch):
     (tmp_path / "requirements.txt").write_text("flask\n")
+    _stub_uv(monkeypatch)
     monkeypatch.setattr(self_update.subprocess, "run", lambda *a, **k: FakeCompleted(1, stderr="resolver error"))
     assert self_update._sync_deps(str(tmp_path)) is False
 
 
 def test_sync_deps_exception_swallowed(tmp_path, monkeypatch):
     (tmp_path / "requirements.txt").write_text("flask\n")
+    _stub_uv(monkeypatch)
 
     def boom(*a, **k):
         raise OSError("uv not installed")
@@ -363,6 +373,72 @@ def test_sync_deps_exception_swallowed(tmp_path, monkeypatch):
 
 def test_sync_deps_without_requirements_is_false(tmp_path):
     assert self_update._sync_deps(str(tmp_path)) is False
+
+
+def test_sync_deps_without_uv_does_not_run_anything(tmp_path, monkeypatch):
+    """The regression: a box that cannot see uv must not pretend it synced."""
+    (tmp_path / "requirements.txt").write_text("flask\n")
+    monkeypatch.setattr(self_update, "find_uv", lambda repo: "")
+
+    def must_not_run(*a, **k):
+        raise AssertionError("subprocess.run called without a resolved uv")
+
+    monkeypatch.setattr(self_update.subprocess, "run", must_not_run)
+    assert self_update._sync_deps(str(tmp_path)) is False
+
+
+# --- find_uv: service PATHs do not include ~/.local/bin ----------------------
+
+
+def _fake_uv(path):
+    """Create an executable stub at path."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("#!/bin/sh\n")
+    path.chmod(0o755)
+    return str(path)
+
+
+def test_find_uv_prefers_the_repo_venv(tmp_path, monkeypatch):
+    monkeypatch.setattr(self_update.shutil, "which", lambda name: "/usr/bin/uv")
+    expected = _fake_uv(tmp_path / ".venv" / "bin" / "uv")
+    assert self_update.find_uv(str(tmp_path)) == expected
+
+
+def test_find_uv_falls_back_to_path(tmp_path, monkeypatch):
+    on_path = _fake_uv(tmp_path / "elsewhere" / "uv")
+    monkeypatch.setattr(self_update.shutil, "which", lambda name: on_path)
+    monkeypatch.setattr(self_update.sys, "executable", str(tmp_path / "nope" / "python"))
+    assert self_update.find_uv(str(tmp_path)) == on_path
+
+
+def test_find_uv_finds_local_bin_when_path_is_bare(tmp_path, monkeypatch):
+    """launchd gives /usr/bin:/bin:/usr/sbin:/sbin — uv installs to ~/.local/bin."""
+    monkeypatch.setattr(self_update.shutil, "which", lambda name: None)
+    monkeypatch.setattr(self_update.sys, "executable", str(tmp_path / "nope" / "python"))
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setattr(self_update.os.path, "expanduser", lambda p: str(home) if p == "~" else p)
+    expected = _fake_uv(home / ".local" / "bin" / "uv")
+    assert self_update.find_uv(str(tmp_path)) == expected
+
+
+def test_find_uv_returns_empty_when_absent(tmp_path, monkeypatch):
+    monkeypatch.setattr(self_update.shutil, "which", lambda name: None)
+    monkeypatch.setattr(self_update.sys, "executable", str(tmp_path / "nope" / "python"))
+    monkeypatch.setattr(self_update.os.path, "expanduser", lambda p: str(tmp_path / "empty-home"))
+    monkeypatch.setattr(self_update.os.path, "isfile", lambda p: False)
+    assert self_update.find_uv(str(tmp_path)) == ""
+
+
+def test_find_uv_ignores_a_non_executable_file(tmp_path, monkeypatch):
+    monkeypatch.setattr(self_update.shutil, "which", lambda name: None)
+    monkeypatch.setattr(self_update.sys, "executable", str(tmp_path / "nope" / "python"))
+    monkeypatch.setattr(self_update.os.path, "expanduser", lambda p: str(tmp_path / "empty-home"))
+    dud = tmp_path / ".venv" / "bin" / "uv"
+    dud.parent.mkdir(parents=True)
+    dud.write_text("not executable")
+    dud.chmod(0o644)
+    assert self_update.find_uv(str(tmp_path)) == ""
 
 
 # --- git_self_update failure paths -------------------------------------------
