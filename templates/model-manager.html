@@ -889,6 +889,15 @@
             </div>
         </div>
     </div>
+
+    <!-- Same floating pill the other settings pages use; styles live in base.html -->
+    <div id="unsaved-bar" class="unsaved-bar" role="status" aria-live="polite">
+        <div class="unsaved-bar-inner">
+            <span class="unsaved-dot" aria-hidden="true"></span>
+            <span class="unsaved-label">Unsaved changes</span>
+            <button onclick="saveModelManager()" class="btn-save unsaved-save">Save</button>
+        </div>
+    </div>
 {% endblock %}
 
 {% block scripts %}
@@ -1736,6 +1745,35 @@
             return summary;
         }
 
+        // Unsaved changes detection.
+        //
+        // Scoped to the configuration controls by id prefix rather than bound to
+        // the whole panel: this page also carries model search boxes, a GGUF repo
+        // field and an upload file picker, and typing in any of those is not an
+        // edit to a setting. Delegated from the panel so a control rebuilt after
+        // a model list refresh is still covered.
+        let unsavedChanges = false;
+
+        function markDirty() {
+            if (!unsavedChanges) {
+                unsavedChanges = true;
+                document.getElementById('unsaved-bar').classList.add('is-visible');
+            }
+        }
+
+        function markClean() {
+            unsavedChanges = false;
+            document.getElementById('unsaved-bar').classList.remove('is-visible');
+        }
+
+        (function () {
+            const panel = document.querySelector('.model-manager-panel');
+            if (!panel) return;
+            const isConfigControl = (el) => el && typeof el.id === 'string' && el.id.startsWith('config_');
+            panel.addEventListener('input', (e) => { if (isConfigControl(e.target)) markDirty(); });
+            panel.addEventListener('change', (e) => { if (isConfigControl(e.target)) markDirty(); });
+        })();
+
         async function saveModelManager() {
             showLoading(true);
 
@@ -1838,6 +1876,7 @@
                 const data = await response.json();
                 if (data.success) {
                     showAlert('✅ Model configurations saved successfully!', 'success');
+                    markClean();
                     loadModelManager(); // Reload to show updated data
                 } else {
                     showAlert('❌ Error saving models: ' + data.error, 'error');
@@ -2171,6 +2210,7 @@
                 const data = await response.json();
                 if (data.success) {
                     showAlert('Translation model configuration saved!', 'success');
+                    markClean();
                     loadTranslationConfig();
                 } else {
                     showAlert('Error saving translation config: ' + data.error, 'error');
