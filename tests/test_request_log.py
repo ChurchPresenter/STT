@@ -239,3 +239,54 @@ def test_synchronous_is_normal_not_full(tmp_path):
         assert log._conn.execute("PRAGMA journal_mode").fetchone()[0].lower() == "wal"
     finally:
         log.close()
+
+
+def test_query_filters_by_exact_ip(log):
+    log.log(source=SOURCE_WEB, kind=KIND_HTTP, path="/", ip="192.168.2.62")
+    log.log(source=SOURCE_WEB, kind=KIND_HTTP, path="/logs", ip="192.168.2.52")
+    # A prefix of a logged address must not match — the filter is exact.
+    log.log(source=SOURCE_WEB, kind=KIND_HTTP, path="/health", ip="192.168.2.620")
+    rows = log.query(ip="192.168.2.62")
+    assert [r["path"] for r in rows] == ["/"]
+
+
+def test_query_combines_ip_with_other_filters(log):
+    log.log(source=SOURCE_WEB, kind=KIND_HTTP, path="/", ip="10.0.0.1")
+    log.log(source=SOURCE_API, kind=KIND_HTTP, path="/api/config", ip="10.0.0.1")
+    log.log(source=SOURCE_API, kind=KIND_HTTP, path="/api/config", ip="10.0.0.2")
+    rows = log.query(ip="10.0.0.1", source=SOURCE_API)
+    assert len(rows) == 1
+    assert rows[0]["path"] == "/api/config"
+
+
+def test_distinct_ips_counts_and_orders_by_traffic(log):
+    for _ in range(3):
+        log.log(source=SOURCE_WEB, kind=KIND_HTTP, path="/", ip="10.0.0.1", ts=5.0)
+    log.log(source=SOURCE_WEB, kind=KIND_HTTP, path="/", ip="10.0.0.2", ts=9.0)
+    rows = log.distinct_ips()
+    assert [r["ip"] for r in rows] == ["10.0.0.1", "10.0.0.2"]
+    assert rows[0]["count"] == 3
+    assert rows[0]["last_ts"] == 5.0
+    assert rows[1]["last_ts"] == 9.0
+
+
+def test_distinct_ips_skips_rows_without_an_ip(log):
+    log.log(source=SOURCE_SOCKET, kind=KIND_CONNECTION, path="connect")
+    log.log(source=SOURCE_SOCKET, kind=KIND_ACTION, path="start", ip="")
+    log.log(source=SOURCE_WEB, kind=KIND_HTTP, path="/", ip="10.0.0.1")
+    assert [r["ip"] for r in log.distinct_ips()] == ["10.0.0.1"]
+
+
+def test_distinct_ips_honours_exclude_paths(log):
+    # An address that only ever polled the dashboard is not a client when
+    # polling is hidden.
+    log.log(source=SOURCE_API, kind=KIND_HTTP, path="/api/health", ip="10.0.0.9")
+    log.log(source=SOURCE_WEB, kind=KIND_HTTP, path="/", ip="10.0.0.1")
+    rows = log.distinct_ips(exclude_paths=["/api/health"])
+    assert [r["ip"] for r in rows] == ["10.0.0.1"]
+
+
+def test_distinct_ips_respects_limit(log):
+    for i in range(10):
+        log.log(source=SOURCE_WEB, kind=KIND_HTTP, path="/", ip=f"10.0.0.{i}")
+    assert len(log.distinct_ips(limit=4)) == 4

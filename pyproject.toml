@@ -57,6 +57,7 @@ module = [
     "stt.tts_queue",
     "stt.session_cleanup",
     "stt.wav_edit",
+    "stt.hostname_lookup",
 ]
 disallow_untyped_defs = true
 

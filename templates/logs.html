@@ -118,6 +118,9 @@
             <option value="connection">WS connection</option>
             <option value="action">Action</option>
         </select>
+        <select id="filter-ip">
+            <option value="">All IPs</option>
+        </select>
         <select id="filter-limit">
             <option value="200">200 rows</option>
             <option value="500">500 rows</option>
@@ -144,12 +147,13 @@
                 <th>Path / Action</th>
                 <th>Status</th>
                 <th>IP</th>
+                <th>Host</th>
                 <th>ms</th>
                 <th>Detail / Agent</th>
             </tr>
         </thead>
         <tbody id="logs-body">
-            <tr><td colspan="9" class="logs-empty">Loading…</td></tr>
+            <tr><td colspan="10" class="logs-empty">Loading…</td></tr>
         </tbody>
     </table>
 </div>
@@ -160,6 +164,7 @@
 (function () {
     const $ = (id) => document.getElementById(id);
     let timer = null;
+    let ipTimer = null;
 
     function esc(s) {
         if (s === null || s === undefined) return "";
@@ -193,19 +198,51 @@
             <td class="path">${esc(e.path || "")}</td>
             <td>${status}</td>
             <td>${esc(e.ip || "")}</td>
+            <td class="ua" title="${esc(e.hostname || "")}">${esc(e.hostname || "")}</td>
             <td>${ms}</td>
             <td class="ua" title="${esc(detail)}">${esc(detail)}</td>
         </tr>`;
+    }
+
+    // Repopulate the IP filter, keeping whatever the operator has selected —
+    // even if that address has aged out of the log, so the view doesn't
+    // silently jump back to "All IPs" mid-investigation.
+    async function loadIps() {
+        const params = new URLSearchParams();
+        if ($("hide-polling").checked) params.set("hide_polling", "1");
+        let rows = [];
+        try {
+            const res = await fetch("/api/logs/ips?" + params.toString());
+            const data = await res.json();
+            if (!data.success) return;
+            rows = data.ips || [];
+        } catch (err) { return; }
+        const select = $("filter-ip");
+        const selected = select.value;
+        const opts = [`<option value="">All IPs</option>`];
+        let seenSelected = false;
+        rows.forEach((r) => {
+            if (r.ip === selected) seenSelected = true;
+            const label = r.hostname ? `${r.ip} — ${r.hostname}` : r.ip;
+            opts.push(`<option value="${esc(r.ip)}">${esc(label)} (${esc(r.count)})</option>`);
+        });
+        if (selected && !seenSelected) {
+            opts.push(`<option value="${esc(selected)}">${esc(selected)}</option>`);
+        }
+        select.innerHTML = opts.join("");
+        select.value = selected;
     }
 
     async function load() {
         const params = new URLSearchParams();
         const source = $("filter-source").value;
         const kind = $("filter-kind").value;
+        const ip = $("filter-ip").value;
         const search = $("filter-search").value.trim();
         const limit = $("filter-limit").value;
         if (source) params.set("source", source);
         if (kind) params.set("kind", kind);
+        if (ip) params.set("ip", ip);
         if (search) params.set("search", search);
         if ($("hide-polling").checked) params.set("hide_polling", "1");
         params.set("limit", limit);
@@ -214,11 +251,11 @@
             const data = await res.json();
             const body = $("logs-body");
             if (!data.success) {
-                body.innerHTML = `<tr><td colspan="9" class="logs-empty">${esc(data.error || "Error")}</td></tr>`;
+                body.innerHTML = `<tr><td colspan="10" class="logs-empty">${esc(data.error || "Error")}</td></tr>`;
                 return;
             }
             if (!data.entries.length) {
-                body.innerHTML = `<tr><td colspan="9" class="logs-empty">No matching log entries.</td></tr>`;
+                body.innerHTML = `<tr><td colspan="10" class="logs-empty">No matching log entries.</td></tr>`;
             } else {
                 body.innerHTML = data.entries.map(row).join("");
             }
@@ -227,13 +264,18 @@
                 `showing ${data.entries.length} of ${data.total} total${enabled}`;
         } catch (err) {
             $("logs-body").innerHTML =
-                `<tr><td colspan="9" class="logs-empty">Failed to load logs.</td></tr>`;
+                `<tr><td colspan="10" class="logs-empty">Failed to load logs.</td></tr>`;
         }
     }
 
     function scheduleAuto() {
         if (timer) { clearInterval(timer); timer = null; }
+        if (ipTimer) { clearInterval(ipTimer); ipTimer = null; }
         if ($("auto-refresh").checked) timer = setInterval(load, 4000);
+        // The IP list changes far more slowly than the rows do, and reverse-DNS
+        // names arrive a beat after an address first appears — a slower refresh
+        // picks them up without rebuilding the dropdown under the operator.
+        if ($("auto-refresh").checked) ipTimer = setInterval(loadIps, 20000);
     }
 
     async function clearLogs() {
@@ -241,21 +283,26 @@
         try {
             await fetch("/api/logs/clear", { method: "POST" });
         } catch (err) { /* ignore */ }
-        load();
+        refresh();
     }
 
-    $("refresh-btn").addEventListener("click", load);
+    function refresh() { loadIps(); load(); }
+
+    $("refresh-btn").addEventListener("click", refresh);
     $("clear-btn").addEventListener("click", clearLogs);
     $("auto-refresh").addEventListener("change", scheduleAuto);
-    ["filter-source", "filter-kind", "filter-limit", "hide-polling"].forEach(
+    ["filter-source", "filter-kind", "filter-ip", "filter-limit"].forEach(
         (id) => $(id).addEventListener("change", load));
+    // Hiding polling changes which addresses count as clients, so the IP list
+    // is rebuilt with it.
+    $("hide-polling").addEventListener("change", refresh);
     let searchTimer = null;
     $("filter-search").addEventListener("input", () => {
         if (searchTimer) clearTimeout(searchTimer);
         searchTimer = setTimeout(load, 300);
     });
 
-    load();
+    refresh();
     scheduleAuto();
 })();
 </script>

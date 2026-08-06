@@ -157,13 +157,14 @@ class RequestLog:
         *,
         source: Optional[str] = None,
         kind: Optional[str] = None,
+        ip: Optional[str] = None,
         search: Optional[str] = None,
         exclude_paths: Optional[List[str]] = None,
         limit: int = 200,
     ) -> List[Dict[str, Any]]:
         """Return the most recent matching rows, newest first, as dicts.
 
-        ``source``/``kind`` are exact-match filters; ``search`` is a
+        ``source``/``kind``/``ip`` are exact-match filters; ``search`` is a
         case-insensitive substring match against path, IP, and detail;
         ``exclude_paths`` drops rows whose path exactly equals any of the given
         paths (used to hide high-frequency dashboard polling from the view).
@@ -176,6 +177,9 @@ class RequestLog:
         if kind:
             clauses.append("kind = ?")
             params.append(kind)
+        if ip:
+            clauses.append("ip = ?")
+            params.append(ip)
         if search:
             like = f"%{search}%"
             clauses.append("(path LIKE ? OR ip LIKE ? OR detail LIKE ?)")
@@ -191,6 +195,35 @@ class RequestLog:
             cursor = self._conn.execute(sql, params)
             rows = cursor.fetchall()
         return [dict(zip(FIELDS, row)) for row in rows]
+
+    def distinct_ips(
+        self,
+        *,
+        exclude_paths: Optional[List[str]] = None,
+        limit: int = 200,
+    ) -> List[Dict[str, Any]]:
+        """Every distinct client IP in the log, busiest first.
+
+        Each entry is ``{"ip", "count", "last_ts"}``. ``exclude_paths`` drops
+        the same polling noise :meth:`query` hides, so an address that only ever
+        polled the dashboard doesn't show up as a client when the viewer is
+        hiding polling. Rows with no IP (some socket events) are skipped.
+        """
+        clauses = ["ip IS NOT NULL", "ip != ''"]
+        params: List[Any] = []
+        if exclude_paths:
+            placeholders = ", ".join("?" for _ in exclude_paths)
+            clauses.append(f"(path IS NULL OR path NOT IN ({placeholders}))")
+            params.extend(exclude_paths)
+        sql = (
+            "SELECT ip, COUNT(*) AS n, MAX(ts) AS last_ts FROM access_log "
+            f"WHERE {' AND '.join(clauses)} "
+            "GROUP BY ip ORDER BY n DESC, last_ts DESC LIMIT ?"
+        )
+        params.append(max(1, int(limit)))
+        with self._lock:
+            rows = self._conn.execute(sql, params).fetchall()
+        return [{"ip": row[0], "count": int(row[1]), "last_ts": float(row[2])} for row in rows]
 
     def count(self) -> int:
         """Total number of rows currently retained."""

@@ -4038,6 +4038,13 @@ except Exception:
     # A logging store failure must never stop the server from booting.
     request_logger = None
 
+# Reverse-DNS names for the IPs in the log ("who is 192.168.2.62?"). Lookups run
+# on a background thread and are cached, so the logs endpoints never block on a
+# LAN address with no PTR record.
+from stt.hostname_lookup import HostnameCache  # noqa: E402
+
+hostname_cache = HostnameCache()
+
 
 def _access_log_enabled():
     """Whether request logging is currently on (default True). Read fresh so a
@@ -5105,8 +5112,10 @@ POLLING_LOG_PATHS = [
 @app.route("/api/logs", methods=["GET"])
 def api_logs():
     """Return recent access-log entries (newest first), with optional filters:
-    ?source=web|api|socket, ?kind=http|connection|action, ?search=<substr>,
-    ?hide_polling=1 (drop high-frequency dashboard polling), ?limit=<n>."""
+    ?source=web|api|socket, ?kind=http|connection|action, ?ip=<exact address>,
+    ?search=<substr>, ?hide_polling=1 (drop high-frequency dashboard polling),
+    ?limit=<n>. Each entry carries the reverse-DNS ``hostname`` for its IP when
+    one is already cached (see /api/logs/ips)."""
     if not check_ip_whitelist():
         return jsonify({"success": False, "error": "Access Denied"}), 403
     if request_logger is None:
@@ -5121,16 +5130,47 @@ def api_logs():
         entries = request_logger.query(
             source=(request.args.get("source") or None),
             kind=(request.args.get("kind") or None),
+            ip=(request.args.get("ip") or None),
             search=(request.args.get("search") or None),
             exclude_paths=POLLING_LOG_PATHS if hide_polling else None,
             limit=limit,
         )
+        names = hostname_cache.get_many({e.get("ip") for e in entries if e.get("ip")})
+        for entry in entries:
+            entry["hostname"] = names.get(entry.get("ip"))
         return jsonify({
             "success": True,
             "entries": entries,
             "total": request_logger.count(),
             "enabled": _access_log_enabled(),
         })
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@app.route("/api/logs/ips", methods=["GET"])
+def api_logs_ips():
+    """Return every distinct client IP in the access log, busiest first.
+
+    Feeds the log viewer's IP filter. Each entry is
+    ``{ip, count, last_ts, hostname}`` — the hostname is the cached reverse-DNS
+    name, or null while the (background) lookup is still running or when the
+    address has no PTR record. ?hide_polling=1 excludes the same dashboard
+    polling paths the entry list hides."""
+    if not check_ip_whitelist():
+        return jsonify({"success": False, "error": "Access Denied"}), 403
+    if request_logger is None:
+        return jsonify({"success": True, "ips": []})
+    try:
+        hide_polling = request.args.get("hide_polling") in ("1", "true", "yes")
+        rows = request_logger.distinct_ips(
+            exclude_paths=POLLING_LOG_PATHS if hide_polling else None,
+            limit=500,
+        )
+        names = hostname_cache.get_many([row["ip"] for row in rows])
+        for row in rows:
+            row["hostname"] = names.get(row["ip"])
+        return jsonify({"success": True, "ips": rows})
     except Exception as e:
         return jsonify({"success": False, "error": str(e)}), 500
 
