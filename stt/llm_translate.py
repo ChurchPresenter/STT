@@ -124,7 +124,20 @@ DEFAULT_SYSTEM_PROMPT_TEMPLATE = (
     "it into {language} as best you can, and never replace it with a passage or a "
     "phrase you recognise instead. Every caption must come back in {language} — never "
     "repeat the input unchanged. Translate every clause: if the input has three "
-    "sentences, the output has three sentences."
+    "sentences, the output has three sentences. "
+    # Added after a service caption read "in the Jewish community" on screen. The
+    # speaker had said "в кенийском обществе" (Kenyan) and Whisper produced the
+    # non-word "кинистском", one character from "сионистском" (Zionist); the
+    # sentence above told the model to render a garbled word "as best you can",
+    # so it resolved the nonsense to the nearest real adjective and named a
+    # people group the speaker never mentioned. Confidence was 0.949 — nothing
+    # upstream could have caught it. The guard above it ("never replace it with a
+    # passage") was written against scripture substitution and does not reach
+    # this. Kept additive on purpose: rewording the sentence above once made the
+    # model echo whole Russian sentences back untranslated on a held-out service.
+    "Never introduce a nationality, ethnicity, religion, or people group that the "
+    "source does not clearly name: if an unrecognisable word merely resembles one, "
+    "transliterate the word instead."
 )
 
 

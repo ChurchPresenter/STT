@@ -124,6 +124,38 @@ class TestBuildSystemPrompt:
         assert "Translate into" not in p
 
 
+class TestPeopleGroupGuard:
+    """A service caption once read "in the Jewish community" on screen.
+
+    The speaker had said "в кенийском обществе" (Kenyan); Whisper produced the
+    non-word "кинистском", one character from "сионистском" (Zionist), and the
+    "render a garbled word as best you can" instruction let the model resolve the
+    nonsense to the nearest real adjective — naming a people group nobody
+    mentioned. These assert the guard survives future edits to the template.
+    """
+
+    def test_guard_is_present_for_every_target_language(self):
+        for code in ("en", "es", "de"):
+            p = build_system_prompt(DEFAULT_SYSTEM_PROMPT_TEMPLATE, code, NAMES)
+            assert "nationality, ethnicity, religion, or people group" in p
+            assert "transliterate the word instead" in p
+
+    def test_the_garbled_word_instruction_is_still_there(self):
+        # The guard is additive. Rewording the sentence it follows once made the
+        # model echo whole Russian sentences back untranslated on a held-out
+        # service, so both must coexist.
+        p = build_system_prompt(DEFAULT_SYSTEM_PROMPT_TEMPLATE, "en", NAMES)
+        assert "A garbled word is still to be translated" in p
+        assert "never repeat the input unchanged" in p.replace("— ", "")
+
+    def test_guard_costs_little_of_the_input_budget(self):
+        # The prompt is charged against n_ctx. Captions are short (~1100 chars at
+        # the longest across the corpus), so the clause must not meaningfully
+        # squeeze the room left for them.
+        budget = input_token_budget(2048, 160, DEFAULT_SYSTEM_PROMPT_TEMPLATE)
+        assert budget > 1400
+
+
 class TestBuildChatPayload:
     def test_defaults_are_deterministic_and_pinned(self):
         p = build_chat_payload("m", "Мир вам.", "SYS")
