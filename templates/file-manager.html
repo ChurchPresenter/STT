@@ -619,13 +619,21 @@
             <div class="modal-header" id="devWavName">✂ Trim recording</div>
             <div class="modal-body">
                 <div id="devWavInfo" style="margin-bottom: 10px; font-size: 0.85em; color: var(--text-secondary);"></div>
-                <canvas id="devWavCanvas" height="140"
-                        style="width: 100%; height: 140px; display: block; cursor: crosshair; border: 1px solid var(--border); border-radius: var(--radius-sm);"
+                <canvas id="devWavCanvas" height="170"
+                        style="width: 100%; height: 170px; display: block; border: 1px solid var(--border); border-radius: var(--radius-sm) var(--radius-sm) 0 0;"
                         onmousedown="devWaveDown(event)" onmousemove="devWaveMove(event)"
-                        onmouseup="devWaveUp()" onmouseleave="devWaveUp()"></canvas>
+                        onmouseup="devWaveUp()" onmouseleave="devWaveLeave()"></canvas>
+                <!-- A real scrollbar rather than a slider: the inner strip is
+                     sized to the zoom, so its thumb is the proportion of the
+                     recording on screen, which is the thing being asked. -->
+                <div id="devWavScroller" onscroll="devOnScroll()"
+                     style="overflow-x: auto; overflow-y: hidden; height: 15px; border: 1px solid var(--border); border-top: none; border-radius: 0 0 var(--radius-sm) var(--radius-sm);">
+                    <div id="devWavScrollInner" style="height: 1px;"></div>
+                </div>
                 <div style="display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin: 10px 0;">
-                    <span style="font-size: 0.8em; color: var(--text-muted);">drag on the waveform to select</span>
-                    <button class="btn btn-secondary" style="margin-left: auto; padding: 3px 10px; font-size: 0.8em;" onclick="devZoomSelection()">🔍 Zoom to selection</button>
+                    <span style="font-size: 0.8em; color: var(--text-muted);">drag to select · drag an edge to adjust</span>
+                    <button class="btn btn-secondary" style="margin-left: auto; padding: 3px 10px; font-size: 0.8em;" onclick="devRecalculate()" title="Run silence detection again at the current gate and reset the range to what it finds.">↻ Recalculate</button>
+                    <button class="btn btn-secondary" style="padding: 3px 10px; font-size: 0.8em;" onclick="devZoomSelection()">🔍 Selection</button>
                     <button class="btn btn-secondary" style="padding: 3px 10px; font-size: 0.8em;" onclick="devZoom(0.5)">＋ In</button>
                     <button class="btn btn-secondary" style="padding: 3px 10px; font-size: 0.8em;" onclick="devZoom(2)">－ Out</button>
                     <button class="btn btn-secondary" style="padding: 3px 10px; font-size: 0.8em;" onclick="devZoomFit()">⤢ Fit</button>
@@ -1630,6 +1638,14 @@
         }
 
         // --- Waveform -------------------------------------------------------
+        //
+        // The canvas always shows one window of the recording and is redrawn at
+        // the container's width. Zoom narrows the window; the scrollbar under it
+        // moves the window along. Neither ever draws more pixels than the screen
+        // has, which is what keeps a two-hour file usable.
+
+        const DEV_RULER_H = 22;          // ruler band, in CSS pixels
+        const DEV_HANDLE_GRAB = 7;       // how near an edge counts as grabbing it
 
         async function devLoadPeaks() {
             const canvas = document.getElementById('devWavCanvas');
@@ -1645,8 +1661,62 @@
             } catch (e) {
                 devWavPeaks = [];
             }
+            devSyncScrollbar();
             devDrawWave();
         }
+
+        function devTotal() {
+            return devWavAnalysis ? devWavAnalysis.seconds : (devWavView.end || 1);
+        }
+
+        // --- scrollbar ------------------------------------------------------
+
+        let devScrollLock = false;       // set while we drive scrollLeft ourselves
+        let devScrollTimer = null;
+
+        function devSyncScrollbar() {
+            const scroller = document.getElementById('devWavScroller');
+            const inner = document.getElementById('devWavScrollInner');
+            const span = devWavView.end - devWavView.start;
+            const total = devTotal();
+            const width = scroller.clientWidth || 900;
+            // Inner width scales with the zoom, so the thumb's size is the
+            // fraction of the recording currently on screen.
+            const factor = span > 0 ? total / span : 1;
+            inner.style.width = Math.round(width * factor) + 'px';
+            devScrollLock = true;
+            scroller.scrollLeft = total > 0 ? (devWavView.start / total) * width * factor : 0;
+            // Released after the scroll event this assignment queues.
+            setTimeout(() => { devScrollLock = false; }, 0);
+        }
+
+        function devOnScroll() {
+            if (devScrollLock || !devWavAnalysis) return;
+            const scroller = document.getElementById('devWavScroller');
+            const inner = document.getElementById('devWavScrollInner');
+            const innerWidth = inner.offsetWidth || 1;
+            const span = devWavView.end - devWavView.start;
+            const total = devTotal();
+            let start = (scroller.scrollLeft / innerWidth) * total;
+            start = Math.max(0, Math.min(Math.max(0, total - span), start));
+            devWavView = { start: start, end: start + span };
+            devDrawWave();                       // move now, refine when it settles
+            clearTimeout(devScrollTimer);
+            devScrollTimer = setTimeout(() => {
+                // Peaks are only re-fetched once scrolling stops: asking per
+                // scroll event would be a request every few pixels.
+                fetch('/api/file-manager/wav-peaks', {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ path: devWavPath,
+                                           buckets: Math.max(64, document.getElementById('devWavCanvas').clientWidth || 900),
+                                           start: devWavView.start, end: devWavView.end }),
+                }).then(r => r.json()).then(d => {
+                    if (d.success) { devWavPeaks = d.peaks; devDrawWave(); }
+                }).catch(() => {});
+            }, 120);
+        }
+
+        // --- geometry -------------------------------------------------------
 
         function devWaveX(seconds) {
             const canvas = document.getElementById('devWavCanvas');
@@ -1661,43 +1731,77 @@
             return devWavView.start + (x / canvas.width) * span;
         }
 
+        function devClockTick(seconds) {
+            const s = Math.max(0, seconds);
+            const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60);
+            const sec = s % 60;
+            const frac = sec < 10 && (devWavView.end - devWavView.start) < 20;
+            const ss = frac ? sec.toFixed(1) : String(Math.round(sec)).padStart(2, '0');
+            return h ? `${h}:${String(m).padStart(2, '0')}:${ss}` : `${m}:${ss}`;
+        }
+
+        // Ticks land on values a person reads without decoding them — 15s, 1m,
+        // 5m — rather than on whatever the span divided by ten happens to be.
+        const DEV_TICK_STEPS = [0.1, 0.25, 0.5, 1, 2, 5, 10, 15, 30,
+                                60, 120, 300, 600, 900, 1800, 3600, 7200];
+
+        function devTickStep(span, width) {
+            const target = span / Math.max(2, Math.floor(width / 90));
+            return DEV_TICK_STEPS.find(v => v >= target) || DEV_TICK_STEPS[DEV_TICK_STEPS.length - 1];
+        }
+
+        // --- drawing --------------------------------------------------------
+
         function devDrawWave() {
             const canvas = document.getElementById('devWavCanvas');
             const css = getComputedStyle(document.body);
-            // Match the backing store to the CSS size so the trace is crisp and
-            // the pixel-to-time mapping is one-to-one.
             const ratio = window.devicePixelRatio || 1;
             canvas.width = (canvas.clientWidth || 900) * ratio;
-            canvas.height = (canvas.clientHeight || 120) * ratio;
+            canvas.height = (canvas.clientHeight || 170) * ratio;
             const ctx = canvas.getContext('2d');
-            const w = canvas.width, h = canvas.height, mid = h / 2;
+            const w = canvas.width, h = canvas.height;
+            const ruler = DEV_RULER_H * ratio;
+            const waveTop = ruler, waveH = h - ruler, mid = waveTop + waveH / 2;
+
+            const text = css.getPropertyValue('--text-muted') || '#888';
+            const border = css.getPropertyValue('--border') || '#333';
 
             ctx.clearRect(0, 0, w, h);
             ctx.fillStyle = css.getPropertyValue('--bg-elevated') || '#1a1a1a';
             ctx.fillRect(0, 0, w, h);
 
-            // The selection, drawn under the trace so it never hides it.
-            const start = parseFloat(document.getElementById('devWavStart').value);
-            const end = parseFloat(document.getElementById('devWavEnd').value);
-            if (!isNaN(start) && !isNaN(end) && end > start) {
-                const x1 = devWaveX(start), x2 = devWaveX(end);
-                ctx.fillStyle = 'rgba(245, 158, 11, 0.20)';
-                ctx.fillRect(x1, 0, x2 - x1, h);
-                ctx.strokeStyle = css.getPropertyValue('--warning') || '#f59e0b';
-                ctx.lineWidth = 2 * ratio;
-                [x1, x2].forEach(x => {
-                    ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, h); ctx.stroke();
-                });
+            // Ruler: without it the waveform is a shape with no idea where in
+            // the recording it sits, which is useless once zoomed in.
+            ctx.fillStyle = css.getPropertyValue('--bg-base') || '#111';
+            ctx.fillRect(0, 0, w, ruler);
+            const span = devWavView.end - devWavView.start;
+            const step = devTickStep(span, canvas.clientWidth || 900);
+            ctx.font = `${11 * ratio}px system-ui, sans-serif`;
+            ctx.textBaseline = 'middle';
+            ctx.strokeStyle = border;
+            ctx.lineWidth = ratio;
+            for (let t = Math.ceil(devWavView.start / step) * step; t <= devWavView.end; t += step) {
+                const x = devWaveX(t);
+                ctx.beginPath(); ctx.moveTo(x, ruler - 6 * ratio); ctx.lineTo(x, ruler); ctx.stroke();
+                ctx.fillStyle = text;
+                ctx.fillText(devClockTick(t), x + 3 * ratio, ruler / 2);
+                ctx.strokeStyle = 'rgba(128,128,128,0.12)';
+                ctx.beginPath(); ctx.moveTo(x, ruler); ctx.lineTo(x, h); ctx.stroke();
+                ctx.strokeStyle = border;
             }
 
-            ctx.strokeStyle = css.getPropertyValue('--border') || '#333';
-            ctx.lineWidth = 1;
-            ctx.beginPath(); ctx.moveTo(0, mid); ctx.lineTo(w, mid); ctx.stroke();
+            const start = parseFloat(document.getElementById('devWavStart').value);
+            const end = parseFloat(document.getElementById('devWavEnd').value);
+            const hasSel = !isNaN(start) && !isNaN(end) && end > start;
+            if (hasSel) {
+                const x1 = devWaveX(start), x2 = devWaveX(end);
+                ctx.fillStyle = 'rgba(245, 158, 11, 0.18)';
+                ctx.fillRect(x1, waveTop, x2 - x1, waveH);
+            }
 
-            // The gate itself. Without it the dB box is a number with no
-            // referent; drawn, it is obvious which humps will be kept.
+            // Gate, so the dB box has a visible referent.
             if (devWavAnalysis && devWavAnalysis.threshold_amplitude) {
-                const gate = devWavAnalysis.threshold_amplitude * mid;
+                const gate = devWavAnalysis.threshold_amplitude * (waveH / 2);
                 ctx.strokeStyle = css.getPropertyValue('--danger') || '#ef4444';
                 ctx.lineWidth = Math.max(1, ratio);
                 ctx.setLineDash([4 * ratio, 4 * ratio]);
@@ -1707,16 +1811,38 @@
                 ctx.setLineDash([]);
             }
 
-            if (!devWavPeaks.length) return;
-            ctx.fillStyle = css.getPropertyValue('--accent') || '#3b82f6';
-            const step = w / devWavPeaks.length;
-            devWavPeaks.forEach((p, i) => {
-                // Minimum 1px so a silent stretch still reads as a line rather
-                // than as missing data.
-                const height = Math.max(1, p * mid);
-                ctx.fillRect(i * step, mid - height, Math.max(1, step), height * 2);
-            });
+            if (devWavPeaks.length) {
+                ctx.fillStyle = css.getPropertyValue('--accent') || '#3b82f6';
+                const bw = w / devWavPeaks.length;
+                devWavPeaks.forEach((p, i) => {
+                    const height = Math.max(1, p * (waveH / 2));
+                    ctx.fillRect(i * bw, mid - height, Math.max(1, bw), height * 2);
+                });
+            }
+
+            // Edges last, and with grips: a line you are meant to grab should
+            // look like one.
+            if (hasSel) {
+                const warning = css.getPropertyValue('--warning') || '#f59e0b';
+                [devWaveX(start), devWaveX(end)].forEach(x => {
+                    ctx.strokeStyle = warning;
+                    ctx.lineWidth = 2 * ratio;
+                    ctx.beginPath(); ctx.moveTo(x, waveTop); ctx.lineTo(x, h); ctx.stroke();
+                    ctx.fillStyle = warning;
+                    ctx.fillRect(x - 4 * ratio, waveTop, 8 * ratio, 16 * ratio);
+                    ctx.strokeStyle = css.getPropertyValue('--bg-base') || '#111';
+                    ctx.lineWidth = ratio;
+                    [-1.5, 1.5].forEach(o => {
+                        ctx.beginPath();
+                        ctx.moveTo(x + o * ratio, waveTop + 4 * ratio);
+                        ctx.lineTo(x + o * ratio, waveTop + 12 * ratio);
+                        ctx.stroke();
+                    });
+                });
+            }
         }
+
+        // --- pointer --------------------------------------------------------
 
         function devWaveMouse(e) {
             const canvas = document.getElementById('devWavCanvas');
@@ -1725,17 +1851,64 @@
             return devWaveTime((e.clientX - rect.left) * ratio);
         }
 
-        function devWaveDown(e) { devWavDrag = devWaveMouse(e); }
+        function devEdgeUnder(e) {
+            const canvas = document.getElementById('devWavCanvas');
+            const rect = canvas.getBoundingClientRect();
+            const x = e.clientX - rect.left;                 // CSS pixels
+            const ratio = window.devicePixelRatio || 1;
+            const start = parseFloat(document.getElementById('devWavStart').value);
+            const end = parseFloat(document.getElementById('devWavEnd').value);
+            if (isNaN(start) || isNaN(end)) return null;
+            if (Math.abs(x - devWaveX(start) / ratio) <= DEV_HANDLE_GRAB) return 'start';
+            if (Math.abs(x - devWaveX(end) / ratio) <= DEV_HANDLE_GRAB) return 'end';
+            return null;
+        }
+
+        function devWaveDown(e) {
+            const edge = devEdgeUnder(e);
+            if (edge) {
+                devWavDrag = { mode: edge };
+            } else {
+                devWavDrag = { mode: 'new', anchor: devWaveMouse(e) };
+            }
+        }
 
         function devWaveMove(e) {
-            if (devWavDrag === null) return;
-            const now = devWaveMouse(e);
-            document.getElementById('devWavStart').value = Math.min(devWavDrag, now).toFixed(2);
-            document.getElementById('devWavEnd').value = Math.max(devWavDrag, now).toFixed(2);
+            const canvas = document.getElementById('devWavCanvas');
+            if (!devWavDrag) {
+                canvas.style.cursor = devEdgeUnder(e) ? 'ew-resize' : 'crosshair';
+                return;
+            }
+            const now = Math.max(0, Math.min(devTotal(), devWaveMouse(e)));
+            const startBox = document.getElementById('devWavStart');
+            const endBox = document.getElementById('devWavEnd');
+            if (devWavDrag.mode === 'new') {
+                startBox.value = Math.min(devWavDrag.anchor, now).toFixed(2);
+                endBox.value = Math.max(devWavDrag.anchor, now).toFixed(2);
+            } else if (devWavDrag.mode === 'start') {
+                // Dragging one edge past the other swaps which is being moved,
+                // rather than inverting the range into nothing.
+                if (now >= parseFloat(endBox.value)) {
+                    startBox.value = endBox.value; endBox.value = now.toFixed(2);
+                    devWavDrag.mode = 'end';
+                } else { startBox.value = now.toFixed(2); }
+            } else {
+                if (now <= parseFloat(startBox.value)) {
+                    endBox.value = startBox.value; startBox.value = now.toFixed(2);
+                    devWavDrag.mode = 'start';
+                } else { endBox.value = now.toFixed(2); }
+            }
             devDrawWave();
         }
 
         function devWaveUp() { devWavDrag = null; }
+
+        function devWaveLeave() {
+            devWavDrag = null;
+            document.getElementById('devWavCanvas').style.cursor = 'crosshair';
+        }
+
+        // --- zoom -----------------------------------------------------------
 
         async function devZoomSelection() {
             const start = parseFloat(document.getElementById('devWavStart').value);
@@ -1748,24 +1921,31 @@
         async function devZoom(factor) {
             const span = devWavView.end - devWavView.start;
             const centre = devWavView.start + span / 2;
-            const total = devWavAnalysis ? devWavAnalysis.seconds : devWavView.end;
-            // A quarter second is as far in as it is useful to go, and the view
-            // is always clamped back inside the file.
+            const total = devTotal();
             const next = Math.max(0.25, Math.min(total, span * factor));
             let start = Math.max(0, centre - next / 2);
-            let end = Math.min(total, start + next);
+            const end = Math.min(total, start + next);
             start = Math.max(0, end - next);
             devWavView = { start: start, end: end };
             await devLoadPeaks();
         }
 
         async function devZoomFit() {
-            if (!devWavAnalysis) return;
-            devWavView = { start: 0, end: devWavAnalysis.seconds };
+            devWavView = { start: 0, end: devTotal() };
             await devLoadPeaks();
         }
 
-        let devWavAnalysis = null;
+        // Re-run detection at the current gate and take its answer as the range.
+        // Separate from changing the gate: after dragging the edges by hand,
+        // this is how to get back to what the detector says.
+        async function devRecalculate() {
+            if (!devWavPath) return;
+            const view = { start: devWavView.start, end: devWavView.end };
+            await devOpenWavEditorFor(devWavPath);
+            devWavView = view;
+            await devLoadPeaks();
+            showNotification('Re-detected the speech bounds');
+        }
 
         function devClock(seconds) {
             const s = Math.max(0, Math.round(seconds));
@@ -1777,14 +1957,16 @@
             document.getElementById('devWavModal').classList.remove('active');
             devWavPath = null;
             devWavAnalysis = null;
+            devWavPeaks = [];
+            devWavDrag = null;
         }
 
-        // Silence-only: keep everything from the first word to the last, so a
-        // pause in the middle of a service is never cut out.
+        // Keep everything between the first and last sound above the gate. The
+        // pauses inside a service are untouched — only the dead air either side.
         function devTrimSilence() {
             if (!devWavAnalysis) return;
             devDoTrim(devWavAnalysis.speech_start, devWavAnalysis.speech_end,
-                      'Trim to the speech');
+                      'Cut the quiet ends');
         }
 
         function devTrimRange() {
@@ -1794,7 +1976,7 @@
                 showNotification('Enter a start and end in seconds', 'error');
                 return;
             }
-            devDoTrim(start, end, 'Trim to the range');
+            devDoTrim(start, end, 'Keep only the selection');
         }
 
         async function devDoTrim(start, end, what) {
@@ -1817,7 +1999,6 @@
                         + ` ${devClock(d.removed_seconds)} removed`);
                     devCloseWavEditor();
                     refreshFiles();
-                    devScan();
                 } else {
                     showNotification(d.error, 'error');
                     document.getElementById('devWavInfo').textContent = d.error;
@@ -1869,12 +2050,6 @@
             }
         });
 
-        document.getElementById('devWavModal').addEventListener('click', (e) => {
-            if (e.target.id === 'devWavModal') {
-                devCloseWavEditor();
-            }
-        });
-
         document.addEventListener('keydown', (e) => {
             if (e.key === 'Escape'
                 && document.getElementById('devWavModal').classList.contains('active')) {
@@ -1886,6 +2061,7 @@
         // at the new width or it stretches.
         window.addEventListener('resize', () => {
             if (document.getElementById('devWavModal').classList.contains('active')) {
+                devSyncScrollbar();
                 devDrawWave();
             }
         });
