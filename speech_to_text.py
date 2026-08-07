@@ -4103,6 +4103,7 @@ socketio = SocketIO(app, async_mode="threading", static_url_path="/static", stat
 # and SocketIO action, into a size-capped SQLite table under APP_DIR/logs.
 # Viewed at /logs (page) and /api/logs (JSON). Thin wrapper over stt.request_log.
 from stt import request_log as _request_log  # noqa: E402
+from stt import repeat_filter as _repeat_filter  # noqa: E402
 from stt import metrics as _metrics  # noqa: E402
 from stt import audio_file as _audio_file  # noqa: E402
 from stt.hypothesis_buffer import LocalAgreementBuffer  # noqa: E402
@@ -4619,6 +4620,29 @@ def _note_access_detail(detail):
         pass
 
 
+# Statuses worth thinning when one client repeats them. A refusal repeats
+# identically for as long as whatever is being refused keeps asking: an
+# unauthorised page polling (403), or a peer polling an endpoint this build does
+# not have (404). Everything else stays fully logged — a 400 differs run to run
+# and is what someone reads to work out why.
+_REFUSAL_STATUSES = (401, 403, 404)
+_refusal_log_filter = _repeat_filter.RepeatSuppressor()
+
+
+def _refusal_log_verdict(path, status, ip):
+    """Whether to write this row, given how often the same client has seen it.
+
+    A page open on a machine that is not whitelisted is refused every time it
+    polls, forever — 60 rows an hour, each one displacing a real request inside
+    the log's row cap. The first few are kept, then one per cooldown carrying the
+    count of what it stands for, so the flood is still visible in a line rather
+    than in six hundred.
+    """
+    if status not in _REFUSAL_STATUSES:
+        return _repeat_filter.Verdict(True)
+    return _refusal_log_filter.decide((ip, request.method, path, status))
+
+
 @app.after_request
 def _access_log_record(response):
     """Log the request (tagged web vs api). Skips static assets and socket.io
@@ -4627,14 +4651,24 @@ def _access_log_record(response):
 
     The query string is deliberately dropped: it can carry ?key=<access_token>,
     which must not be written to the log. Routes that want context in the row
-    call _note_access_detail() with a curated summary instead."""
+    call _note_access_detail() with a curated summary instead.
+
+    A refusal repeated by the same client is thinned to a heartbeat row — see
+    _refusal_log_verdict."""
     try:
         if request_logger is not None and _access_log_enabled():
             path = request.path or ""
             if not (path.startswith("/static/") or path.startswith("/socket.io/")
                     or (_access_log_skip_polling() and path in POLLING_LOG_PATHS)):
+                verdict = _refusal_log_verdict(path, response.status_code, request.remote_addr)
+                if not verdict.log:
+                    return response
                 t0 = getattr(g, "_access_log_t0", None)
                 duration_ms = round((time.perf_counter() - t0) * 1000.0, 2) if t0 is not None else None
+                detail = getattr(g, "_access_log_detail", None)
+                if verdict.suppressed:
+                    repeats = f"+{verdict.suppressed} identical since the last row"
+                    detail = f"{detail} ({repeats})" if detail else repeats
                 request_logger.log(
                     source=_request_log.classify_source(path),
                     kind=_request_log.KIND_HTTP,
@@ -4644,7 +4678,7 @@ def _access_log_record(response):
                     ip=request.remote_addr,
                     user_agent=request.headers.get("User-Agent"),
                     duration_ms=duration_ms,
-                    detail=getattr(g, "_access_log_detail", None),
+                    detail=detail,
                 )
     except Exception:
         pass  # request logging must never break a response

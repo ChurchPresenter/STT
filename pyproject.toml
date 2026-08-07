@@ -59,6 +59,7 @@ module = [
     "stt.wav_edit",
     "stt.hostname_lookup",
     "stt.pair_tokens",
+    "stt.repeat_filter",
 ]
 disallow_untyped_defs = true
 
