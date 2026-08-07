@@ -233,7 +233,7 @@ class TestScan:
         make_db(tmp_path / "2026-01-11_100000.db", datetime(2026, 1, 11, 10, 0), [0])
         (tmp_path / "2026-01-11_180000.ts").write_bytes(b"x")
         _sessions, orphans = scan(str(tmp_path))
-        assert [o.split("/")[-1] for o in orphans] == ["2026-01-11_180000.ts"]
+        assert [os.path.basename(o) for o in orphans] == ["2026-01-11_180000.ts"]
 
     def test_unrelated_files_are_ignored_entirely(self, tmp_path):
         make_db(tmp_path / "2026-01-11_100000.db", datetime(2026, 1, 11, 10, 0), [0])

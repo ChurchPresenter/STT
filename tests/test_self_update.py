@@ -6,6 +6,7 @@ guarantees under test are the developer-safety ones: a dirty tree or unpushed
 local commits must never be touched.
 """
 
+import os
 import re
 import shutil
 import subprocess
@@ -390,6 +391,14 @@ def test_sync_deps_without_uv_does_not_run_anything(tmp_path, monkeypatch):
 # --- find_uv: service PATHs do not include ~/.local/bin ----------------------
 
 
+#: Where a venv puts its executables, and what uv is called there. The layout is
+#: the platform's, not this code's choice — find_uv branches on the same fact, and
+#: a test that hardcoded bin/uv failed the whole Windows job while the code it was
+#: checking was right.
+UV_EXE = "uv.exe" if os.name == "nt" else "uv"
+VENV_BIN = "Scripts" if os.name == "nt" else "bin"
+
+
 def _fake_uv(path):
     """Create an executable stub at path."""
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -400,12 +409,12 @@ def _fake_uv(path):
 
 def test_find_uv_prefers_the_repo_venv(tmp_path, monkeypatch):
     monkeypatch.setattr(self_update.shutil, "which", lambda name: "/usr/bin/uv")
-    expected = _fake_uv(tmp_path / ".venv" / "bin" / "uv")
+    expected = _fake_uv(tmp_path / ".venv" / VENV_BIN / UV_EXE)
     assert self_update.find_uv(str(tmp_path)) == expected
 
 
 def test_find_uv_falls_back_to_path(tmp_path, monkeypatch):
-    on_path = _fake_uv(tmp_path / "elsewhere" / "uv")
+    on_path = _fake_uv(tmp_path / "elsewhere" / UV_EXE)
     monkeypatch.setattr(self_update.shutil, "which", lambda name: on_path)
     monkeypatch.setattr(self_update.sys, "executable", str(tmp_path / "nope" / "python"))
     assert self_update.find_uv(str(tmp_path)) == on_path
@@ -418,7 +427,7 @@ def test_find_uv_finds_local_bin_when_path_is_bare(tmp_path, monkeypatch):
     home = tmp_path / "home"
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setattr(self_update.os.path, "expanduser", lambda p: str(home) if p == "~" else p)
-    expected = _fake_uv(home / ".local" / "bin" / "uv")
+    expected = _fake_uv(home / ".local" / "bin" / UV_EXE)
     assert self_update.find_uv(str(tmp_path)) == expected
 
 
