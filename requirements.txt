@@ -43,6 +43,11 @@ python-socketio>=5.9.0
 # Text-to-Speech
 edge-tts>=6.1.0
 piper-tts>=1.2.0
+# Local multilingual TTS: one ~385MB ONNX model covers 30 languages, so a
+# language switch needs no per-language download the way piper does. Pulls
+# onnxruntime (already required by piper-tts), numpy, soundfile and
+# huggingface-hub — all of which we install anyway.
+supertonic>=1.3.1
 
 # Utilities
 pytz>=2023.3

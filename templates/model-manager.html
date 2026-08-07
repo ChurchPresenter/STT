@@ -2817,6 +2817,8 @@
                                 displayType = 'NLLB Translation'; typeIcon = '🌐'; statusClass = 'model-item--success';
                             } else if (model.type === 'piper') {
                                 displayType = 'Piper TTS'; typeIcon = '🔊'; statusClass = 'model-item--accent';
+                            } else if (model.type === 'supertonic') {
+                                displayType = 'Supertonic TTS'; typeIcon = '🔊'; statusClass = 'model-item--accent';
                             } else if (model.type === 'huggingface') {
                                 displayType = 'HuggingFace'; typeIcon = '🤗'; statusClass = 'model-item--accent';
                             } else {
@@ -2829,7 +2831,7 @@
                                         <div class="model-details"><span style="background: var(--bg-elevated); padding: 1px 6px; border-radius: var(--radius-sm); font-size: 0.75em;">${displayType}</span></div>
                                     </div>
                                     <div class="model-actions">
-                                        <button class="model-btn remove" onclick="removeModel('${model.name}', '${model.type}')">Remove</button>
+                                        <button class="model-btn remove" onclick="removeModel('${model.type === 'piper' || model.type === 'supertonic' ? dir : model.name}', '${model.type}')">Remove</button>
                                     </div>
                                 </div>
                             `;

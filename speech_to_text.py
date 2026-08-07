@@ -1968,14 +1968,22 @@ def is_live_translation_model_loading():
 
 
 # ====================================================================================
-# TTS (Text-to-Speech) - Multi-backend: edge-tts (cloud) and piper (local)
+# TTS (Text-to-Speech) - Multi-backend: edge-tts (cloud), piper and supertonic (local)
 # ====================================================================================
 
-_tts_piper_model = None
+# What differs between backends and is data (config keys, audio format, language
+# coverage) lives in the registry, not in if/elif chains down here.
+import importlib.util
+
+from stt import tts_backends
+
+# Loaded local models, keyed by backend id. Both piper and supertonic are local,
+# so a single model global would make switching backends unload the wrong one.
+_tts_local_models = {}
+_tts_sample_rates = {}
 _tts_lock = threading.Lock()
 _tts_model_loaded = False
 _tts_model_loading = False
-_tts_sample_rate = 22050
 
 # Edge-TTS voice cache (populated on first request)
 _edge_tts_voices = None
@@ -1983,8 +1991,13 @@ _edge_tts_voices_lock = threading.Lock()
 
 
 def _get_tts_backend():
-    """Get the configured TTS backend ('edge' or 'piper')"""
-    return config.get("live_translation", {}).get("tts", {}).get("backend", "edge")
+    """Get the configured TTS backend id ('edge', 'piper' or 'supertonic')"""
+    return config.get("live_translation", {}).get("tts", {}).get("backend", tts_backends.DEFAULT_BACKEND)
+
+
+def _tts_settings():
+    """The live ``live_translation.tts`` config section."""
+    return config.get("live_translation", {}).get("tts", {})
 
 
 def get_edge_tts_voices():
@@ -2031,79 +2044,178 @@ def _pick_default_piper_model(lang_code):
     return piper_model_for_lang(lang_code, _PIPER_MODELS_CATALOG, _is_piper_model_downloaded)
 
 
-def get_tts_model(use_gpu=False, model_name=None):
-    """Load piper TTS model (singleton). For edge-tts, no model loading needed."""
-    global _tts_piper_model, _tts_model_loaded, _tts_model_loading, _tts_sample_rate
+def _pick_default_supertonic_voice(lang_code):
+    """Supertonic preset for a language: the current one, since voices are
+    multilingual. None when the model can't speak the language at all."""
+    current = _tts_settings().get("supertonic_voice", "")
+    return tts_backends.supertonic_voice_for_lang(lang_code, current)
 
-    backend = _get_tts_backend()
 
-    if backend == "edge":
+def _default_voice_for(backend):
+    """Fallback shown in the UI when no voice has been chosen for a backend yet."""
+    if backend.id == tts_backends.EDGE:
+        return "en-US-AriaNeural"
+    if backend.id == tts_backends.SUPERTONIC:
+        return tts_backends.DEFAULT_SUPERTONIC_VOICE
+    return ""  # piper: nothing sensible until a model is downloaded
+
+
+def _pick_default_voice(backend_id, lang_code):
+    """Default voice for a language on any backend."""
+    if backend_id == tts_backends.PIPER:
+        return _pick_default_piper_model(lang_code)
+    if backend_id == tts_backends.SUPERTONIC:
+        return _pick_default_supertonic_voice(lang_code)
+    return _pick_default_edge_voice(lang_code)
+
+
+def _switch_tts_voice_for_language(tts_section, old_language, new_language):
+    """Point TTS at the right voice after a target-language switch.
+
+    Stashes the outgoing voice as ``old_language``'s preference and reloads the
+    model when the new voice needs a different one. Returns the chosen voice, or
+    None when the backend has nothing for that language."""
+    backend_id = tts_section.get("backend", tts_backends.DEFAULT_BACKEND)
+    backend = tts_backends.get_backend(backend_id)
+    previous = tts_section.get(backend.voice_key, "")
+
+    new_voice = tts_backends.select_voice(
+        backend_id, old_language, new_language, tts_section,
+        lambda lang: _pick_default_voice(backend.id, lang),
+    )
+
+    if new_voice:
+        print(f"[TTS] Auto-switched {backend.id} voice: {previous or '(none)'} -> {new_voice}")
+        if backend.is_local and new_voice != previous:
+            def _reload():
+                unload_tts_model(backend.id)
+                get_tts_model(backend=backend.id, model_name=new_voice)
+            threading.Thread(target=_reload, daemon=True).start()
+    elif backend.id == tts_backends.SUPERTONIC:
+        # The only backend that can be loaded and still have nothing to say:
+        # its model covers 30 languages, and the target isn't one of them.
+        print(f"[TTS] Supertonic has no voice for '{new_language}' - speaking it language-agnostically")
+    else:
+        print(f"[TTS] No {backend.id} voice available for '{new_language}' - keeping {previous or '(none)'}")
+
+    return new_voice
+
+
+def _load_piper_model(model_name):
+    """Construct a PiperVoice from the named downloaded model. Caller holds _tts_lock."""
+    from piper import PiperVoice
+
+    if not model_name:
+        print("[TTS ERROR] No piper model configured")
+        return None, None
+
+    model_path = os.path.join(_tts_cache_dir, "piper", model_name)
+    onnx_files = [f for f in os.listdir(model_path) if f.endswith(".onnx")] if os.path.isdir(model_path) else []
+    if not onnx_files:
+        print(f"[TTS ERROR] No .onnx model found in {model_path}")
+        return None, None
+
+    onnx_path = os.path.join(model_path, onnx_files[0])
+    json_path = onnx_path + ".json"
+
+    print(f"[TTS] Loading piper model: {model_name}...")
+    model = PiperVoice.load(onnx_path, config_path=json_path if os.path.exists(json_path) else None)
+    sample_rate = model.config.sample_rate if hasattr(model, "config") else 22050
+    return model, sample_rate
+
+
+def _load_supertonic_model(model_name):
+    """Construct the supertonic engine from our own assets dir. Caller holds _tts_lock.
+
+    ``model_name`` is the voice preset, not a model: one model serves every
+    voice and language, so it plays no part in loading."""
+    from supertonic import TTS as SupertonicTTS
+
+    model_dir = _get_supertonic_dir()
+    if not _is_supertonic_downloaded():
+        print(f"[TTS ERROR] Supertonic assets not downloaded (expected in {model_dir})")
+        return None, None
+
+    print("[TTS] Loading supertonic model...")
+    # auto_download=False: the Model Manager owns downloading, so a missing
+    # asset surfaces as an error instead of a silent 260MB pull mid-service.
+    model = SupertonicTTS(model_dir=model_dir, auto_download=False)
+    return model, model.sample_rate
+
+
+_LOCAL_MODEL_LOADERS = {
+    tts_backends.PIPER: _load_piper_model,
+    tts_backends.SUPERTONIC: _load_supertonic_model,
+}
+
+
+def get_tts_model(use_gpu=False, model_name=None, backend=None):
+    """Load a local TTS model (one singleton per backend). Cloud backends need none."""
+    global _tts_model_loaded, _tts_model_loading
+
+    backend_id = backend or _get_tts_backend()
+    descriptor = tts_backends.get_backend(backend_id)
+
+    if not descriptor.is_local:
         _tts_model_loaded = True
         return True  # edge-tts needs no model
 
-    # Piper backend
     with _tts_lock:
         status = _ts_get("status", "")
-        if _tts_piper_model is None and status == "stopping":
-            print("[TTS] Skipping piper model load - transcription is stopping")
+        if _tts_local_models.get(descriptor.id) is None and status == "stopping":
+            print(f"[TTS] Skipping {descriptor.id} model load - transcription is stopping")
             return None
 
-        if _tts_piper_model is None:
+        if _tts_local_models.get(descriptor.id) is None:
             _tts_model_loading = True
             try:
-                from piper import PiperVoice
-                tts_config = config.get("live_translation", {}).get("tts", {})
                 if model_name is None:
-                    model_name = tts_config.get("piper_model", "")
-
-                if not model_name:
-                    print("[TTS ERROR] No piper model configured")
+                    model_name = _tts_settings().get(descriptor.voice_key, "")
+                model, sample_rate = _LOCAL_MODEL_LOADERS[descriptor.id](model_name)
+                if model is None:
                     return None
-
-                model_path = os.path.join(_tts_cache_dir, "piper", model_name)
-                onnx_files = [f for f in os.listdir(model_path) if f.endswith(".onnx")] if os.path.isdir(model_path) else []
-                if not onnx_files:
-                    print(f"[TTS ERROR] No .onnx model found in {model_path}")
-                    return None
-
-                onnx_path = os.path.join(model_path, onnx_files[0])
-                json_path = onnx_path + ".json"
-
-                print(f"[TTS] Loading piper model: {model_name}...")
-                _tts_piper_model = PiperVoice.load(onnx_path, config_path=json_path if os.path.exists(json_path) else None)
+                _tts_local_models[descriptor.id] = model
+                _tts_sample_rates[descriptor.id] = sample_rate
                 _tts_model_loaded = True
-                _tts_sample_rate = _tts_piper_model.config.sample_rate if hasattr(_tts_piper_model, 'config') else 22050
-                print(f"[TTS] Piper model loaded (sample_rate={_tts_sample_rate})")
+                print(f"[TTS] {descriptor.id} model loaded (sample_rate={sample_rate})")
             except Exception as e:
-                print(f"[TTS ERROR] Failed to load piper model: {e}")
-                _tts_piper_model = None
+                print(f"[TTS ERROR] Failed to load {descriptor.id} model: {e}")
+                _tts_local_models.pop(descriptor.id, None)
                 _tts_model_loaded = False
             finally:
                 _tts_model_loading = False
-        return _tts_piper_model
+        return _tts_local_models.get(descriptor.id)
 
 
-def unload_tts_model():
-    """Unload the piper TTS model to free memory"""
-    global _tts_piper_model, _tts_model_loaded
+def unload_tts_model(backend=None):
+    """Unload a local TTS model to free memory (all of them when backend is None).
+
+    Defaults to every local backend rather than the active one: the common
+    caller is "we're switching away from X", and X is by then no longer active.
+    """
+    global _tts_model_loaded
     import gc
 
+    targets = [backend] if backend else tts_backends.local_backend_ids()
+
     with _tts_lock:
-        if _tts_piper_model is not None:
-            print("[TTS] Unloading piper model...")
-            del _tts_piper_model
-            _tts_piper_model = None
+        for backend_id in targets:
+            model = _tts_local_models.pop(backend_id, None)
+            if model is not None:
+                print(f"[TTS] Unloading {backend_id} model...")
+                del model
+                _tts_sample_rates.pop(backend_id, None)
+                print(f"[TTS] {backend_id} model unloaded")
+        if not _tts_local_models:
             _tts_model_loaded = False
             gc.collect()
-            print("[TTS] Piper model unloaded")
-        else:
-            _tts_model_loaded = False
 
 
 def is_tts_model_loaded():
-    if _get_tts_backend() == "edge":
+    descriptor = tts_backends.get_backend(_get_tts_backend())
+    if not descriptor.is_local:
         return True  # edge-tts is always ready
-    return _tts_model_loaded
+    return _tts_local_models.get(descriptor.id) is not None
 
 
 def is_tts_model_loading():
@@ -2111,15 +2223,14 @@ def is_tts_model_loading():
 
 
 def _synthesize_edge_tts(text, voice=None, speed=1.0):
-    """Synthesize speech using edge-tts (Microsoft Edge cloud TTS). Returns (mp3_bytes, sample_rate) or (None, None)."""
+    """Synthesize speech using edge-tts (Microsoft Edge cloud TTS). Returns (mp3_bytes, sample_rate, 'mp3') or (None, None, None)."""
     try:
         import asyncio
         import edge_tts
         import io
 
-        tts_config = config.get("live_translation", {}).get("tts", {})
         if voice is None:
-            voice = tts_config.get("edge_voice", "en-US-AriaNeural")
+            voice = _tts_settings().get("edge_voice", "en-US-AriaNeural")
 
         # edge-tts rate format: "+0%", "-50%", "+100%" etc
         rate_str = "+0%"
@@ -2144,35 +2255,91 @@ def _synthesize_edge_tts(text, voice=None, speed=1.0):
             loop.close()
 
         if not mp3_bytes:
-            return None, None
+            return None, None, None
 
-        return mp3_bytes, 24000  # edge-tts outputs 24kHz mp3
+        return mp3_bytes, 24000, "mp3"  # edge-tts outputs 24kHz mp3
     except Exception as e:
         print(f"[TTS ERROR] edge-tts synthesis failed: {e}")
-        return None, None
+        return None, None, None
 
 
-def _synthesize_piper_tts(text, language="en"):
-    """Synthesize speech using piper (local). Returns (wav_bytes, sample_rate) or (None, None)."""
-    model = get_tts_model()
+def _wav_container(pcm_writer, sample_rate):
+    """A mono 16-bit WAV file in memory, written by ``pcm_writer(wave_file)``."""
+    import io
+    import wave
+
+    buf = io.BytesIO()
+    with wave.open(buf, 'wb') as wav_file:
+        wav_file.setnchannels(1)
+        wav_file.setsampwidth(2)  # 16-bit
+        wav_file.setframerate(sample_rate)
+        pcm_writer(wav_file)
+    return buf.getvalue()
+
+
+def _synthesize_piper_tts(text, language="en", speed=1.0):
+    """Synthesize speech using piper (local). Returns (wav_bytes, sample_rate, 'wav') or (None, None, None).
+
+    ``speed`` is accepted for a uniform backend signature but ignored: piper's
+    length scale is baked into the downloaded voice."""
+    model = get_tts_model(backend=tts_backends.PIPER)
     if model is None:
-        return None, None
+        return None, None, None
 
     try:
-        import io
-        import wave
-
-        buf = io.BytesIO()
-        with wave.open(buf, 'wb') as wav_file:
-            wav_file.setnchannels(1)
-            wav_file.setsampwidth(2)  # 16-bit
-            wav_file.setframerate(_tts_sample_rate)
-            model.synthesize(text, wav_file)
-
-        return buf.getvalue(), _tts_sample_rate
+        sample_rate = _tts_sample_rates.get(tts_backends.PIPER, 22050)
+        wav_bytes = _wav_container(lambda wav_file: model.synthesize(text, wav_file), sample_rate)
+        return wav_bytes, sample_rate, "wav"
     except Exception as e:
         print(f"[TTS ERROR] Piper synthesis failed: {e}")
-        return None, None
+        return None, None, None
+
+
+def _synthesize_supertonic_tts(text, language="en", speed=1.0):
+    """Synthesize speech using supertonic (local). Returns (wav_bytes, sample_rate, 'wav') or (None, None, None).
+
+    One model covers 30 languages; anything outside them is synthesized
+    language-agnostically rather than refused."""
+    model = get_tts_model(backend=tts_backends.SUPERTONIC)
+    if model is None:
+        return None, None, None
+
+    try:
+        import numpy as np
+
+        settings = _tts_settings()
+        voice_name = settings.get("supertonic_voice") or tts_backends.DEFAULT_SUPERTONIC_VOICE
+        style = _get_supertonic_style(model, voice_name)
+
+        wav, _duration = model.synthesize(
+            text,
+            voice_style=style,
+            lang=tts_backends.supertonic_lang(language),
+            total_steps=tts_backends.clamp_supertonic_steps(settings.get("supertonic_steps")),
+            speed=tts_backends.clamp_supertonic_speed(speed),
+        )
+
+        # float32 (1, N) in [-1, 1] -> the 16-bit PCM the browser decodes
+        samples = np.clip(np.asarray(wav).reshape(-1), -1.0, 1.0)
+        pcm = (samples * 32767.0).astype("<i2").tobytes()
+        sample_rate = _tts_sample_rates.get(tts_backends.SUPERTONIC, model.sample_rate)
+        wav_bytes = _wav_container(lambda wav_file: wav_file.writeframes(pcm), sample_rate)
+        return wav_bytes, sample_rate, "wav"
+    except Exception as e:
+        print(f"[TTS ERROR] Supertonic synthesis failed: {e}")
+        return None, None, None
+
+
+_supertonic_styles = {}
+
+
+def _get_supertonic_style(model, voice_name):
+    """Voice style vectors for a preset, loaded once per voice."""
+    style = _supertonic_styles.get(voice_name)
+    if style is None:
+        style = model.get_voice_style(voice_name=voice_name)
+        _supertonic_styles[voice_name] = style
+    return style
 
 
 # EMA of TTS synthesis time (ms), surfaced on the health dashboard.
@@ -2188,22 +2355,24 @@ def _record_tts_ms(elapsed_ms, alpha=0.3):
         _tts_synth_ms_ema = elapsed_ms if prev is None else alpha * elapsed_ms + (1 - alpha) * prev
 
 
+_TTS_SYNTHESIZERS = {
+    tts_backends.EDGE: lambda text, language, speed: _synthesize_edge_tts(text, speed=speed),
+    tts_backends.PIPER: _synthesize_piper_tts,
+    tts_backends.SUPERTONIC: _synthesize_supertonic_tts,
+}
+
+
 def synthesize_tts(text, language="en"):
-    """Synthesize speech from text. Returns (audio_bytes, sample_rate) or (None, None).
-    Audio format: mp3 for edge-tts, wav for piper.
+    """Synthesize speech from text. Returns (audio_bytes, sample_rate, format) or (None, None, None).
+
+    The format is reported by the backend that produced the audio rather than
+    inferred by the caller.
     """
-    tts_config = config.get("live_translation", {}).get("tts", {})
-    speed = tts_config.get("speed", 1.0)
-    backend = _get_tts_backend()
+    speed = _tts_settings().get("speed", 1.0)
+    backend = tts_backends.get_backend(_get_tts_backend())
 
     _t0 = time.perf_counter()
-    if backend == "edge":
-        result = _synthesize_edge_tts(text, speed=speed)
-    elif backend == "piper":
-        result = _synthesize_piper_tts(text, language=language)
-    else:
-        print(f"[TTS ERROR] Unknown backend: {backend}")
-        return None, None
+    result = _TTS_SYNTHESIZERS[backend.id](text, language, speed)
     try:
         if result and result[0] is not None:
             _record_tts_ms((time.perf_counter() - _t0) * 1000.0)
@@ -7054,33 +7223,9 @@ def _apply_translation_language_switch(new_language):
     # Auto-switch TTS voice/model to match the new language
     new_tts_voice = None
     tts_section = config["live_translation"].setdefault("tts", {})
-    backend = tts_section.get("backend", "edge")
 
     if old_language != new_language:
-        if backend == "edge":
-            prefs = tts_section.setdefault("edge_voice_preferences", {})
-            current_voice = tts_section.get("edge_voice", "")
-            if current_voice:
-                prefs[old_language] = current_voice
-            new_tts_voice = prefs.get(new_language) or _pick_default_edge_voice(new_language)
-            if new_tts_voice:
-                tts_section["edge_voice"] = new_tts_voice
-                print(f"[TTS] Auto-switched edge voice: {current_voice} -> {new_tts_voice}")
-
-        elif backend == "piper":
-            prefs = tts_section.setdefault("piper_model_preferences", {})
-            current_model = tts_section.get("piper_model", "")
-            if current_model:
-                prefs[old_language] = current_model
-            new_tts_voice = prefs.get(new_language) or _pick_default_piper_model(new_language)
-            if new_tts_voice:
-                tts_section["piper_model"] = new_tts_voice
-                print(f"[TTS] Auto-switched piper model: {current_model} -> {new_tts_voice}")
-                # Reload piper model in background
-                def _reload():
-                    unload_tts_model()
-                    get_tts_model(model_name=new_tts_voice)
-                threading.Thread(target=_reload, daemon=True).start()
+        new_tts_voice = _switch_tts_voice_for_language(tts_section, old_language, new_language)
 
     save_config(config)
 
@@ -7129,7 +7274,7 @@ def _apply_translation_language_switch(new_language):
         "language_name": language_name,
     })
 
-    return old_language, new_tts_voice, backend
+    return old_language, new_tts_voice, tts_section.get("backend", tts_backends.DEFAULT_BACKEND)
 
 
 @app.route("/api/translation/language", methods=["POST"])
@@ -7894,28 +8039,8 @@ def translate_remote_language():
     # Auto-switch TTS voice/model on Machine B to match the new language
     new_tts_voice = None
     tts_section = config["live_translation"].setdefault("tts", {})
-    backend = tts_section.get("backend", "edge")
     if old_language != new_language:
-        if backend == "edge":
-            prefs = tts_section.setdefault("edge_voice_preferences", {})
-            current_voice = tts_section.get("edge_voice", "")
-            if current_voice:
-                prefs[old_language] = current_voice
-            new_tts_voice = prefs.get(new_language) or _pick_default_edge_voice(new_language)
-            if new_tts_voice:
-                tts_section["edge_voice"] = new_tts_voice
-        elif backend == "piper":
-            prefs = tts_section.setdefault("piper_model_preferences", {})
-            current_model = tts_section.get("piper_model", "")
-            if current_model:
-                prefs[old_language] = current_model
-            new_tts_voice = prefs.get(new_language) or _pick_default_piper_model(new_language)
-            if new_tts_voice:
-                tts_section["piper_model"] = new_tts_voice
-                def _reload():
-                    unload_tts_model()
-                    get_tts_model(model_name=new_tts_voice)
-                threading.Thread(target=_reload, daemon=True).start()
+        new_tts_voice = _switch_tts_voice_for_language(tts_section, old_language, new_language)
 
     save_config(config)
     language_name = TRANSLATION_LANGUAGES.get(new_language, new_language)
@@ -7962,12 +8087,12 @@ def translation_unpair_me():
 def get_tts_status():
     """Get TTS status for both edge-tts and piper backends"""
     tts_config = config.get("live_translation", {}).get("tts", {})
-    backend = _get_tts_backend()
+    backend = tts_backends.get_backend(_get_tts_backend())
 
     result = {
         "success": True,
         "enabled": tts_config.get("enabled", False),
-        "backend": backend,
+        "backend": backend.id,
         "model_loaded": is_tts_model_loaded(),
         "model_loading": is_tts_model_loading(),
         "downloading": _tts_download_status.get("status") == "downloading",
@@ -7976,20 +8101,16 @@ def get_tts_status():
         "synth_ms_ema": round(_tts_synth_ms_ema, 1) if _tts_synth_ms_ema is not None else None,
     }
 
-    if backend == "edge":
-        result["edge_voice"] = tts_config.get("edge_voice", "en-US-AriaNeural")
-        result["edge_available"] = True
-        try:
-            import edge_tts  # noqa: F401
-        except ImportError:
-            result["edge_available"] = False
-    elif backend == "piper":
-        result["piper_model"] = tts_config.get("piper_model", "")
-        result["piper_available"] = True
-        try:
-            import piper  # noqa: F401
-        except ImportError:
-            result["piper_available"] = False
+    # The active backend's selected voice and whether its package is installed,
+    # under backend-specific keys the settings page already reads.
+    result[backend.voice_key] = tts_config.get(backend.voice_key) or _default_voice_for(backend)
+    result[f"{backend.id}_available"] = importlib.util.find_spec(backend.import_name) is not None
+    if backend.id == tts_backends.SUPERTONIC:
+        result["supertonic_steps"] = tts_config.get("supertonic_steps", tts_backends.DEFAULT_SUPERTONIC_STEPS)
+        result["supertonic_downloaded"] = _is_supertonic_downloaded()
+        result["supertonic_language_supported"] = tts_backends.supertonic_supports(
+            config.get("live_translation", {}).get("target_language", "en")
+        )
 
     return jsonify(result)
 
@@ -8038,42 +8159,49 @@ def save_tts_settings():
     if "tts" not in config["live_translation"]:
         config["live_translation"]["tts"] = {}
 
-    old_enabled = config["live_translation"]["tts"].get("enabled", False)
-    old_backend = config["live_translation"]["tts"].get("backend", "edge")
-    old_piper_model = config["live_translation"]["tts"].get("piper_model", "")
+    tts_section = config["live_translation"]["tts"]
+    old_enabled = tts_section.get("enabled", False)
+    old_backend = tts_backends.get_backend(tts_section.get("backend"))
+    old_voice = tts_section.get(old_backend.voice_key, "")
 
-    allowed_keys = ["enabled", "backend", "edge_voice", "piper_model", "speed"]
+    voice_keys = [b.voice_key for b in tts_backends.BACKENDS.values()]
+    allowed_keys = ["enabled", "backend", "speed", "supertonic_steps", *voice_keys]
     for key in allowed_keys:
         if key in data:
-            config["live_translation"]["tts"][key] = data[key]
+            tts_section[key] = data[key]
 
     # Save manual voice/model selection as per-language preference
     target_lang = config.get("live_translation", {}).get("target_language", "en")
-    if data.get("edge_voice"):
-        prefs = config["live_translation"]["tts"].setdefault("edge_voice_preferences", {})
-        prefs[target_lang] = data["edge_voice"]
-    if data.get("piper_model"):
-        prefs = config["live_translation"]["tts"].setdefault("piper_model_preferences", {})
-        prefs[target_lang] = data["piper_model"]
+    for descriptor in tts_backends.BACKENDS.values():
+        if data.get(descriptor.voice_key):
+            prefs = tts_section.setdefault(descriptor.prefs_key, {})
+            prefs[target_lang] = data[descriptor.voice_key]
 
     save_config(config)
 
-    now_enabled = config["live_translation"]["tts"].get("enabled", False)
-    new_backend = config["live_translation"]["tts"].get("backend", "edge")
-    new_piper_model = config["live_translation"]["tts"].get("piper_model", "")
+    now_enabled = tts_section.get("enabled", False)
+    new_backend = tts_backends.get_backend(tts_section.get("backend"))
+    new_voice = tts_section.get(new_backend.voice_key, "")
 
-    # Handle piper model loading/unloading
-    if new_backend == "piper":
-        if not now_enabled and old_enabled:
-            threading.Thread(target=unload_tts_model, daemon=True).start()
-        elif now_enabled and (old_backend != "piper" or old_piper_model != new_piper_model):
-            def reload_piper():
-                unload_tts_model()
-                get_tts_model(model_name=new_piper_model)
-            threading.Thread(target=reload_piper, daemon=True).start()
-    elif old_backend == "piper":
-        # Switched away from piper, unload
-        threading.Thread(target=unload_tts_model, daemon=True).start()
+    # Load/unload local models around the change. Unloading is unconditional
+    # when the previous backend was local and is no longer the one in use, so
+    # switching piper -> supertonic doesn't leave piper's model resident.
+    def _apply_model_change():
+        if old_backend.is_local and (old_backend.id != new_backend.id or not now_enabled):
+            unload_tts_model(old_backend.id)
+        if not new_backend.is_local:
+            return
+        if not now_enabled:
+            unload_tts_model(new_backend.id)
+            return
+        # A voice change only needs a reload where the voice *is* the model
+        # (piper). Supertonic's presets are style files on top of one model.
+        voice_changed = old_voice != new_voice and new_backend.needs_per_language_model
+        if old_backend.id != new_backend.id or not old_enabled or voice_changed:
+            unload_tts_model(new_backend.id)
+            get_tts_model(backend=new_backend.id, model_name=new_voice)
+
+    threading.Thread(target=_apply_model_change, daemon=True).start()
 
     return jsonify({
         "success": True,
@@ -8100,15 +8228,56 @@ def _is_piper_model_downloaded(model_id):
     return False
 
 
+# ─── Supertonic TTS model management ────────────────────────────────────────
+#
+# One model covers every language it supports, so there is exactly one download
+# rather than a catalog. It still appears in the Model Manager list so the
+# operator downloads it the same way as a piper voice.
+
+SUPERTONIC_MODEL_ID = "supertonic-3"
+_SUPERTONIC_CATALOG_ENTRY = {
+    "id": SUPERTONIC_MODEL_ID,
+    "name": "Supertonic 3 (30 languages, one model)",
+    "language": "multi",
+    "quality": "high",
+    "size": "385MB",
+}
+
+
+def _get_supertonic_dir():
+    """Directory holding the supertonic assets."""
+    return os.path.join(_tts_cache_dir, "supertonic")
+
+
+def _is_supertonic_downloaded():
+    """Whether every ONNX module supertonic needs is present on disk."""
+    model_dir = _get_supertonic_dir()
+    if not os.path.isdir(model_dir):
+        return False
+    try:
+        from supertonic.loader import has_all_onnx_modules
+        return bool(has_all_onnx_modules(model_dir))
+    except Exception:
+        # Package missing or its layout changed - fall back to "are there onnx
+        # files here at all", which is what the UI actually needs to know.
+        onnx_dir = os.path.join(model_dir, "onnx")
+        return os.path.isdir(onnx_dir) and any(f.endswith(".onnx") for f in os.listdir(onnx_dir))
+
+
 @app.route("/api/models/tts-list", methods=["GET"])
 def list_tts_models_catalog():
-    """List TTS models (piper) with download status"""
+    """List downloadable TTS models (piper voices + supertonic) with download status"""
     try:
         models = []
         for m in _PIPER_MODELS_CATALOG:
             entry = dict(m)
+            entry["backend"] = tts_backends.PIPER
             entry["downloaded"] = _is_piper_model_downloaded(m["id"])
             models.append(entry)
+        supertonic_entry = dict(_SUPERTONIC_CATALOG_ENTRY)
+        supertonic_entry["backend"] = tts_backends.SUPERTONIC
+        supertonic_entry["downloaded"] = _is_supertonic_downloaded()
+        models.append(supertonic_entry)
         return jsonify({"success": True, "models": models})
     except Exception as e:
         return jsonify({"success": False, "error": str(e)}), 500
@@ -8125,6 +8294,9 @@ def download_tts_model():
     model_name = data.get("model_name", "").strip()
     if not model_name:
         return jsonify({"success": False, "error": "model_name required"}), 400
+
+    if model_name == SUPERTONIC_MODEL_ID:
+        return _download_supertonic_model()
 
     # Reject any name that would resolve outside the piper cache dir before it
     # reaches os.makedirs / download.
@@ -8195,6 +8367,64 @@ def download_tts_model():
     return jsonify({"success": True, "message": f"Downloading {model_name}..."})
 
 
+#: Rough download size, used only to give the progress bar a denominator.
+_SUPERTONIC_APPROX_BYTES = 385 * 1024 * 1024
+
+
+def _download_supertonic_model():
+    """Fetch the supertonic assets into models/tts/supertonic/.
+
+    The package pins the HuggingFace revision each release was tested against,
+    so the download goes through its own loader rather than hand-built URLs; the
+    progress bar rides the generic directory-size monitor over the temp dir it
+    stages into."""
+    global _tts_download_status
+
+    try:
+        from supertonic.loader import download_model
+    except ImportError:
+        return jsonify({"success": False, "error": "supertonic not installed. Run: pip install supertonic"}), 500
+
+    download_key = f"tts-{SUPERTONIC_MODEL_ID}"
+    if not try_register_download(download_key, total=_SUPERTONIC_APPROX_BYTES):
+        return jsonify({"success": False, "error": "Download already in progress"}), 409
+
+    def _do_download():
+        global _tts_download_status
+        _tts_download_status = {"status": "downloading", "model": SUPERTONIC_MODEL_ID, "error": ""}
+        model_dir = _get_supertonic_dir()
+        # download_model() stages into a sibling temp dir and moves on success,
+        # so that is where the bytes actually land while it runs.
+        staging_dir = os.path.join(os.path.dirname(model_dir), f".{os.path.basename(model_dir)}.tmp")
+        try:
+            os.makedirs(os.path.dirname(model_dir), exist_ok=True)
+            start_download_monitor(download_key, staging_dir, total=_SUPERTONIC_APPROX_BYTES)
+
+            print(f"[TTS] Downloading supertonic model to {model_dir}")
+            download_model(model_dir, model_name=SUPERTONIC_MODEL_ID)
+
+            if download_key in cancelled_downloads:
+                # download_model has no cancel hook, so the request lands and is
+                # then discarded — same end state, just not an early exit.
+                print("[TTS] Download cancelled: supertonic")
+                shutil.rmtree(model_dir, ignore_errors=True)
+                _tts_download_status = {"status": "failed", "model": SUPERTONIC_MODEL_ID, "error": "Cancelled"}
+                finish_download(download_key, cancelled=True)
+                return
+
+            print("[TTS] Supertonic model downloaded")
+            _tts_download_status = {"status": "completed", "model": SUPERTONIC_MODEL_ID, "error": ""}
+            finish_download(download_key)
+        except Exception as e:
+            print(f"[TTS ERROR] Supertonic download failed: {e}")
+            shutil.rmtree(staging_dir, ignore_errors=True)
+            _tts_download_status = {"status": "failed", "model": SUPERTONIC_MODEL_ID, "error": str(e)}
+            finish_download(download_key, error=e)
+
+    threading.Thread(target=_do_download, daemon=True).start()
+    return jsonify({"success": True, "message": f"Downloading {SUPERTONIC_MODEL_ID}..."})
+
+
 @app.route("/api/models/tts/download-progress", methods=["GET"])
 def tts_download_progress():
     """Get TTS model download progress"""
@@ -8212,17 +8442,26 @@ def remove_tts_model():
     if not model_name:
         return jsonify({"success": False, "error": "model_name required"}), 400
 
-    # Unload if this is the currently loaded model
     tts_config = config.get("live_translation", {}).get("tts", {})
+
+    if model_name == SUPERTONIC_MODEL_ID:
+        unload_tts_model(tts_backends.SUPERTONIC)
+        _supertonic_styles.clear()
+        model_dir = _get_supertonic_dir()
+        if not os.path.isdir(model_dir):
+            return jsonify({"success": False, "error": "Model not found on disk"})
+        shutil.rmtree(model_dir, ignore_errors=True)
+        return jsonify({"success": True, "message": f"Removed {model_name}"})
+
+    # Unload if this is the currently loaded model
     if tts_config.get("piper_model") == model_name and is_tts_model_loaded():
-        unload_tts_model()
+        unload_tts_model(tts_backends.PIPER)
 
     try:
         model_dir = _get_piper_model_dir(model_name)
         if model_dir is None:
             return jsonify({"success": False, "error": "Invalid model name"}), 400
         if os.path.isdir(model_dir):
-            import shutil
             shutil.rmtree(model_dir, ignore_errors=True)
             return jsonify({"success": True, "message": f"Removed {model_name}"})
         return jsonify({"success": False, "error": "Model not found on disk"})
@@ -8233,22 +8472,26 @@ def remove_tts_model():
 @app.route("/api/tts/models", methods=["GET"])
 def list_tts_models():
     """List available TTS voices/models for the active backend"""
-    backend = _get_tts_backend()
-    if backend == "edge":
-        # Return edge-tts voices
-        lang_filter = request.args.get("language", "").strip().lower()
-        voices = get_edge_tts_voices()
-        result = []
-        for v in voices:
-            locale = v.get("Locale", "").lower()
-            if lang_filter and not locale.startswith(lang_filter):
-                continue
-            result.append(v.get("ShortName", ""))
-        return jsonify({"success": True, "models": result})
-    else:
-        # Return piper models
+    backend = tts_backends.get_backend(_get_tts_backend())
+
+    if backend.id == tts_backends.SUPERTONIC:
+        # Presets, not downloads — but only once the one model is on disk.
+        models = [v["id"] for v in tts_backends.SUPERTONIC_VOICES] if _is_supertonic_downloaded() else []
+        return jsonify({"success": True, "models": models})
+
+    if backend.id == tts_backends.PIPER:
         models = [m["id"] for m in _PIPER_MODELS_CATALOG if _is_piper_model_downloaded(m["id"])]
         return jsonify({"success": True, "models": models})
+
+    # Edge-tts voices, optionally filtered by language
+    lang_filter = request.args.get("language", "").strip().lower()
+    result = []
+    for v in get_edge_tts_voices():
+        locale = v.get("Locale", "").lower()
+        if lang_filter and not locale.startswith(lang_filter):
+            continue
+        result.append(v.get("ShortName", ""))
+    return jsonify({"success": True, "models": result})
 
 
 # Proxy endpoints — forward browser requests to Machine B server-side (avoids CORS)
@@ -13574,6 +13817,16 @@ def list_models():
                     }
                 )
 
+        if _is_supertonic_downloaded():
+            downloaded_models.append(
+                {
+                    "name": _SUPERTONIC_CATALOG_ENTRY["name"],
+                    "type": "supertonic",
+                    "path": _get_supertonic_dir(),
+                    "directory": SUPERTONIC_MODEL_ID,
+                }
+            )
+
         return jsonify(
             {
                 "success": True,
@@ -13595,10 +13848,15 @@ def remove_model():
     try:
         data = request.get_json()
         model_name = data.get("model_name")
-        model_type = data.get("model_type")  # 'whisper', 'huggingface', 'local'
+        model_type = data.get("model_type")  # 'whisper', 'huggingface', 'local', 'piper', 'supertonic'
 
         if not model_name:
             return jsonify({"success": False, "error": "Model name is required"})
+
+        if model_type in (tts_backends.PIPER, tts_backends.SUPERTONIC):
+            # TTS models live under models/tts/, not MODELS_DIR, and may be
+            # loaded — hand them to the TTS removal path, which unloads first.
+            return remove_tts_model()
 
         if model_type == "whisper":
             # Can't remove built-in Whisper models
@@ -16563,7 +16821,7 @@ def emit_tts_audio():
                         continue
 
                     try:
-                        audio_bytes, sample_rate = synthesize_tts(combined_text, language=target_lang)
+                        audio_bytes, sample_rate, audio_format = synthesize_tts(combined_text, language=target_lang)
                     except Exception as synth_err:
                         # Drop the buffered text: retrying the same input every
                         # cycle would loop forever on a persistent failure
@@ -16571,8 +16829,6 @@ def emit_tts_audio():
                         _tts_buffer.clear()
                         continue
                     if audio_bytes:
-                        backend = _get_tts_backend()
-                        audio_format = "mp3" if backend == "edge" else "wav"
                         audio_b64 = base64.b64encode(audio_bytes).decode('ascii')
                         socketio.emit("tts_audio", {
                             "segment_id": _tts_buffer[-1]["id"],

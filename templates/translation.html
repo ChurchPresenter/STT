@@ -502,7 +502,8 @@
                     <label for="tts_backend">TTS Backend</label>
                     <select id="tts_backend" onchange="toggleTTSBackendUI()">
                         <option value="edge">Edge TTS (Cloud - Microsoft, 400+ voices)</option>
-                        <option value="piper">Piper (Local/Offline)</option>
+                        <option value="piper">Piper (Local/Offline, one model per language)</option>
+                        <option value="supertonic">Supertonic (Local/Offline, 30 languages in one model)</option>
                     </select>
                 </div>
 
@@ -530,6 +531,23 @@
                         </select>
                         <small>Download models from <a href="/model-manager" style="color: var(--accent);">Model Manager</a></small>
                     </div>
+                </div>
+
+                <!-- Supertonic TTS options -->
+                <div id="tts_supertonic_options" style="display: none;">
+                    <div class="form-group">
+                        <label for="tts_supertonic_voice">Voice</label>
+                        <select id="tts_supertonic_voice">
+                            <option value="">Model not downloaded</option>
+                        </select>
+                        <small>One model speaks all 30 supported languages — the voice doesn't change when you switch language. Download it from <a href="/model-manager" style="color: var(--accent);">Model Manager</a>.</small>
+                    </div>
+                    <div class="form-group">
+                        <label for="tts_supertonic_steps">Quality: <span id="tts_supertonic_steps_value">8 steps</span></label>
+                        <input type="range" id="tts_supertonic_steps" min="5" max="12" step="1" value="8" oninput="document.getElementById('tts_supertonic_steps_value').textContent = this.value + ' steps'">
+                        <small>More denoising steps sounds better and synthesizes slower.</small>
+                    </div>
+                    <p id="tts_supertonic_lang_warning" style="display: none; color: var(--warning); margin: 0;"></p>
                 </div>
 
                 <div class="form-group">
@@ -1949,10 +1967,14 @@
         // TTS Settings
         // =====================================================================
 
+        const TTS_BACKENDS = ['edge', 'piper', 'supertonic'];
+
         function toggleTTSBackendUI() {
             const backend = document.getElementById('tts_backend').value;
-            document.getElementById('tts_edge_options').style.display = backend === 'edge' ? '' : 'none';
-            document.getElementById('tts_piper_options').style.display = backend === 'piper' ? '' : 'none';
+            for (const id of TTS_BACKENDS) {
+                const el = document.getElementById('tts_' + id + '_options');
+                if (el) el.style.display = id === backend ? '' : 'none';
+            }
         }
 
         let _edgeVoicesLoaded = false;
@@ -1998,7 +2020,7 @@
                 if (data.success) {
                     const sel = document.getElementById('tts_piper_model');
                     sel.innerHTML = '';
-                    const downloaded = data.models.filter(m => m.downloaded);
+                    const downloaded = data.models.filter(m => m.downloaded && m.backend === 'piper');
                     if (downloaded.length === 0) {
                         sel.innerHTML = '<option value="">No models downloaded - visit Model Manager</option>';
                     } else {
@@ -2012,6 +2034,29 @@
                 }
             } catch (e) {
                 console.error('Error loading piper models:', e);
+            }
+        }
+
+        async function loadSupertonicVoices(selectedVoice) {
+            const sel = document.getElementById('tts_supertonic_voice');
+            try {
+                const resp = await fetch('/api/tts/models');
+                const data = await resp.json();
+                sel.innerHTML = '';
+                if (data.success && data.models && data.models.length > 0) {
+                    for (const id of data.models) {
+                        const opt = document.createElement('option');
+                        opt.value = id;
+                        opt.textContent = id + (id[0] === 'F' ? ' (female)' : ' (male)');
+                        sel.appendChild(opt);
+                    }
+                    if (selectedVoice) sel.value = selectedVoice;
+                } else {
+                    sel.innerHTML = '<option value="">Model not downloaded - visit Model Manager</option>';
+                }
+            } catch (e) {
+                console.error('Error loading supertonic voices:', e);
+                sel.innerHTML = '<option value="">Failed to load voices</option>';
             }
         }
 
@@ -2039,6 +2084,18 @@
                         if (data.piper_model) {
                             document.getElementById('tts_piper_model').value = data.piper_model;
                         }
+                    } else if (backend === 'supertonic') {
+                        await loadSupertonicVoices(data.supertonic_voice);
+                        const steps = data.supertonic_steps || 8;
+                        document.getElementById('tts_supertonic_steps').value = steps;
+                        document.getElementById('tts_supertonic_steps_value').textContent = steps + ' steps';
+                        const warn = document.getElementById('tts_supertonic_lang_warning');
+                        if (data.supertonic_language_supported === false) {
+                            warn.textContent = 'This model was not trained on the current target language — it will be read phonetically, which may sound wrong. Piper has a local voice for Chinese.';
+                            warn.style.display = '';
+                        } else {
+                            warn.style.display = 'none';
+                        }
                     }
 
                     // Update status
@@ -2055,8 +2112,11 @@
                     } else if (backend === 'edge') {
                         statusEl.textContent = 'Edge TTS ready (cloud)';
                         statusEl.style.color = 'var(--success)';
+                    } else if (backend === 'supertonic' && data.supertonic_downloaded === false) {
+                        statusEl.textContent = 'Model not downloaded - visit Model Manager';
+                        statusEl.style.color = 'var(--warning)';
                     } else if (data.model_loaded) {
-                        statusEl.textContent = 'Piper model loaded';
+                        statusEl.textContent = (backend === 'piper' ? 'Piper' : 'Supertonic') + ' model loaded';
                         statusEl.style.color = 'var(--success)';
                     } else {
                         statusEl.textContent = 'Enabled (model loads on first use)';
@@ -2080,6 +2140,9 @@
                 settings.edge_voice = document.getElementById('tts_edge_voice').value;
             } else if (backend === 'piper') {
                 settings.piper_model = document.getElementById('tts_piper_model').value;
+            } else if (backend === 'supertonic') {
+                settings.supertonic_voice = document.getElementById('tts_supertonic_voice').value;
+                settings.supertonic_steps = parseInt(document.getElementById('tts_supertonic_steps').value, 10);
             }
 
             try {
