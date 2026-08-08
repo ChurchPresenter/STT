@@ -1593,10 +1593,24 @@
             const repo = document.getElementById('llm_gguf_repo').value;
             const sel = document.getElementById('llm_gguf_file');
             const files = llmGgufModels[repo] || [];
+            // /api/models/gguf-list returns {name, size_bytes} objects, not
+            // strings. Rendering the object put "[object Object]" in the option
+            // VALUE as well as its label, so saving wrote that into
+            // llm.gguf_file and the local model silently stopped resolving.
             sel.innerHTML = files.length
-                ? files.map(f => `<option value="${escapeHtml(f)}">${escapeHtml(f)}</option>`).join('')
+                ? files.map(f => `<option value="${escapeHtml(f.name)}">${escapeHtml(f.name)}` +
+                    (f.size_bytes ? ` — ${(f.size_bytes / 1e9).toFixed(1)} GB` : '') + '</option>').join('')
                 : '<option value="">No files found</option>';
-            if (selectFile && files.includes(selectFile)) sel.value = selectFile;
+            // Keep a configured file visible even when it isn't in this repo, so
+            // a stale or broken setting is named on screen instead of silently
+            // switching to whatever happens to be first.
+            if (selectFile && !files.some(f => f.name === selectFile)) {
+                const missing = document.createElement('option');
+                missing.value = selectFile;
+                missing.textContent = selectFile + ' (not downloaded)';
+                sel.insertBefore(missing, sel.firstChild);
+            }
+            if (selectFile) sel.value = selectFile;
         }
 
         async function loadLlmModels(selectRepo, selectFile) {
