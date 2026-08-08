@@ -420,10 +420,15 @@
                 <small style="color: #999; display: block; margin: -4px 0 8px 24px;">Hear the microphone audio through the browser</small>
 
                 <div class="checkbox-group">
-                    <input type="checkbox" id="url_ttsAudio" oninput="updateCustomURL()">
+                    <input type="checkbox" id="url_ttsAudio" oninput="updateCustomURL(); checkTtsEnabled();">
                     <label for="url_ttsAudio">Enable TTS for Translation</label>
                 </div>
                 <small style="color: #999; display: block; margin: -4px 0 8px 24px;">Speak translated text using TTS engine (configure in Translation settings)</small>
+                <!-- This parameter only makes the display join the TTS audio room; with
+                     TTS switched off server-side the result is silence and no explanation. -->
+                <small id="tts_disabled_notice" style="display: none; color: var(--warning); margin: -4px 0 8px 24px;">
+                    ⚠️ TTS is turned off in <a href="/translation" style="color: inherit; text-decoration: underline;">Translation settings</a> — this option has no effect until you enable it there.
+                </small>
 
                 <h3 style="margin-top: 16px;">🌐 Translation Display</h3>
 
@@ -1184,6 +1189,21 @@
                 });
         }
 
+        // ttsAudio=true only subscribes the display to the audio room — it cannot
+        // turn TTS on. Say so here rather than letting the operator discover it as
+        // silence during a service. Advisory only: the checkbox stays usable, since
+        // building the URL before enabling TTS is a reasonable order of operations.
+        function checkTtsEnabled() {
+            fetch('/api/tts/status')
+                .then(r => r.json())
+                .then(data => {
+                    const notice = document.getElementById('tts_disabled_notice');
+                    if (!notice) return;
+                    notice.style.display = (data && data.success && data.enabled) ? 'none' : 'block';
+                })
+                .catch(() => {});  // advisory — a failed probe just leaves it hidden
+        }
+
         function checkTranslateInProgressEnabled() {
             fetch('/api/translation/settings')
                 .then(r => r.json())
@@ -1212,6 +1232,7 @@
             // keeps "Save as Default" a one-way action: it sets what "/" shows, without
             // turning the builder into an editor of its own last-saved state.
             checkTranslateInProgressEnabled();
+            checkTtsEnabled();
             loadProfiles();
 
             updateCustomURL();
