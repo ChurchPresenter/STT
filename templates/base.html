@@ -723,6 +723,20 @@
             line-height: 1.6;
         }
 
+        /* Completes the set alongside .info-box / .warning-box / .success-box.
+           .alert.error can't serve here: it defaults to display:none and needs
+           a .show class, so a caller that toggles style.display gets nothing. */
+        .danger-box {
+            background: var(--danger-bg);
+            border: 1px solid var(--danger);
+            color: var(--danger);
+            padding: 11px 14px;
+            border-radius: var(--radius-sm);
+            margin-top: 10px;
+            font-size: var(--fs-xs);
+            line-height: 1.6;
+        }
+
         /* Status Indicators */
         .status-indicator {
             display: inline-flex;

@@ -1196,14 +1196,17 @@
             font-size: 0.9em;
             margin-bottom: 25px;
         }
+        /* Literal colours, not var(--...): this block is a standalone exported
+           HTML file that ships without the app's stylesheet, so a custom
+           property here resolves to nothing and the rule is dropped. */
         .segment {
             margin: 12px 0;
             padding: 10px 15px;
-            background: var(--bg-elevated);
+            background: #242424;
             border-radius: 6px;
-            border-left: 3px solid #3a3a3a;
+            border: 1px solid #3a3a3a;
         }
-        .segment:hover { border-left-color: var(--accent); }
+        .segment:hover { border-color: #2979FF; }
         .timestamp {
             color: #888;
             font-size: 0.9em;

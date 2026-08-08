@@ -59,9 +59,15 @@
       .seg-card.denied { opacity: 0.45; border-color: var(--danger); }
       .seg-card.denied .seg-original,
       .seg-card.denied .seg-translated { text-decoration: line-through; }
-      /* Marked = manual bookmark (persisted in the session DB); accent stripe
-         so flagged segments stand out while scrolling. */
-      .seg-card.marked { border-left: 3px solid var(--warning); }
+      /* Marked = manual bookmark (persisted in the session DB). A leading icon
+         rather than colour: a card can be marked AND low-confidence or denied,
+         and any tint or border colour here would mask those — which is what the
+         old left stripe avoided by being orthogonal to the border. */
+      .seg-card.marked { position: relative; padding-left: 34px; }
+      .seg-card.marked::before {
+        content: "🔖"; position: absolute; left: 11px; top: 10px;
+        font-size: 0.9em; line-height: 1.4;
+      }
 
       /* Per-card actions row (Deny / Restore on finalized segments) */
       .seg-actions { display: flex; align-items: center; gap: 8px; margin-top: 4px; }
