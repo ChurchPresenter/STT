@@ -450,6 +450,12 @@
                         <div id="tunnel-url-row" style="display: none; align-items: center; gap: 8px; margin-bottom: 10px;">
                             <a id="tunnel-url" href="#" target="_blank" rel="noopener noreferrer" style="color: var(--accent); word-break: break-all; font-family: monospace; font-size: 0.88em;"></a>
                         </div>
+                        <!-- Share links per saved view. The bare URL lands on whichever
+                             profile is active, which is rarely the one you mean to share. -->
+                        <div id="tunnel-profiles" style="display: none; margin-bottom: 10px;">
+                            <div style="font-size: 0.8em; color: var(--text-secondary); margin-bottom: 6px;">Share a specific view:</div>
+                            <div id="tunnel-profiles-list" style="display: flex; flex-direction: column; gap: 6px;"></div>
+                        </div>
                         <div id="tunnel-error" style="display: none; color: var(--danger); font-size: 0.82em; margin-bottom: 10px; word-break: break-word;"></div>
                         <div id="tunnel-startup-warning" style="display: none; color: var(--warning); font-size: 0.8em; margin-bottom: 10px; word-break: break-word;"></div>
                         <div class="warning-box">
@@ -728,7 +734,9 @@
             if (!btn || btn.dataset.copying) return;
             const original = btn.textContent;
             btn.dataset.copying = '1';
-            btn.textContent = label || '✅';
+            // A word, not a glyph: this page is read on a phone through the
+            // tunnel, where a bare ✅ renders as an empty box.
+            btn.textContent = label || 'Copied!';
             setTimeout(() => {
                 btn.textContent = original;
                 delete btn.dataset.copying;
@@ -804,6 +812,7 @@
             } else {
                 urlRow.style.display = 'none';
             }
+            renderTunnelProfiles();
 
             if (data.error) {
                 errEl.textContent = data.error;
@@ -898,6 +907,85 @@
         function copyTunnelUrl(btn) {
             if (!_tunnelUrl) return;
             copyEndpoint(_tunnelUrl, btn);
+        }
+
+        let _urlProfiles = null;
+
+        // Share links use /profile/<name> rather than the bare URL with a query
+        // string: short enough to paste into a message, ungated so the recipient
+        // needs no login, and it keeps working if the profile's parameters are
+        // edited later — a captured query string would not.
+        function profileShareUrl(name) {
+            return _tunnelUrl + '/profile/' + encodeURIComponent(name);
+        }
+
+        function copyProfileLink(name, btn) {
+            if (!_tunnelUrl) return;
+            copyEndpoint(profileShareUrl(name), btn);
+        }
+
+        async function loadUrlProfiles() {
+            if (_urlProfiles) return _urlProfiles;
+            try {
+                const resp = await fetch('/api/url-builder/profiles');
+                const data = await resp.json();
+                if (data.success) {
+                    _urlProfiles = { profiles: data.profiles || [], active: data.active || '' };
+                }
+            } catch (e) {
+                console.error('Error loading URL profiles:', e);
+            }
+            return _urlProfiles;
+        }
+
+        async function renderTunnelProfiles() {
+            const wrap = document.getElementById('tunnel-profiles');
+            const list = document.getElementById('tunnel-profiles-list');
+            // No tunnel, no links — never offer a link to something that is gone.
+            if (!_tunnelUrl) { wrap.style.display = 'none'; return; }
+
+            const data = await loadUrlProfiles();
+            if (!data) { wrap.style.display = 'none'; return; }
+
+            wrap.style.display = '';
+            if (!data.profiles.length) {
+                list.innerHTML = '<div style="font-size: 0.8em; color: var(--text-muted);">'
+                    + 'No saved views yet — create one in the '
+                    + '<a href="/url-builder" style="color: var(--accent);">URL Builder</a>.</div>';
+                return;
+            }
+
+            list.innerHTML = '';
+            for (const p of data.profiles) {
+                const row = document.createElement('div');
+                row.style.cssText = 'display: flex; align-items: center; gap: 8px; flex-wrap: wrap;';
+
+                const name = document.createElement('span');
+                name.textContent = p.name;
+                name.style.cssText = 'font-size: 0.85em; color: var(--text-primary);';
+                row.appendChild(name);
+
+                if (p.name === data.active) {
+                    // The bare URL resolves here, so say which one it is —
+                    // otherwise it is easy to share the same view twice.
+                    const badge = document.createElement('span');
+                    badge.textContent = 'default';
+                    badge.style.cssText = 'font-size: 0.7em; background: var(--bg-elevated); '
+                        + 'color: var(--text-secondary); padding: 1px 6px; border-radius: var(--radius-sm);';
+                    row.appendChild(badge);
+                }
+
+                const btn = document.createElement('button');
+                btn.type = 'button';
+                btn.textContent = 'Copy link';
+                btn.className = 'btn-save';
+                btn.style.cssText = 'background: var(--bg-elevated); color: var(--text-primary); '
+                    + 'flex: 0 0 auto; width: auto; margin: 0 0 0 auto; padding: 3px 10px; font-size: 0.8em;';
+                btn.addEventListener('click', () => copyProfileLink(p.name, btn));
+                row.appendChild(btn);
+
+                list.appendChild(row);
+            }
         }
 
         // Copy endpoint URL to clipboard
