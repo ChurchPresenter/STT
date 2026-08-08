@@ -744,7 +744,27 @@ def _paired_client_ok(ip=None):
     )
     if decision.authorized and decision.rebind_from:
         _rebind_trusted_client(decision.rebind_from, client_ip)
+    if not decision.authorized:
+        _log_pair_refusal(client_ip, decision.reason)
     return decision.authorized
+
+
+def _log_pair_refusal(client_ip, reason):
+    """Say out loud why a would-be paired machine was turned away.
+
+    The reason never goes back over HTTP — telling an unauthenticated caller
+    which half of the check it failed is a gift to whoever is guessing. But
+    discarding it entirely meant B could refuse its own paired A on every call
+    and no log anywhere said so: the machine looked simply unreachable, and
+    finding the truth took a packet-level diagnosis across both boxes. So it is
+    written here, where only the operator can read it, and thinned through the
+    same suppressor as refused HTTP so a peer that retries cannot flood the log.
+    """
+    try:
+        if _pair_refusal_log_filter.decide((client_ip, reason)).log:
+            print(f"[PAIR] Refused {client_ip}: {reason}")
+    except Exception:
+        pass  # a diagnostic must never be the thing that breaks a request
 
 
 def _rebind_trusted_client(old_ip, new_ip):
@@ -1274,9 +1294,7 @@ def _fetch_remote_provenance():
     if not endpoint:
         return {}
     try:
-        import requests as _req
-        r = _req.get(endpoint + "/api/translation/status",
-                     headers=_remote_auth_headers(), timeout=5)
+        r = _peer_request("GET", endpoint, "/api/translation/status", timeout=5)
         provenance = _remote_provenance(r.json())
     except Exception as e:
         print(f"[SESSION-META] Could not read remote translation provenance: {e}")
@@ -4277,6 +4295,7 @@ socketio = SocketIO(app, async_mode="threading", static_url_path="/static", stat
 # Viewed at /logs (page) and /api/logs (JSON). Thin wrapper over stt.request_log.
 from stt import request_log as _request_log  # noqa: E402
 from stt import repeat_filter as _repeat_filter  # noqa: E402
+from stt import file_backup as _file_backup  # noqa: E402
 from stt import metrics as _metrics  # noqa: E402
 from stt import audio_file as _audio_file  # noqa: E402
 from stt.hypothesis_buffer import LocalAgreementBuffer  # noqa: E402
@@ -4915,6 +4934,11 @@ def _note_access_detail(detail):
 # and is what someone reads to work out why.
 _REFUSAL_STATUSES = (401, 403, 404)
 _refusal_log_filter = _repeat_filter.RepeatSuppressor()
+
+#: Why a paired-peer request was refused — see _log_pair_refusal. Its own
+#: suppressor, because a peer retrying every 20s is a different rhythm from a
+#: browser polling, and one must not use up the other's burst allowance.
+_pair_refusal_log_filter = _repeat_filter.RepeatSuppressor()
 
 
 def _refusal_log_verdict(path, status, ip):
@@ -6929,17 +6953,18 @@ def get_health():
 def get_health_remote():
     """Proxy the remote translation machine's ("Machine B") /api/health so the
     local dashboard can show its metrics too. Kept separate from /api/health so
-    a slow or unreachable remote never stalls the local poll. IP-trusted on the
-    remote side, so no auth token is forwarded."""
+    a slow or unreachable remote never stalls the local poll. Authenticated like
+    every other peer call: B refuses a paired address that holds a token unless
+    the token is presented, so an unauthenticated poll here reads as "Machine B
+    is down" while the machine is perfectly healthy."""
     if not check_ip_whitelist():
         return jsonify({"success": False, "error": "Access Denied"}), 403
     endpoint = _safe(_get_remote_endpoint_safe)
     if not endpoint:
         return jsonify({"success": False, "error": "No remote endpoint configured",
                         "configured": False}), 200
-    import requests as _req
     try:
-        r = _req.get(endpoint.rstrip("/") + "/api/health", timeout=3)
+        r = _peer_request("GET", endpoint, "/api/health", timeout=3)
         try:
             data = r.json()
         except ValueError:
@@ -7223,10 +7248,8 @@ def _propagate_dictionary_to_remote():
             ep = _get_remote_endpoint_safe()
             if not ep:
                 return
-            _get_remote_http_session().post(
-                ep.rstrip("/") + "/api/translate/sync-dictionary",
-                json=payload, headers=_remote_auth_headers(), timeout=5,
-            )
+            _peer_request("POST", ep, "/api/translate/sync-dictionary",
+                          json=payload, timeout=5)
         except Exception as e:
             print(f"[REMOTE] Could not propagate dictionary to remote: {e}")
 
@@ -7286,6 +7309,80 @@ def _forget_remote_pair_token():
         save_config(config)
 
 
+def _store_remote_pair_token(token):
+    """Put a token back after a re-claim attempt failed, so a refusal that had
+    nothing to do with pairing does not cost us the one we already had."""
+    if not token:
+        return
+    config.setdefault("live_translation", {}).setdefault("remote", {})["token"] = token
+    save_config(config)
+
+
+#: Shortest gap between two token re-claims. A B that refuses us for a reason
+#: re-pairing cannot fix (it has forgotten our address entirely) must not turn
+#: every peer call into a claim attempt — one a minute is enough to recover
+#: within a heartbeat while costing nothing when it cannot.
+_PEER_RECLAIM_MIN_INTERVAL = 60.0
+_peer_reclaim_last = 0.0
+_peer_reclaim_lock = threading.Lock()
+
+
+def _peer_reclaim_allowed():
+    """Whether enough time has passed to try re-claiming a token again."""
+    global _peer_reclaim_last
+    now = time.time()
+    with _peer_reclaim_lock:
+        if now - _peer_reclaim_last < _PEER_RECLAIM_MIN_INTERVAL:
+            return False
+        _peer_reclaim_last = now
+        return True
+
+
+def _peer_request(method, endpoint, path, self_heal=True, **kwargs):
+    """Every call this machine makes to its paired Machine B.
+
+    One door, for two reasons. It attaches the bearer token, so no call site can
+    forget it — two of them had, and B refuses a paired address that holds a
+    token unless the token is presented (see stt/pair_tokens.authorize), so the
+    calls that forgot were refused while the ones beside them worked.
+
+    And it heals the deadlock. If B has forgotten our token — its config
+    restored from a backup, hand-edited, the machine re-imaged — then what we
+    hold is an *unknown* token, which authorize() refuses outright and never
+    downgrades to the address path. B would happily issue a new one, but we
+    never asked for it, because we only claim when holding none. That left a
+    pairing that no longer worked and could only be repaired by an operator at
+    B's keyboard, mid-service. So a 403 makes us drop the token and claim a
+    fresh one, once, before retrying.
+
+    ``self_heal=False`` for the pairing handshake itself, which runs before any
+    token exists and must not recurse into claiming one.
+    """
+    url = endpoint.rstrip("/") + path
+    caller_headers = dict(kwargs.pop("headers", None) or {})
+    session = _get_remote_http_session()
+
+    def _send():
+        headers = dict(caller_headers)
+        headers.update(_remote_auth_headers())
+        return session.request(method, url, headers=headers, **kwargs)
+
+    response = _send()
+    if response.status_code != 403 or not self_heal:
+        return response
+
+    # Only the token can be at fault here, and only re-claiming can fix it.
+    previous = _remote_pair_token()
+    if not _peer_reclaim_allowed():
+        return response
+    _forget_remote_pair_token()  # B rejects it while we present it, so ask unauthenticated
+    if not _claim_remote_pair_token(endpoint, force=True):
+        _store_remote_pair_token(previous)
+        return response
+    print(f"[PAIR] Remote refused {path}; re-claimed a pairing token and retried")
+    return _send()
+
+
 def _remote_heartbeat_loop():
     """On a machine that offloads translation, ping the paired remote server
     every ~20s while transcription is running, so the server knows this machine
@@ -7308,12 +7405,10 @@ def _remote_heartbeat_loop():
             # Tell B which port this machine's own UI is on. B sees only our IP
             # (request.remote_addr), so without this it cannot offer a link back
             # to us and would have to guess port 80.
-            _get_remote_http_session().post(
-                ep.rstrip("/") + "/api/translate/heartbeat",
-                json={"port": coerce_int(config.get("web_server", {}).get("port"), 8080,
-                                         lo=1, hi=65535)},
-                headers=_remote_auth_headers(),
-                timeout=5)
+            _peer_request("POST", ep, "/api/translate/heartbeat",
+                          json={"port": coerce_int(config.get("web_server", {}).get("port"),
+                                                   8080, lo=1, hi=65535)},
+                          timeout=5)
         except Exception:
             pass  # best-effort; never let the heartbeat crash
 
@@ -7384,13 +7479,8 @@ def _apply_translation_language_switch(new_language):
         _remote_ep = _get_remote_endpoint_safe()
         if _remote_ep:
             try:
-                import requests as _req
-                _req.post(
-                    _remote_ep.rstrip("/") + "/api/translate/language",
-                    json={"target_language": new_language},
-                    headers=_remote_auth_headers(),
-                    timeout=5,
-                )
+                _peer_request("POST", _remote_ep, "/api/translate/language",
+                              json={"target_language": new_language}, timeout=5)
             except Exception as _e:
                 print(f"[HOT-SWITCH] Could not notify remote server of language change: {_e}")
 
@@ -8706,8 +8796,7 @@ def _check_remote_reachable(endpoint, timeout=1.5, ttl=5.0):
         if cached and (now - cached[1]) < ttl:
             return cached[0]
     try:
-        r = _get_remote_http_session().get(endpoint.rstrip("/") + "/api/translation/status",
-                                           headers=_remote_auth_headers(), timeout=timeout)
+        r = _peer_request("GET", endpoint, "/api/translation/status", timeout=timeout)
         reachable = r.status_code == 200
     except Exception:
         reachable = False
@@ -8760,10 +8849,8 @@ def proxy_remote_translation_status():
         return jsonify({"success": False, "error": str(e)}), 502
     if not endpoint:
         return jsonify({"success": False, "error": "No remote endpoint configured"}), 400
-    import requests as _req
     try:
-        r = _req.get(endpoint + "/api/translation/status",
-                     headers=_remote_auth_headers(), timeout=5)
+        r = _peer_request("GET", endpoint, "/api/translation/status", timeout=5)
         try:
             data = r.json()
         except ValueError:
@@ -8784,11 +8871,12 @@ def proxy_pair_request():
         return jsonify({"error": str(e)}), 502
     if not endpoint:
         return jsonify({"success": False, "error": "No remote endpoint configured"}), 400
-    import requests as _req
     try:
-        r = _req.post(endpoint + "/api/translate/pair/request",
-                      json={"port": coerce_int(config.get("web_server", {}).get("port"),
-                                               8080, lo=1, hi=65535)}, timeout=10)
+        # self_heal=False: pairing runs before any token exists, so a refusal
+        # here means "not paired yet", not "our token went stale".
+        r = _peer_request("POST", endpoint, "/api/translate/pair/request", self_heal=False,
+                          json={"port": coerce_int(config.get("web_server", {}).get("port"),
+                                                   8080, lo=1, hi=65535)}, timeout=10)
         try:
             data = r.json()
         except ValueError:
@@ -8809,7 +8897,6 @@ def proxy_pair_confirm():
         return jsonify({"error": str(e)}), 502
     if not endpoint:
         return jsonify({"success": False, "error": "No remote endpoint configured"}), 400
-    import requests as _req
     try:
         # Tell B where this machine's own UI lives while we have its attention:
         # after this exchange B only ever sees our IP, and a durable port means it
@@ -8817,7 +8904,8 @@ def proxy_pair_confirm():
         _body = dict(request.get_json() or {})
         _body.setdefault("port", coerce_int(config.get("web_server", {}).get("port"),
                                             8080, lo=1, hi=65535))
-        r = _req.post(endpoint + "/api/translate/pair/confirm", json=_body, timeout=10)
+        r = _peer_request("POST", endpoint, "/api/translate/pair/confirm", self_heal=False,
+                          json=_body, timeout=10)
         try:
             data = r.json()
         except ValueError:
@@ -8842,10 +8930,9 @@ def proxy_pair_status():
         return jsonify({"paired": False, "error": str(e)}), 502
     if not endpoint:
         return jsonify({"paired": False}), 200
-    import requests as _req
     try:
-        r = _req.get(endpoint + "/api/translate/pair/status",
-                     headers=_remote_auth_headers(), timeout=5)
+        r = _peer_request("GET", endpoint, "/api/translate/pair/status", self_heal=False,
+                          timeout=5)
         try:
             data = r.json()
         except ValueError:
@@ -8870,10 +8957,8 @@ def proxy_translate_unload():
         return jsonify({"success": False, "error": str(e)}), 502
     if not endpoint:
         return jsonify({"success": False, "error": "No remote endpoint configured"}), 400
-    import requests as _req
     try:
-        r = _req.post(endpoint + "/api/translate/unload",
-                      headers=_remote_auth_headers(), timeout=10)
+        r = _peer_request("POST", endpoint, "/api/translate/unload", timeout=10)
         try:
             data = r.json()
         except ValueError:
@@ -8894,10 +8979,8 @@ def proxy_translate_preload():
         return jsonify({"success": False, "error": str(e)}), 502
     if not endpoint:
         return jsonify({"success": False, "error": "No remote endpoint configured"}), 400
-    import requests as _req
     try:
-        r = _req.post(endpoint + "/api/translate/preload",
-                      headers=_remote_auth_headers(), timeout=10)
+        r = _peer_request("POST", endpoint, "/api/translate/preload", timeout=10)
         try:
             data = r.json()
         except ValueError:
@@ -8919,11 +9002,9 @@ def proxy_sync_dictionary():
         return jsonify({"success": False, "error": str(e)}), 502
     if not endpoint:
         return jsonify({"success": False, "error": "No remote endpoint configured"}), 400
-    import requests as _req
     try:
-        r = _req.post(endpoint + "/api/translate/sync-dictionary",
-                      headers=_remote_auth_headers(),
-                      json=_dictionary_sync_payload(), timeout=10)
+        r = _peer_request("POST", endpoint, "/api/translate/sync-dictionary",
+                          json=_dictionary_sync_payload(), timeout=10)
         try:
             data = r.json()
         except ValueError:
@@ -8944,10 +9025,11 @@ def proxy_translate_unpair():
         return jsonify({"success": False, "error": str(e)}), 502
     if not endpoint:
         return jsonify({"success": False, "error": "No remote endpoint configured"}), 400
-    import requests as _req
     try:
-        r = _req.post(endpoint + "/api/translate/pair/unpair-me",
-                      headers=_remote_auth_headers(), timeout=10)
+        # self_heal=False: we are asking B to forget us, so a refusal must not
+        # send us round the loop of claiming a fresh token to say goodbye with.
+        r = _peer_request("POST", endpoint, "/api/translate/pair/unpair-me", self_heal=False,
+                          timeout=10)
         _forget_remote_pair_token()
         try:
             data = r.json()
@@ -11557,12 +11639,10 @@ def start_transcription():
                     ep = _get_remote_endpoint()
                     if not ep:
                         return
-                    import requests as _req
-                    r = _req.post(ep + "/api/translate/preload",
-                                  headers=_remote_auth_headers(), timeout=10)
+                    r = _peer_request("POST", ep, "/api/translate/preload", timeout=10)
                     print(f"[START] Remote translation preload: {r.json()}")
-                    r2 = _req.post(ep + "/api/translate/sync-dictionary",
-                                   json=_dictionary_sync_payload(), timeout=10)
+                    r2 = _peer_request("POST", ep, "/api/translate/sync-dictionary",
+                                       json=_dictionary_sync_payload(), timeout=10)
                     print(f"[START] Remote dictionary sync: {r2.json()}")
                     # Ask the remote what it translates with, in THIS process. The
                     # session-start probe runs in the transcription worker and
@@ -11671,9 +11751,7 @@ def stop_transcription():
                     ep = _get_remote_endpoint()
                     if not ep:
                         return
-                    import requests as _req
-                    r = _req.post(ep + "/api/translate/unload",
-                                  headers=_remote_auth_headers(), timeout=10)
+                    r = _peer_request("POST", ep, "/api/translate/unload", timeout=10)
                     print(f"[STOP] Remote translation unload: {r.json()}")
                 except Exception as e:
                     print(f"[STOP] Remote translation unload failed: {e}")
@@ -12061,6 +12139,10 @@ def save_custom_dictionary(data):
 
     try:
         import json as _json
+        # Saving writes the whole file, so one save with an empty box replaces
+        # the operator's terms with nothing and there is no undo. Keep the last
+        # few versions beside it — see stt/file_backup.
+        _file_backup.backup_file(dict_file)
         with open(dict_file, "w", encoding="utf-8") as f:
             _json.dump(data, f, indent=2, ensure_ascii=False)
         _dictionary_cache = data
@@ -15992,12 +16074,7 @@ def _translate_via_remote(text, source_lang, target_lang, endpoint,
         if generation_params:
             payload["generation_params"] = generation_params
         _rt_t0 = time.perf_counter()
-        resp = _get_remote_http_session().post(
-            endpoint.rstrip("/") + "/api/translate",
-            json=payload,
-            headers=_remote_auth_headers(),
-            timeout=15,
-        )
+        resp = _peer_request("POST", endpoint, "/api/translate", json=payload, timeout=15)
         resp.raise_for_status()
         data = resp.json()
         # Round-trip latency Machine A experiences for this offloaded translation

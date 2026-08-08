@@ -16,6 +16,7 @@ import pytest
 
 from conftest import extract_definitions
 from stt import pair_tokens as pair_tokens_mod
+from stt import repeat_filter as repeat_filter_mod
 
 A_IP = "192.168.2.62"
 STRANGER_IP = "192.168.2.90"
@@ -25,6 +26,7 @@ _NAMES = [
     "_pair_tokens",
     "_save_pair_tokens",
     "_paired_client_ok",
+    "_log_pair_refusal",
     "_rebind_trusted_client",
     "_pair_token_grace_ips",
     "translation_pair_token",
@@ -53,6 +55,7 @@ def build(*, trusted=(A_IP,), tokens=None, remote_addr=A_IP, token=None, ports=N
             "jsonify": lambda obj: obj,
             "save_config": lambda cfg: saves.append(dict(cfg)),
             "_pair_tokens_mod": pair_tokens_mod,
+            "_pair_refusal_log_filter": repeat_filter_mod.RepeatSuppressor(),
             "_trusted_translation_clients": set(trusted),
             "_translation_client_ports": dict(ports or {}),
             "_forget_client_port": lambda ip: None,
@@ -95,6 +98,24 @@ class TestPairedClientOk:
         tokens, _token = issue_to(A_IP)
         stale = pair_tokens_mod.mint_token()
         assert build(tokens=tokens, token=stale)["_paired_client_ok"]() is False
+
+    def test_a_refusal_says_why_in_the_log(self, capsys):
+        # B refusing its own paired A used to be silent, so the pairing looked
+        # like a dead network and took a two-machine diagnosis to tell apart.
+        tokens, _token = issue_to(A_IP)
+        build(tokens=tokens, token=pair_tokens_mod.mint_token())["_paired_client_ok"]()
+        out = capsys.readouterr().out
+        assert A_IP in out
+        assert "unknown token" in out
+
+    def test_a_repeating_refusal_is_thinned_rather_than_flooding(self, capsys):
+        # A peer retries every 20s forever; the log must not fill with it.
+        tokens, _token = issue_to(A_IP)
+        ns = build(tokens=tokens, token=pair_tokens_mod.mint_token())
+        for _ in range(50):
+            ns["_paired_client_ok"]()
+        lines = [ln for ln in capsys.readouterr().out.splitlines() if "[PAIR] Refused" in ln]
+        assert 0 < len(lines) < 10
 
     def test_a_machine_that_moved_address_is_followed(self):
         tokens, token = issue_to(A_IP)
