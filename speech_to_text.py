@@ -366,6 +366,7 @@ def _config_snapshot():
 # Config/validation/version helpers live in stt/config_utils.py (importable,
 # unit-tested); names are re-imported here so call sites stay unchanged.
 from stt import config_utils as _config_utils
+from stt import tunnel as tunnel_mod
 from stt.config_utils import (  # noqa: F401
     SUPPORTED_AUDIO_FORMATS,
     SUPPORTED_VIDEO_FORMATS,
@@ -9588,6 +9589,14 @@ def perform_server_restart():
     # Signal emit threads to stop touching the Manager proxy before we tear it down.
     _server_shutting_down.set()
 
+    # Close any public tunnel: cloudflared is our child, and a restart would
+    # otherwise orphan it still advertising a URL that reaches the old port.
+    try:
+        if _cloudflare_tunnel is not None:
+            _cloudflare_tunnel.stop(reason="server restarting")
+    except Exception as e:
+        print(f"[TUNNEL] Could not stop tunnel before restart: {e}")
+
     if sys.platform.startswith('win'):
         # Windows: use restart_server.bat to cleanly stop and restart
         script_dir = APP_DIR
@@ -9681,6 +9690,154 @@ def perform_server_restart():
             maxfd = 65536
         os.closerange(3, maxfd)
         os.execv(sys.executable, [sys.executable, *sys.argv])
+
+
+# =============================================================================
+# Cloudflare tunnel — a public URL for this server, on demand
+# =============================================================================
+#
+# Started only on an explicit press, and closed automatically a short while
+# after transcription ends so the public window is bounded by the service.
+#
+# The tunnel forwards to 127.0.0.1, which check_ip_whitelist trusts, so anyone
+# holding the URL has full access. That is the operator's decision (see the
+# _security_comment in config.default.json); the auto-stop is what limits it.
+
+_cloudflare_tunnel = None
+_cloudflare_tunnel_lock = threading.Lock()
+#: When transcription last stopped, for the auto-stop countdown. None while it
+#: is running, or before it has run at all.
+_transcription_idle_since = None
+
+
+def _tunnel_config():
+    return config.get("web_server", {}).get("cloudflare_tunnel", {})
+
+
+def _get_tunnel():
+    """The process manager singleton, rebuilt if the configured binary changed."""
+    global _cloudflare_tunnel
+    binary = _tunnel_config().get("binary", "cloudflared") or "cloudflared"
+    with _cloudflare_tunnel_lock:
+        if _cloudflare_tunnel is None:
+            _cloudflare_tunnel = tunnel_mod.CloudflareTunnel(binary=binary)
+        elif _cloudflare_tunnel._binary != binary and not _cloudflare_tunnel.is_running():
+            _cloudflare_tunnel = tunnel_mod.CloudflareTunnel(binary=binary)
+        return _cloudflare_tunnel
+
+
+def _tunnel_status_payload():
+    """Status plus the context the settings page needs to render the card."""
+    status = _get_tunnel().status()
+    status["success"] = True
+    status["auto_stop_seconds"] = coerce_int(
+        _tunnel_config().get("auto_stop_seconds"), tunnel_mod.DEFAULT_AUTO_STOP_SECONDS, lo=0
+    )
+    status["binary"] = _tunnel_config().get("binary", "cloudflared")
+    # Seconds until the auto-stop fires, so the UI can count down instead of
+    # the tunnel vanishing unannounced. None when nothing is pending.
+    idle_since = _transcription_idle_since
+    if status["status"] == tunnel_mod.STATUS_RUNNING and idle_since is not None and not _ts_get("running", False):
+        remaining = status["auto_stop_seconds"] - (time.time() - idle_since)
+        status["auto_stop_in"] = max(0, round(remaining))
+    else:
+        status["auto_stop_in"] = None
+    return status
+
+
+@app.route("/api/tunnel/status", methods=["GET"])
+def tunnel_status():
+    """Current tunnel state, URL and pending auto-stop."""
+    if not check_ip_whitelist():
+        return jsonify({"success": False, "error": "Access Denied"}), 403
+    return jsonify(_tunnel_status_payload())
+
+
+@app.route("/api/tunnel/start", methods=["POST"])
+def tunnel_start():
+    """Open a Cloudflare quick tunnel to this server and return its URL.
+
+    Blocks briefly waiting for cloudflared to report the address, so the caller
+    gets a usable URL rather than having to poll."""
+    if not check_ip_whitelist():
+        return jsonify({"success": False, "error": "Access Denied"}), 403
+
+    port = coerce_int(config.get("web_server", {}).get("port"), 8080, lo=1, hi=65535)
+    tunnel = _get_tunnel()
+
+    if tunnel.is_running():
+        _note_access_detail("tunnel already running")
+        return jsonify(_tunnel_status_payload())
+
+    print(f"[TUNNEL] Starting Cloudflare quick tunnel to 127.0.0.1:{port}")
+    tunnel.start(port)
+    tunnel.wait_for_url(timeout=30)
+
+    payload = _tunnel_status_payload()
+    if payload.get("url"):
+        print(f"[TUNNEL] Public URL: {payload['url']}")
+        _note_access_detail(f"tunnel started: {payload['url']}")
+    else:
+        _note_access_detail(f"tunnel start failed: {payload.get('error') or 'no URL'}")
+        if payload["status"] != tunnel_mod.STATUS_ERROR:
+            payload["error"] = payload["error"] or "Timed out waiting for cloudflared to report a URL"
+        return jsonify(payload), 502
+    return jsonify(payload)
+
+
+@app.route("/api/tunnel/stop", methods=["POST"])
+def tunnel_stop():
+    """Close the tunnel."""
+    if not check_ip_whitelist():
+        return jsonify({"success": False, "error": "Access Denied"}), 403
+
+    was_running = _get_tunnel().is_running()
+    _get_tunnel().stop(reason="stopped from the API")
+    if was_running:
+        print("[TUNNEL] Stopped")
+    _note_access_detail("tunnel stopped" if was_running else "tunnel already stopped")
+    return jsonify(_tunnel_status_payload())
+
+
+#: Whether transcription has run since the server started. Until it has, an
+#: idle server is not "just finished a service", so a tunnel opened by hand is
+#: not closed out from under the operator who just opened it.
+_tunnel_seen_transcription = False
+
+
+def _tunnel_auto_stop_watcher():
+    """Close the tunnel once transcription has been stopped long enough.
+
+    Polls rather than hooking the half-dozen places that set status to
+    'stopped': the transitions are spread across the worker, the stop route and
+    the shutdown path, and a missed hook here would leave the server publicly
+    reachable — the one failure mode worth being conservative about."""
+    global _transcription_idle_since, _tunnel_seen_transcription
+
+    while not _server_shutting_down.is_set():
+        try:
+            running = bool(_ts_get("running", False))
+            if running:
+                _tunnel_seen_transcription = True
+                _transcription_idle_since = None
+            elif _transcription_idle_since is None and _tunnel_seen_transcription:
+                _transcription_idle_since = time.time()
+
+            delay = coerce_int(
+                _tunnel_config().get("auto_stop_seconds"),
+                tunnel_mod.DEFAULT_AUTO_STOP_SECONDS,
+                lo=0,
+            )
+            tunnel = _get_tunnel()
+            if tunnel_mod.should_auto_stop(
+                tunnel.is_running(), running, _transcription_idle_since, time.time(), delay
+            ):
+                print(f"[TUNNEL] Auto-stopping {delay}s after transcription ended")
+                tunnel.stop(reason="transcription ended")
+                _transcription_idle_since = None
+        except Exception as e:
+            print(f"[TUNNEL] Auto-stop watcher error: {e}")
+        _server_shutting_down.wait(5)
 
 
 @app.route("/api/server/restart", methods=["POST"])
@@ -19688,6 +19845,9 @@ def thread2_function():
         socketio.start_background_task(emit_audio_stream)
         socketio.start_background_task(emit_tts_audio)
 
+        # Close a public tunnel once the service it was opened for has ended
+        threading.Thread(target=_tunnel_auto_stop_watcher, daemon=True, name="tunnel-auto-stop").start()
+
         # Use socketio.run() instead of app.run() for proper Socket.IO support.
         # Retry transient bind failures: a just-restarted process can race a
         # dying predecessor (or a child that inherited the bound socket) still
@@ -19718,6 +19878,15 @@ def signal_handler(signum, frame):
 
     # Stop emit threads from touching the Manager proxy before we tear it down.
     _server_shutting_down.set()
+
+    # Close any public tunnel before we go — an orphaned cloudflared would keep
+    # advertising a URL for a server that no longer answers.
+    try:
+        if _cloudflare_tunnel is not None:
+            print("[SHUTDOWN] Stopping Cloudflare tunnel...")
+            _cloudflare_tunnel.stop(reason="server shutting down")
+    except Exception as e:
+        print(f"[SHUTDOWN] Could not stop tunnel: {e}")
 
     # Terminate the transcription process (multiprocessing.Process)
     try:

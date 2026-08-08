@@ -60,6 +60,8 @@ module = [
     "stt.hostname_lookup",
     "stt.pair_tokens",
     "stt.repeat_filter",
+    "stt.tts_backends",
+    "stt.tunnel",
 ]
 disallow_untyped_defs = true
 

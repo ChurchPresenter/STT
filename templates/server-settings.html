@@ -426,6 +426,35 @@
                             <span style="color: var(--info); font-size: 1.1em;">→</span>
                         </a>
                     </div>
+                    <!-- Cloudflare Tunnel -->
+                    <div id="tunnel-block" style="margin-bottom: 14px; padding: 12px; background: var(--bg-secondary); border: 1px solid var(--border); border-radius: var(--radius-sm);">
+                        <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 8px; flex-wrap: wrap;">
+                            <span style="font-size: 1.1em;">☁️</span>
+                            <strong style="color: var(--text-primary);">Cloudflare Tunnel</strong>
+                            <span id="tunnel-status-badge" style="background: var(--bg-elevated); color: var(--text-secondary); border-radius: var(--radius-sm); padding: 1px 8px; font-size: 0.78em;">Stopped</span>
+                            <span id="tunnel-autostop" style="font-size: 0.78em; color: var(--text-secondary); font-variant-numeric: tabular-nums;"></span>
+                        </div>
+                        <div style="font-size: 0.82em; color: var(--text-secondary); margin-bottom: 10px;">
+                            Gives this server a public URL on demand. It closes itself
+                            <span id="tunnel-delay-label">60</span>s after transcription ends.
+                        </div>
+                        <div style="display: flex; gap: 8px; margin-bottom: 10px; flex-wrap: wrap;">
+                            <button type="button" id="tunnel-start-btn" onclick="startTunnel()" class="btn-save" style="background: var(--success); flex: 0 0 auto; width: auto; margin: 0; padding: 6px 14px;">▶️ Start</button>
+                            <button type="button" id="tunnel-stop-btn" onclick="stopTunnel()" class="btn-save" style="background: var(--danger); flex: 0 0 auto; width: auto; margin: 0; padding: 6px 14px;" disabled>⏹ Stop</button>
+                            <button type="button" id="tunnel-copy-btn" onclick="copyTunnelUrl(this)" class="btn-save" style="background: var(--accent); flex: 0 0 auto; width: auto; margin: 0; padding: 6px 14px;" disabled>📋 Copy URL</button>
+                        </div>
+                        <div id="tunnel-url-row" style="display: none; align-items: center; gap: 8px; margin-bottom: 10px;">
+                            <a id="tunnel-url" href="#" target="_blank" rel="noopener noreferrer" style="color: var(--accent); word-break: break-all; font-family: monospace; font-size: 0.88em;"></a>
+                        </div>
+                        <div id="tunnel-error" style="display: none; color: var(--danger); font-size: 0.82em; margin-bottom: 10px; word-break: break-word;"></div>
+                        <div style="font-size: 0.8em; color: var(--warning); background: rgba(245,158,11,0.12); border-left: 3px solid var(--warning); padding: 8px 10px; border-radius: var(--radius-sm);">
+                            ⚠️ <strong>The URL is the only protection.</strong> Tunnelled requests reach the server as
+                            <code>127.0.0.1</code>, which counts as trusted — so anyone with this link has the same access
+                            as someone sitting at this machine, including settings and recordings. Share it carefully and
+                            let it close when the service ends.
+                        </div>
+                    </div>
+
                     <div style="margin-bottom: 10px; font-size: 0.82em; color: var(--text-secondary);">
                         <span style="background: rgba(245,158,11,0.15); color: var(--warning); border-radius: var(--radius-sm); padding: 1px 6px; font-size: 0.85em; margin-right: 6px;">🔒 Auth</span> requires a whitelisted IP, password login, or a <code>?key=</code> access token &nbsp;·&nbsp;
                         <span style="background: var(--bg-secondary); color: var(--text-secondary); border-radius: var(--radius-sm); padding: 1px 6px; font-size: 0.85em; margin-right: 6px;">Open</span> accessible from any IP
@@ -695,6 +724,115 @@
             }, 1500);
         }
 
+        // =====================================================================
+        // Cloudflare Tunnel
+        // =====================================================================
+
+        let _tunnelUrl = null;
+
+        function renderTunnel(data) {
+            const badge = document.getElementById('tunnel-status-badge');
+            const startBtn = document.getElementById('tunnel-start-btn');
+            const stopBtn = document.getElementById('tunnel-stop-btn');
+            const copyBtn = document.getElementById('tunnel-copy-btn');
+            const urlRow = document.getElementById('tunnel-url-row');
+            const urlEl = document.getElementById('tunnel-url');
+            const errEl = document.getElementById('tunnel-error');
+            const autoEl = document.getElementById('tunnel-autostop');
+
+            const status = data.status || 'stopped';
+            const busy = status === 'starting';
+            _tunnelUrl = data.url || null;
+
+            const labels = {
+                stopped: ['Stopped', 'var(--text-secondary)', 'var(--bg-elevated)'],
+                starting: ['Starting…', 'var(--warning)', 'rgba(245,158,11,0.15)'],
+                running: ['Running', 'var(--success)', 'rgba(34,197,94,0.15)'],
+                error: ['Error', 'var(--danger)', 'rgba(239,68,68,0.15)'],
+            };
+            const [text, color, bg] = labels[status] || labels.stopped;
+            badge.textContent = text;
+            badge.style.color = color;
+            badge.style.background = bg;
+
+            startBtn.disabled = busy || status === 'running';
+            stopBtn.disabled = status === 'stopped' || busy;
+            copyBtn.disabled = !_tunnelUrl;
+
+            if (_tunnelUrl) {
+                urlEl.textContent = _tunnelUrl;
+                urlEl.href = _tunnelUrl;
+                urlRow.style.display = 'flex';
+            } else {
+                urlRow.style.display = 'none';
+            }
+
+            if (data.error) {
+                errEl.textContent = data.error;
+                errEl.style.display = '';
+            } else {
+                errEl.style.display = 'none';
+            }
+
+            if (typeof data.auto_stop_seconds === 'number') {
+                document.getElementById('tunnel-delay-label').textContent = data.auto_stop_seconds;
+            }
+            // Count the pending auto-stop down rather than letting the tunnel
+            // vanish without warning while someone is using the link.
+            autoEl.textContent = (data.auto_stop_in !== null && data.auto_stop_in !== undefined)
+                ? `closing in ${data.auto_stop_in}s`
+                : '';
+        }
+
+        async function loadTunnelStatus() {
+            try {
+                const resp = await fetch('/api/tunnel/status');
+                const data = await resp.json();
+                if (data.success) renderTunnel(data);
+            } catch (e) {
+                console.error('Error loading tunnel status:', e);
+            }
+        }
+
+        async function startTunnel() {
+            const btn = document.getElementById('tunnel-start-btn');
+            btn.disabled = true;
+            renderTunnel({ status: 'starting' });
+            try {
+                // cloudflared takes a few seconds to be assigned a URL, and the
+                // server waits for it so the response carries a usable link.
+                const resp = await fetch('/api/tunnel/start', { method: 'POST' });
+                const data = await resp.json();
+                renderTunnel(data);
+                if (data.url) {
+                    showAlert('✅ Tunnel is up: ' + data.url, 'success');
+                } else {
+                    showAlert('❌ ' + (data.error || 'Tunnel failed to start'), 'error');
+                }
+            } catch (e) {
+                showAlert('❌ Failed to start tunnel: ' + e.message, 'error');
+                loadTunnelStatus();
+            }
+        }
+
+        async function stopTunnel() {
+            const btn = document.getElementById('tunnel-stop-btn');
+            btn.disabled = true;
+            try {
+                const resp = await fetch('/api/tunnel/stop', { method: 'POST' });
+                renderTunnel(await resp.json());
+                showAlert('✅ Tunnel stopped', 'success');
+            } catch (e) {
+                showAlert('❌ Failed to stop tunnel: ' + e.message, 'error');
+                loadTunnelStatus();
+            }
+        }
+
+        function copyTunnelUrl(btn) {
+            if (!_tunnelUrl) return;
+            copyEndpoint(_tunnelUrl, btn);
+        }
+
         // Copy endpoint URL to clipboard
         function copyEndpoint(url, btn) {
             // Use clipboard API if available, otherwise fallback
@@ -721,7 +859,7 @@
                 document.execCommand('copy');
                 flashCopied(btn);
             } catch (err) {
-                showAlert('error', '❌ Failed to copy URL');
+                showAlert('❌ Failed to copy URL', 'error');
             }
             document.body.removeChild(textarea);
         }
@@ -734,6 +872,10 @@
             checkTranscriptionStatus(); // Check if transcription is running
             // Poll transcription status every 2 seconds
             setInterval(checkTranscriptionStatus, 2000);
+
+            loadTunnelStatus(); // Cloudflare tunnel state
+            // Poll often enough that the auto-stop countdown reads sensibly
+            setInterval(loadTunnelStatus, 3000);
 
             // Initialize and update current date/time
             updateCurrentDateTime();

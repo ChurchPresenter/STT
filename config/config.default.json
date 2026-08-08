@@ -170,6 +170,13 @@
       "::1"
     ],
     "_settings_ip_whitelist_comment": "IP addresses or CIDR ranges allowed to access settings. Empty array = allow all. Example: ['127.0.0.1', '192.168.1.0/24']",
+    "cloudflare_tunnel": {
+      "binary": "cloudflared",
+      "_binary_comment": "Path to the cloudflared executable. Bare name = found on PATH. Install with 'brew install cloudflared' (macOS), the .deb/.rpm from Cloudflare (Linux), or winget (Windows).",
+      "auto_stop_seconds": 60,
+      "_auto_stop_seconds_comment": "Seconds after transcription ends before the tunnel closes itself. Restarting transcription within the window cancels the pending stop. A tunnel opened before any transcription has run stays up until you press Stop — there is no 'end' to measure from yet.",
+      "_security_comment": "The tunnel forwards to 127.0.0.1, which check_ip_whitelist treats as trusted, so ANYONE WITH THE URL HAS THE SAME ACCESS AS SOMEONE SITTING AT THIS MACHINE — settings, config, session databases, the lot. The URL is the only secret. This is deliberate; the auto-stop window is what bounds the exposure. Start it only when you need it and let it close."
+    },
     "access_token": "",
     "_access_token_comment": "Optional token to embed auth in a URL: append ?key=TOKEN (e.g. http://host:8080/?key=TOKEN) so a non-whitelisted device or an OBS/display source that can't use the login page gets in. Opening such a URL sets a session cookie for the rest of that browser session. Empty = disabled. Generate/rotate it on the Server Settings page. It appears in URLs/logs, so rotate it if leaked.",
     "password_auth": {
