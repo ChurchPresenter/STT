@@ -815,7 +815,9 @@
                 </div>
 
                 <!-- Custom Dictionary -->
-                <div style="border-top: 1px solid var(--border); margin-top: 16px; padding-top: 16px;">
+                <!-- Named so the unsaved-changes tracker can tell a glossary
+                     edit from the rest: it saves to a different endpoint. -->
+                <div id="dictionary-settings-section" style="border-top: 1px solid var(--border); margin-top: 16px; padding-top: 16px;">
                     <span class="section-label" style="margin-bottom: 12px;">Custom Dictionary</span>
 
                     <div class="checkbox-group">
@@ -967,7 +969,7 @@
             <div class="unsaved-bar-inner">
                 <span class="unsaved-dot" aria-hidden="true"></span>
                 <span class="unsaved-label">Unsaved changes</span>
-                <button onclick="saveSettings()" class="btn-save unsaved-save">Save</button>
+                <button onclick="saveDirtySections()" class="btn-save unsaved-save">Save</button>
             </div>
         </div>
 {% endblock %}
@@ -1144,7 +1146,7 @@
             }
         }
 
-        async function saveDictionary() {
+        async function saveDictionary(quiet) {
             try {
                 // Parse glossary lines (source=target format)
                 const glossaryLines = document.getElementById('glossary_list').value
@@ -1177,7 +1179,8 @@
                 });
                 const data = await resp.json();
                 if (data.success) {
-                    showAlert('Dictionary saved!', 'success');
+                    if (!quiet) showAlert('Dictionary saved!', 'success');
+                    markSectionClean('dictionary');
                 } else {
                     showAlert('Failed to save dictionary: ' + (data.error || ''), 'error');
                 }
@@ -1187,7 +1190,7 @@
         }
 
         // Save all settings to server (model config + audio/VAD/performance settings)
-        async function saveSettings() {
+        async function saveSettings(quiet) {
             try {
                 // 1. Build and save model configuration
                 const modelType = document.getElementById('live_model_type').value;
@@ -1316,7 +1319,7 @@
                     loadModelStatus();
                     showAlert('All settings saved successfully!', 'success');
                     currentConfig = data.config;
-                    markClean();
+                    markSectionClean('settings');
                     if (window.refreshSysreqBanner) window.refreshSysreqBanner();
                 } else {
                     showAlert('Error: ' + data.error, 'error');
@@ -2158,18 +2161,47 @@
         }
 
         // Unsaved changes detection
-        let unsavedChanges = false;
+        // Which sections have unsaved edits. This panel holds two independent
+        // save targets — the main settings and the glossary, different endpoints
+        // — so a single boolean let the bar's Save clear a glossary edit it had
+        // never sent anywhere.
+        const dirtySections = new Set();
 
-        function markDirty() {
-            if (!unsavedChanges) {
-                unsavedChanges = true;
-                document.getElementById('unsaved-bar').classList.add('is-visible');
-            }
+        function sectionOf(target) {
+            return (target && target.closest && target.closest('#dictionary-settings-section'))
+                ? 'dictionary' : 'settings';
+        }
+
+        function refreshUnsavedBar() {
+            document.getElementById('unsaved-bar')
+                .classList.toggle('is-visible', dirtySections.size > 0);
+        }
+
+        function markDirty(event) {
+            dirtySections.add(sectionOf(event && event.target));
+            refreshUnsavedBar();
         }
 
         function markClean() {
-            unsavedChanges = false;
-            document.getElementById('unsaved-bar').classList.remove('is-visible');
+            dirtySections.clear();
+            refreshUnsavedBar();
+        }
+
+        // Each saver clears only what it actually saved, so saving one section
+        // can't dismiss the other's pending edit.
+        function markSectionClean(section) {
+            dirtySections.delete(section);
+            refreshUnsavedBar();
+        }
+
+        // The bar promises to save whatever is unsaved, so it has to cover both
+        // endpoints. Only the sections actually edited are sent.
+        async function saveDirtySections() {
+            const sections = [...dirtySections];
+            if (!sections.length) return;
+            if (sections.includes('settings')) await saveSettings(true);
+            if (sections.includes('dictionary')) await saveDictionary(true);
+            if (!dirtySections.size) showAlert('Settings saved!', 'success');
         }
 
         (function() {
