@@ -9,6 +9,8 @@ from stt.model_disk import (
     dir_is_writable,
     has_weight_file,
     is_weight_file,
+    ct2_variant_names,
+    model_presence,
 )
 
 
@@ -125,3 +127,78 @@ class TestDirIsWritable:
         finally:
             os.chmod(ro, 0o700)  # restore so tmp cleanup can remove it
 
+
+
+class TestCt2VariantNames:
+    def test_finds_the_conversion_beside_the_model(self):
+        entries = ["google--madlad400-3b-mt", "google--madlad400-3b-mt-ct2-int8_float16"]
+        assert ct2_variant_names(entries, "google--madlad400-3b-mt") == ["int8_float16"]
+
+    def test_multiple_compute_types_are_all_reported(self):
+        entries = ["m", "m-ct2-int8", "m-ct2-int8_float16", "m-ct2-float16"]
+        assert ct2_variant_names(entries, "m") == ["float16", "int8", "int8_float16"]
+
+    def test_no_conversion_is_empty(self):
+        assert ct2_variant_names(["m", "other-ct2-int8"], "m") == []
+
+    def test_bare_marker_without_a_compute_type_is_not_a_conversion(self):
+        assert ct2_variant_names(["m-ct2-"], "m") == []
+
+    def test_a_longer_model_name_is_not_mistaken_for_a_conversion(self):
+        # "madlad400-10b-mt" must never be reported as a conversion of
+        # "madlad400-3b-mt", nor the reverse.
+        entries = ["google--madlad400-10b-mt", "google--madlad400-10b-mt-ct2-int8"]
+        assert ct2_variant_names(entries, "google--madlad400-3b-mt") == []
+
+    def test_empty_listing(self):
+        assert ct2_variant_names([], "m") == []
+
+
+class TestModelPresence:
+    def test_hf_weights_only(self, tmp_path):
+        d = tmp_path / "m"
+        d.mkdir()
+        (d / "model.safetensors").write_text("w")
+        p = model_presence(str(tmp_path), "m")
+        assert p.has_weights is True
+        assert p.ct2_variants == []
+        assert p.downloaded is True
+
+    def test_conversion_only_counts_as_downloaded(self, tmp_path):
+        # The shape on .62: the HF directory keeps its tokenizer/config but the
+        # weights were reclaimed after conversion. The model still runs.
+        hf = tmp_path / "google--madlad400-3b-mt"
+        hf.mkdir()
+        (hf / "config.json").write_text("{}")
+        (hf / "spiece.model").write_text("tok")
+        ct2 = tmp_path / "google--madlad400-3b-mt-ct2-int8_float16"
+        ct2.mkdir()
+        (ct2 / "model.bin").write_text("w")
+
+        p = model_presence(str(tmp_path), "google--madlad400-3b-mt")
+        assert p.has_weights is False
+        assert p.ct2_variants == ["int8_float16"]
+        assert p.downloaded is True
+
+    def test_both_present(self, tmp_path):
+        hf = tmp_path / "m"
+        hf.mkdir()
+        (hf / "model.safetensors").write_text("w")
+        (tmp_path / "m-ct2-int8").mkdir()
+        p = model_presence(str(tmp_path), "m")
+        assert p.has_weights is True
+        assert p.ct2_variants == ["int8"]
+
+    def test_neither_present_is_not_downloaded(self, tmp_path):
+        # The regression that matters most: never tell the operator a missing
+        # model is present.
+        d = tmp_path / "m"
+        d.mkdir()
+        (d / "config.json").write_text("{}")
+        p = model_presence(str(tmp_path), "m")
+        assert p.downloaded is False
+
+    def test_missing_models_dir_reports_nothing(self, tmp_path):
+        p = model_presence(str(tmp_path / "nope"), "m")
+        assert p.downloaded is False
+        assert p.ct2_variants == []

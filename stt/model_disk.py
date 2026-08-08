@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import os
 import tempfile
-from typing import Iterable
+from typing import Iterable, List, NamedTuple
 
 # Single-file weight layouts across the model families this app downloads:
 #   HF Transformers -> model.safetensors / pytorch_model.bin
@@ -66,6 +66,69 @@ def dir_has_weights(path: str) -> bool:
         return has_weight_file(os.listdir(path))
     except OSError:
         return False
+
+
+#: Marker separating a model directory from its CTranslate2 conversion, as
+#: produced by stt.ct2_translate.ct2_model_dir(): "<hf_dir>-ct2-<compute_type>".
+_CT2_MARKER = "-ct2-"
+
+
+def ct2_variant_names(entries: Iterable[str], dir_name: str) -> List[str]:
+    """Compute types of the CTranslate2 conversions of ``dir_name`` in ``entries``.
+
+    e.g. ``["google--madlad400-3b-mt-ct2-int8_float16"]`` for
+    ``"google--madlad400-3b-mt"`` -> ``["int8_float16"]``.
+
+    Converting a model leaves the weights in this sibling directory, and the
+    original HF weights are often deleted afterwards to reclaim the space — so
+    the conversion, not the HF directory, is what proves the model is usable.
+
+    Deliberately exact about the stem: a bare ``<dir_name>-ct2-`` with no compute
+    type is not a conversion, and ``madlad400-10b-mt`` must never be reported as
+    a conversion of ``madlad400-3b-mt``.
+    """
+    prefix = f"{dir_name}{_CT2_MARKER}"
+    variants = []
+    for entry in entries:
+        if entry.startswith(prefix):
+            compute_type = entry[len(prefix):]
+            if compute_type:
+                variants.append(compute_type)
+    return sorted(variants)
+
+
+class ModelPresence(NamedTuple):
+    """What of a model is actually on disk.
+
+    Kept structured rather than a bool because the difference matters to the
+    caller: a box holding only a conversion runs fine through the CTranslate2
+    path but has no weights for anything else, and an operator seeing an
+    engine fail there deserves to know why.
+    """
+
+    has_weights: bool
+    ct2_variants: List[str]
+
+    @property
+    def downloaded(self) -> bool:
+        """Whether a usable copy of the model is present, in any form."""
+        return self.has_weights or bool(self.ct2_variants)
+
+
+def model_presence(models_dir: str, dir_name: str) -> ModelPresence:
+    """Inspect ``models_dir`` for ``dir_name``'s weights and CT2 conversions.
+
+    A missing or unreadable models directory reports nothing present rather
+    than raising — the caller is a status endpoint, not a downloader.
+    """
+    try:
+        entries = os.listdir(models_dir)
+    except OSError:
+        return ModelPresence(False, [])
+    return ModelPresence(
+        has_weights=dir_has_weights(os.path.join(models_dir, dir_name)),
+        ct2_variants=ct2_variant_names(entries, dir_name),
+    )
 
 
 def dir_is_writable(path: str) -> bool:

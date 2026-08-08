@@ -60,7 +60,7 @@ from stt.paths import safe_model_path  # noqa: F401
 from stt.coercion import coerce_bool, coerce_float, coerce_int
 from stt import pair_tokens as _pair_tokens_mod
 from stt.http_params import merge_request_params, parse_json_body as _parse_json_body
-from stt.model_disk import dir_has_weights, dir_is_writable, has_weight_file, is_weight_file  # noqa: F401
+from stt.model_disk import dir_has_weights, dir_is_writable, has_weight_file, is_weight_file, model_presence  # noqa: F401
 
 
 def safe_managed_path(path, base_dir=None):
@@ -996,7 +996,9 @@ def _local_fallback_ready():
     model_id = _resolve_live_translation_model_id(lt)
     if not model_id:
         return False
-    return dir_has_weights(os.path.join(MODELS_DIR, model_id.replace("/", "--")))
+    # A CTranslate2 conversion counts: it is what actually runs, and the HF
+    # weights are often deleted afterwards to reclaim the space.
+    return model_presence(MODELS_DIR, model_id.replace("/", "--")).downloaded
 
 
 def _resolve_live_translation_model_id(lt_cfg):
@@ -8612,8 +8614,13 @@ def remove_tts_model():
 
 @app.route("/api/tts/models", methods=["GET"])
 def list_tts_models():
-    """List available TTS voices/models for the active backend"""
-    backend = tts_backends.get_backend(_get_tts_backend())
+    """List available TTS voices/models for a backend.
+
+    Defaults to the active one; ?backend=<id> asks about another. The settings
+    page needs that: the operator switches the dropdown before saving, and
+    without it the page would populate the new panel from the OLD backend's
+    list — supertonic presets showing edge-tts voice names."""
+    backend = tts_backends.get_backend(request.args.get("backend") or _get_tts_backend())
 
     if backend.id == tts_backends.SUPERTONIC:
         # Presets, not downloads — but only once the one model is on disk.
@@ -14393,6 +14400,23 @@ def nllb_download_progress_endpoint():
 _nllb_models_cache = {"models": [], "last_updated": 0}
 
 
+def _annotate_download_state(model, models_dir):
+    """Set `downloaded` (and `converted`) on a catalog entry from what is on disk.
+
+    A model whose weights were reclaimed after being converted to CTranslate2
+    is still usable — the CT2 path needs the HF directory only for its
+    tokenizer — so the conversion counts as downloaded. Reporting it missing
+    told the operator to re-download several GB they already had.
+    """
+    presence = model_presence(models_dir, model["model_id"].replace("/", "--"))
+    model["downloaded"] = presence.downloaded
+    model["converted"] = presence.ct2_variants
+    # Only meaningful when the HF weights are gone; the UI labels those so a
+    # CT2-only entry is not mistaken for a full download.
+    model["converted_only"] = presence.downloaded and not presence.has_weights
+    return model
+
+
 @app.route("/api/models/nllb-list", methods=["GET"])
 def list_nllb_models():
     """List available NLLB translation models from HuggingFace"""
@@ -14477,10 +14501,8 @@ def list_nllb_models():
             models = get_default_nllb_models()
 
     # Check which models are downloaded
-    models_dir = MODELS_DIR
     for model in models:
-        dir_name = model["model_id"].replace("/", "--")
-        model["downloaded"] = dir_has_weights(os.path.join(models_dir, dir_name))
+        _annotate_download_state(model, MODELS_DIR)
 
     return jsonify({"success": True, "models": models})
 
@@ -14493,10 +14515,8 @@ def list_madlad_models():
         return jsonify({"success": False, "error": "Access Denied"}), 403
 
     models = get_default_madlad_models()
-    models_dir = MODELS_DIR
     for model in models:
-        dir_name = model["model_id"].replace("/", "--")
-        model["downloaded"] = dir_has_weights(os.path.join(models_dir, dir_name))
+        _annotate_download_state(model, MODELS_DIR)
     return jsonify({"success": True, "models": models})
 
 

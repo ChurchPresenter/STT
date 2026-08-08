@@ -823,7 +823,14 @@
                         downloadedModels.forEach(model => {
                             const option = document.createElement('option');
                             option.value = model.model_id;
-                            option.textContent = model.name || model.model_id;
+                            // Say when only the CTranslate2 conversion is on disk:
+                            // it runs, but the original weights are gone, so an
+                            // engine that needs them would fail and the operator
+                            // should know why before picking one.
+                            const converted = model.converted_only && (model.converted || []).length
+                                ? ` (converted, ${model.converted.join(', ')})`
+                                : '';
+                            option.textContent = (model.name || model.model_id) + converted;
                             modelSelect.appendChild(option);
                         });
                         modelHint.textContent = 'Select from downloaded ' + label + ' models';
@@ -1969,15 +1976,61 @@
 
         const TTS_BACKENDS = ['edge', 'piper', 'supertonic'];
 
-        function toggleTTSBackendUI() {
+        // `skipLoad` is for the settings poll, which loads the panel itself
+        // with the server payload in hand; the dropdown's onchange has no
+        // payload and relies on us to fill it.
+        function toggleTTSBackendUI(skipLoad) {
             const backend = document.getElementById('tts_backend').value;
             for (const id of TTS_BACKENDS) {
                 const el = document.getElementById('tts_' + id + '_options');
                 if (el) el.style.display = id === backend ? '' : 'none';
             }
+            // Fill the panel we just revealed. Without this, switching to a
+            // backend the server hasn't saved shows its static placeholder
+            // ("No models downloaded") forever, because the only other caller
+            // branches on the SAVED backend and so never loads this one.
+            if (!skipLoad) loadBackendOptions(backend);
+        }
+
+        // One place that knows how to populate each backend's controls, shared
+        // by the dropdown's onchange and the settings poll. They used to be
+        // separate, which is exactly how they drifted apart.
+        // `data` is the /api/tts/status payload when we have it; on a manual
+        // switch there is no saved selection for that backend yet.
+        async function loadBackendOptions(backend, data) {
+            data = data || {};
+            if (backend === 'edge') {
+                if (!_edgeVoicesLoaded) {
+                    await loadEdgeVoices(data.edge_voice || 'en-US-AriaNeural');
+                }
+            } else if (backend === 'piper') {
+                if (!_piperModelsLoaded) await loadPiperModels();
+                if (data.piper_model) {
+                    document.getElementById('tts_piper_model').value = data.piper_model;
+                }
+            } else if (backend === 'supertonic') {
+                if (!_supertonicVoicesLoaded) await loadSupertonicVoices(data.supertonic_voice);
+                const steps = data.supertonic_steps;
+                if (typeof steps === 'number') {
+                    document.getElementById('tts_supertonic_steps').value = steps;
+                    document.getElementById('tts_supertonic_steps_value').textContent = steps + ' steps';
+                }
+                const warn = document.getElementById('tts_supertonic_lang_warning');
+                if (data.supertonic_language_supported === false) {
+                    warn.textContent = 'This model was not trained on the current target language — it will be read phonetically, which may sound wrong. Piper has a local voice for Chinese.';
+                    warn.style.display = '';
+                } else {
+                    warn.style.display = 'none';
+                }
+            }
         }
 
         let _edgeVoicesLoaded = false;
+        let _piperModelsLoaded = false;
+        let _supertonicVoicesLoaded = false;
+        // Last values the server reported, so the poll can tell "unchanged" from
+        // "the operator just picked something and hasn't saved yet".
+        let _lastServerTts = null;
 
         async function loadEdgeVoices(selectedVoice) {
             const langFilter = (document.getElementById('tts_edge_lang_filter')?.value || '').trim();
@@ -2021,6 +2074,7 @@
                     const sel = document.getElementById('tts_piper_model');
                     sel.innerHTML = '';
                     const downloaded = data.models.filter(m => m.downloaded && m.backend === 'piper');
+                    _piperModelsLoaded = true;
                     if (downloaded.length === 0) {
                         sel.innerHTML = '<option value="">No models downloaded - visit Model Manager</option>';
                     } else {
@@ -2040,9 +2094,13 @@
         async function loadSupertonicVoices(selectedVoice) {
             const sel = document.getElementById('tts_supertonic_voice');
             try {
-                const resp = await fetch('/api/tts/models');
+                // Ask for supertonic explicitly: the endpoint otherwise answers
+                // for the SAVED backend, which is the wrong list when the operator
+                // has just switched and not saved yet.
+                const resp = await fetch('/api/tts/models?backend=supertonic');
                 const data = await resp.json();
                 sel.innerHTML = '';
+                _supertonicVoicesLoaded = true;
                 if (data.success && data.models && data.models.length > 0) {
                     for (const id of data.models) {
                         const opt = document.createElement('option');
@@ -2065,38 +2123,28 @@
                 const response = await fetch('/api/tts/status');
                 const data = await response.json();
                 if (data.success) {
-                    document.getElementById('tts_enabled').checked = data.enabled || false;
-                    document.getElementById('tts_speed').value = data.speed || 1.0;
-                    document.getElementById('tts_speed_value').textContent = (data.speed || 1.0) + 'x';
+                    const backendSel = document.getElementById('tts_backend');
+                    const saved = data.backend || 'edge';
 
-                    // Set backend
-                    const backend = data.backend || 'edge';
-                    document.getElementById('tts_backend').value = backend;
-                    toggleTTSBackendUI();
+                    // This runs every 15s. Only adopt the server's values for
+                    // controls the operator hasn't touched since the last poll —
+                    // otherwise a selection made and not yet saved is silently
+                    // reverted mid-edit, which looks like the page ignoring you.
+                    const untouched = _lastServerTts === null
+                        || backendSel.value === _lastServerTts.backend;
 
-                    if (backend === 'edge') {
-                        // Load voices on first call or if not loaded yet
-                        if (!_edgeVoicesLoaded) {
-                            await loadEdgeVoices(data.edge_voice || 'en-US-AriaNeural');
-                        }
-                    } else if (backend === 'piper') {
-                        await loadPiperModels();
-                        if (data.piper_model) {
-                            document.getElementById('tts_piper_model').value = data.piper_model;
-                        }
-                    } else if (backend === 'supertonic') {
-                        await loadSupertonicVoices(data.supertonic_voice);
-                        const steps = data.supertonic_steps || 8;
-                        document.getElementById('tts_supertonic_steps').value = steps;
-                        document.getElementById('tts_supertonic_steps_value').textContent = steps + ' steps';
-                        const warn = document.getElementById('tts_supertonic_lang_warning');
-                        if (data.supertonic_language_supported === false) {
-                            warn.textContent = 'This model was not trained on the current target language — it will be read phonetically, which may sound wrong. Piper has a local voice for Chinese.';
-                            warn.style.display = '';
-                        } else {
-                            warn.style.display = 'none';
-                        }
+                    if (untouched) {
+                        document.getElementById('tts_enabled').checked = data.enabled || false;
+                        document.getElementById('tts_speed').value = data.speed || 1.0;
+                        document.getElementById('tts_speed_value').textContent = (data.speed || 1.0) + 'x';
+                        backendSel.value = saved;
                     }
+                    _lastServerTts = { backend: saved };
+
+                    const backend = backendSel.value;
+                    toggleTTSBackendUI(true);
+
+                    await loadBackendOptions(backend, data);
 
                     // Update status
                     const statusEl = document.getElementById('tts_status_text');
@@ -2154,6 +2202,9 @@
                 const data = await response.json();
                 if (data.success) {
                     showAlert('TTS settings saved!', 'success');
+                    // The operator's choice is now the server's, so let the next
+                    // poll re-sync everything rather than treating it as unsaved.
+                    _lastServerTts = null;
                     setTimeout(loadTTSSettings, 1000);
                 } else {
                     showAlert('Error saving TTS settings: ' + data.error, 'error');

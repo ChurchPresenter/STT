@@ -14,7 +14,7 @@ import threading
 import pytest
 
 from conftest import extract_definitions
-from stt.model_disk import dir_has_weights
+from stt.model_disk import dir_has_weights, model_presence
 from stt.session_meta import row_label_if_changed
 
 
@@ -359,6 +359,7 @@ class TestLocalFallbackReady:
             "speech_to_text.py", ["_local_fallback_ready"],
             {"config": cfg, "MODELS_DIR": str(models_dir),
              "dir_has_weights": dir_has_weights,
+             "model_presence": model_presence,
              "_resolve_live_translation_model_id": lambda lt: lt.get("translation_model", ""),
              "_llm_local_model_path": lambda d, repo, f: gguf_path})
 
@@ -382,6 +383,20 @@ class TestLocalFallbackReady:
         (tmp_path / "facebook--nllb-200-distilled-600M").mkdir(parents=True)
         cfg = self.nmt(tmp_path, "facebook/nllb-200-distilled-600M", False)
         assert self.ns(cfg, tmp_path)["_local_fallback_ready"]() is False
+
+    def test_a_ctranslate2_conversion_is_ready(self, tmp_path):
+        # Converting for CT2 and then reclaiming the HF weights leaves the
+        # tokenizer behind and the weights in a sibling directory. That machine
+        # translates fine, and used to be reported as having no model at all.
+        hf = tmp_path / "facebook--nllb-200-distilled-600M"
+        hf.mkdir(parents=True)
+        (hf / "config.json").write_text("{}")
+        ct2 = tmp_path / "facebook--nllb-200-distilled-600M-ct2-int8"
+        ct2.mkdir(parents=True)
+        (ct2 / "model.bin").write_text("x")
+
+        cfg = self.nmt(tmp_path, "facebook/nllb-200-distilled-600M", False)
+        assert self.ns(cfg, tmp_path)["_local_fallback_ready"]() is True
 
     def test_no_model_configured_is_not_ready(self, tmp_path):
         cfg = {"live_translation": {"translation_method": "nllb", "translation_model": ""}}
