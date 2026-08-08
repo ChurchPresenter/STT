@@ -228,6 +228,7 @@ def get_file_mover_runtime():
 
 
 import functools
+import inspect
 
 from flask import Flask, render_template, jsonify, request, redirect, send_from_directory, make_response, g, Response, stream_with_context
 from flask_socketio import SocketIO, emit
@@ -4423,6 +4424,27 @@ def _socket_event_allowed(event):
     return not request_origin.socket_event_requires_auth(event, origin.kind)
 
 
+def _handler_accepts_args(handler):
+    """Whether ``handler`` can take a positional argument.
+
+    A SocketIO event carries whatever payload the client chose to attach, and
+    most of our handlers declare no parameters because the display emits those
+    events bare. Nothing stops another client attaching data, and the library
+    passes it straight through — which raised TypeError out of a socket thread
+    for an event that is otherwise perfectly valid. Asking the signature once is
+    cheaper and safer than catching TypeError around the call, which would also
+    swallow a genuine TypeError raised inside the handler itself.
+    """
+    try:
+        params = inspect.signature(handler).parameters.values()
+    except (TypeError, ValueError):  # pragma: no cover - builtins/C callables
+        return True  # unknown shape: pass the payload through unchanged
+    return any(
+        p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD, p.VAR_POSITIONAL)
+        for p in params
+    )
+
+
 # Wrap socketio.on so every @socketio.on(...) handler registered below is
 # transparently logged — connect/disconnect as connections, everything else as
 # actions — and so state-changing events are gated for unauthenticated tunnel
@@ -4435,8 +4457,18 @@ def _logging_socketio_on(message, namespace=None):
     _kind = _request_log.KIND_CONNECTION if message in ("connect", "disconnect") else _request_log.KIND_ACTION
 
     def register(handler):
+        # Whether this handler can accept the payload a client may attach to the
+        # event. Most take none — the display emits request_all_entries with no
+        # data — but nothing stops any client sending some, and passing it to a
+        # zero-arg handler raised an unhandled TypeError out of a socket thread.
+        # Computed once at registration, so there is no per-event cost.
+        _accepts_payload = _handler_accepts_args(handler)
+
         @functools.wraps(handler)
         def instrumented(*args, **kwargs):
+            if not _accepts_payload:
+                # Drop what the handler cannot take rather than crashing on it.
+                args = ()
             if message == "connect":
                 _remember_socket_origin()
 
