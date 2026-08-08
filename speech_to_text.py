@@ -9714,15 +9714,44 @@ def _tunnel_config():
     return config.get("web_server", {}).get("cloudflare_tunnel", {})
 
 
+def _tunnel_bin_dir():
+    """Where our own downloaded cloudflared lives (beside the models cache)."""
+    return os.path.join(APP_DIR, "bin")
+
+
+def _resolve_cloudflared(configured):
+    """cloudflared path, preferring the copy we downloaded ourselves."""
+    return tunnel_mod.resolve_binary(configured, managed_dir=_tunnel_bin_dir())
+
+
+def _install_cloudflared():
+    """Fetch the official cloudflared build for this platform. Returns its path.
+
+    cloudflared is a system binary, so the dependency sync (pip only) can never
+    deliver it; without this every box needs a manual apt/brew step before the
+    Start button works. Reuses the app's retrying downloader."""
+    def _fetch(url, dest):
+        outcome = download_url_to_file(url, dest, log=lambda m: print(f"[TUNNEL] {m}"))
+        if outcome != "ok":
+            raise RuntimeError(f"download {outcome}")
+
+    print("[TUNNEL] cloudflared not installed - fetching the official build...")
+    path = tunnel_mod.install_cloudflared(_tunnel_bin_dir(), _fetch)
+    print(f"[TUNNEL] Installed cloudflared at {path}")
+    return path
+
+
 def _get_tunnel():
     """The process manager singleton, rebuilt if the configured binary changed."""
     global _cloudflare_tunnel
     binary = _tunnel_config().get("binary", "cloudflared") or "cloudflared"
     with _cloudflare_tunnel_lock:
-        if _cloudflare_tunnel is None:
-            _cloudflare_tunnel = tunnel_mod.CloudflareTunnel(binary=binary)
-        elif _cloudflare_tunnel._binary != binary and not _cloudflare_tunnel.is_running():
-            _cloudflare_tunnel = tunnel_mod.CloudflareTunnel(binary=binary)
+        if _cloudflare_tunnel is None or (
+            _cloudflare_tunnel._binary != binary and not _cloudflare_tunnel.is_running()
+        ):
+            _cloudflare_tunnel = tunnel_mod.CloudflareTunnel(
+                binary=binary, resolve=_resolve_cloudflared
+            )
         return _cloudflare_tunnel
 
 
@@ -9807,6 +9836,26 @@ def tunnel_start():
     if tunnel.is_running():
         _note_access_detail("tunnel already running")
         return jsonify(_tunnel_status_payload())
+
+    # Fetch cloudflared on first use rather than making every box do a manual
+    # apt/brew step. Blocking: ~40MB, so the first press takes noticeably longer
+    # than later ones, which the settings page warns about.
+    if _resolve_cloudflared(_tunnel_config().get("binary", "cloudflared")) is None:
+        if not coerce_bool(_tunnel_config().get("auto_download", True), default=True):
+            payload = _tunnel_status_payload()
+            payload["error"] = (
+                "cloudflared is not installed and auto-download is off. Install it, or set "
+                "web_server.cloudflare_tunnel.auto_download to true."
+            )
+            return jsonify(payload), 502
+        try:
+            _install_cloudflared()
+        except Exception as e:
+            print(f"[TUNNEL] Install failed: {e}")
+            payload = _tunnel_status_payload()
+            payload["error"] = str(e)
+            _note_access_detail(f"tunnel install failed: {e}")
+            return jsonify(payload), 502
 
     print(f"[TUNNEL] Starting Cloudflare quick tunnel to 127.0.0.1:{port}")
     tunnel.start(port)

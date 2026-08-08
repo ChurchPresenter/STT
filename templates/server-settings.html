@@ -839,6 +839,10 @@
             const btn = document.getElementById('tunnel-start-btn');
             btn.disabled = true;
             renderTunnel({ status: 'starting' });
+            // First press on a box without cloudflared downloads ~40MB first,
+            // so say so rather than leaving "Starting…" sitting there.
+            document.getElementById('tunnel-autostop').textContent =
+                'starting (first run downloads cloudflared, ~40MB)';
             try {
                 // cloudflared takes a few seconds to be assigned a URL, and the
                 // server waits for it so the response carries a usable link.

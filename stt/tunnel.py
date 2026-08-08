@@ -69,27 +69,185 @@ _BINARY_CANDIDATES = (
 )
 
 
-def resolve_binary(configured: str, candidates: Any = _BINARY_CANDIDATES) -> Optional[str]:
+def resolve_binary(
+    configured: str,
+    candidates: Any = _BINARY_CANDIDATES,
+    managed_dir: Optional[str] = None,
+) -> Optional[str]:
     """An executable path for cloudflared, or None if it cannot be found.
 
-    An explicit path in config is honoured as given. A bare name is looked up on
-    PATH first, then in the known install locations — a supervisor-started
-    server inherits a minimal PATH, so PATH alone finds nothing on a machine
-    where the operator installed it with Homebrew.
+    An explicit path in config is honoured as given. A bare name is looked up in
+    the copy we manage ourselves first, then on PATH, then in the known install
+    locations — a supervisor-started server inherits a minimal PATH, so PATH
+    alone finds nothing on a machine where the operator installed it with
+    Homebrew.
+
+    Ours wins over a system copy so a box that downloaded a working binary keeps
+    using it, rather than silently switching to whatever a later apt or brew
+    install dropped on PATH.
     """
     configured = (configured or "cloudflared").strip()
 
     if os.path.sep in configured or (os.path.altsep and os.path.altsep in configured):
-        return configured if os.path.isfile(configured) and os.access(configured, os.X_OK) else None
+        return configured if _is_executable(configured) else None
+
+    if managed_dir:
+        managed = managed_binary_path(managed_dir)
+        if _is_executable(managed):
+            return managed
 
     found = shutil.which(configured)
     if found:
         return found
 
     for candidate in candidates:
-        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+        if _is_executable(candidate):
             return candidate
     return None
+
+
+def _is_executable(path: str) -> bool:
+    return os.path.isfile(path) and os.access(path, os.X_OK)
+
+
+# ─── self-install ───────────────────────────────────────────────────────────
+#
+# cloudflared is a system binary, not a pip package, so the server's dependency
+# sync (which only runs `uv pip install -r requirements.txt`) can never bring it
+# in. Rather than make every box need a manual apt/brew step, fetch the official
+# release build on first use.
+#
+# Cloudflare publishes no checksum files alongside these assets, so HTTPS to
+# github.com is the whole trust anchor. That is the same basis as `brew install`
+# and the .deb repo, but it is worth being explicit about.
+
+CLOUDFLARED_RELEASE_BASE = "https://github.com/cloudflare/cloudflared/releases/latest/download"
+
+#: (system, machine) -> release asset name. Machine names are what
+#: platform.machine() reports, which differs per OS for the same silicon.
+_ASSETS = {
+    ("linux", "x86_64"): "cloudflared-linux-amd64",
+    ("linux", "amd64"): "cloudflared-linux-amd64",
+    ("linux", "aarch64"): "cloudflared-linux-arm64",
+    ("linux", "arm64"): "cloudflared-linux-arm64",
+    ("linux", "armv7l"): "cloudflared-linux-armhf",
+    ("linux", "armv6l"): "cloudflared-linux-arm",
+    ("linux", "i386"): "cloudflared-linux-386",
+    ("linux", "i686"): "cloudflared-linux-386",
+    ("darwin", "x86_64"): "cloudflared-darwin-amd64.tgz",
+    ("darwin", "arm64"): "cloudflared-darwin-arm64.tgz",
+    ("windows", "amd64"): "cloudflared-windows-amd64.exe",
+    ("windows", "x86_64"): "cloudflared-windows-amd64.exe",
+    ("windows", "i386"): "cloudflared-windows-386.exe",
+    ("windows", "x86"): "cloudflared-windows-386.exe",
+}
+
+
+def cloudflared_asset(system: str, machine: str) -> Optional[str]:
+    """Release asset for a platform, or None where Cloudflare ships no build."""
+    return _ASSETS.get((system.strip().lower(), machine.strip().lower()))
+
+
+def cloudflared_download_url(asset: str) -> str:
+    """Download URL for a release asset, always the latest published build."""
+    return f"{CLOUDFLARED_RELEASE_BASE}/{asset}"
+
+
+def managed_binary_path(bin_dir: str, system: Optional[str] = None) -> str:
+    """Where our own copy of cloudflared lives."""
+    name = "cloudflared.exe" if (system or _current_system()) == "windows" else "cloudflared"
+    return os.path.join(bin_dir, name)
+
+
+def _current_system() -> str:
+    import platform
+
+    return platform.system().strip().lower()
+
+
+def _current_machine() -> str:
+    import platform
+
+    return platform.machine().strip().lower()
+
+
+def install_cloudflared(
+    bin_dir: str,
+    fetch: Callable[[str, str], Any],
+    system: Optional[str] = None,
+    machine: Optional[str] = None,
+) -> str:
+    """Download the official cloudflared build into ``bin_dir`` and return its path.
+
+    ``fetch(url, dest)`` does the transfer (injected so this is testable, and so
+    the caller can reuse the retrying downloader the rest of the app uses).
+    macOS ships a .tgz rather than a bare executable, so that one is unpacked.
+
+    Raises RuntimeError with an actionable message on any failure — the caller
+    turns it into the error shown on the settings page.
+    """
+    system = (system or _current_system()).lower()
+    machine = (machine or _current_machine()).lower()
+
+    asset = cloudflared_asset(system, machine)
+    if asset is None:
+        raise RuntimeError(
+            f"No cloudflared build published for {system}/{machine}. "
+            "Install it by hand and set web_server.cloudflare_tunnel.binary to its path."
+        )
+
+    os.makedirs(bin_dir, exist_ok=True)
+    target = managed_binary_path(bin_dir, system)
+    # Download beside the target, then move: a half-written file left at the
+    # real path would look installed and fail to exec on every later press.
+    staging = target + ".part"
+
+    try:
+        fetch(cloudflared_download_url(asset), staging)
+
+        if asset.endswith(".tgz"):
+            _extract_tgz_binary(staging, target)
+            os.remove(staging)
+        else:
+            os.replace(staging, target)
+
+        os.chmod(target, 0o755)
+    except Exception as exc:
+        for leftover in (staging, target + ".tmpdir"):
+            _remove_quietly(leftover)
+        raise RuntimeError(f"Could not install cloudflared: {exc}") from exc
+
+    if not _is_executable(target):
+        raise RuntimeError(f"Downloaded cloudflared is not executable at {target}")
+    return target
+
+
+def _extract_tgz_binary(archive_path: str, target: str) -> None:
+    """Pull the cloudflared executable out of the macOS .tgz onto ``target``."""
+    import tarfile
+
+    with tarfile.open(archive_path, "r:gz") as tar:
+        member = next(
+            (m for m in tar.getmembers() if m.isfile() and os.path.basename(m.name) == "cloudflared"),
+            None,
+        )
+        if member is None:
+            raise RuntimeError("archive contained no cloudflared executable")
+        extracted = tar.extractfile(member)
+        if extracted is None:
+            raise RuntimeError("could not read cloudflared from the archive")
+        with open(target, "wb") as out:
+            shutil.copyfileobj(extracted, out)
+
+
+def _remove_quietly(path: str) -> None:
+    try:
+        if os.path.isdir(path):
+            shutil.rmtree(path, ignore_errors=True)
+        elif os.path.exists(path):
+            os.remove(path)
+    except OSError:
+        pass
 
 
 def build_command(binary: str, port: int, host: str = "127.0.0.1") -> List[str]:

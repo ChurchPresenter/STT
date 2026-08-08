@@ -1,5 +1,7 @@
 """Cloudflare quick-tunnel lifecycle and URL scraping (stt/tunnel.py)."""
 
+import os
+import shutil
 import threading
 
 import pytest
@@ -11,6 +13,10 @@ from stt.tunnel import (
     STATUS_STOPPED,
     CloudflareTunnel,
     build_command,
+    cloudflared_asset,
+    cloudflared_download_url,
+    install_cloudflared,
+    managed_binary_path,
     parse_quick_tunnel_url,
     resolve_binary,
     should_auto_stop,
@@ -295,3 +301,106 @@ class TestLifecycle:
         tunnel.start(8080)
         tunnel.wait_for_url(timeout=5)
         assert tunnel.status()["uptime_seconds"] == pytest.approx(42.0)
+
+
+class TestCloudflaredAsset:
+    def test_the_platforms_we_actually_ship_on(self):
+        assert cloudflared_asset("Linux", "x86_64") == "cloudflared-linux-amd64"
+        assert cloudflared_asset("Linux", "aarch64") == "cloudflared-linux-arm64"
+        assert cloudflared_asset("Darwin", "arm64") == "cloudflared-darwin-arm64.tgz"
+        assert cloudflared_asset("Darwin", "x86_64") == "cloudflared-darwin-amd64.tgz"
+        assert cloudflared_asset("Windows", "AMD64") == "cloudflared-windows-amd64.exe"
+
+    def test_unsupported_platform_returns_none(self):
+        assert cloudflared_asset("freebsd", "x86_64") is None
+        assert cloudflared_asset("linux", "s390x") is None
+
+    def test_only_macos_needs_unpacking(self):
+        # The install path branches on this, so a change in Cloudflare's
+        # packaging should break a test rather than a production Start press.
+        for system, machine in (("linux", "x86_64"), ("windows", "amd64")):
+            assert not cloudflared_asset(system, machine).endswith(".tgz")
+        assert cloudflared_asset("darwin", "arm64").endswith(".tgz")
+
+    def test_download_url_points_at_the_latest_release(self):
+        url = cloudflared_download_url("cloudflared-linux-amd64")
+        assert url == (
+            "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64"
+        )
+
+    def test_managed_path_gets_an_exe_suffix_on_windows_only(self):
+        assert managed_binary_path("/opt/stt/bin", "windows").endswith("cloudflared.exe")
+        assert managed_binary_path("/opt/stt/bin", "linux").endswith("cloudflared")
+
+
+class TestInstallCloudflared:
+    def _fake_fetch(self, payload=b"#!/bin/sh\nexit 0\n"):
+        def fetch(url, dest):
+            with open(dest, "wb") as f:
+                f.write(payload)
+        return fetch
+
+    def test_installs_a_bare_binary_and_makes_it_executable(self, tmp_path):
+        path = install_cloudflared(
+            str(tmp_path), self._fake_fetch(), system="linux", machine="x86_64"
+        )
+        assert path == str(tmp_path / "cloudflared")
+        assert os.access(path, os.X_OK)
+
+    def test_unpacks_the_macos_archive(self, tmp_path):
+        archive = self._make_tgz(tmp_path, "cloudflared", b"mach-o-ish")
+
+        def fetch(url, dest):
+            shutil.copyfile(archive, dest)
+
+        path = install_cloudflared(str(tmp_path / "bin"), fetch, system="darwin", machine="arm64")
+        assert open(path, "rb").read() == b"mach-o-ish"
+        assert os.access(path, os.X_OK)
+
+    def test_leaves_no_partial_file_when_the_download_fails(self, tmp_path):
+        # A half-written file at the real path would look installed and fail to
+        # exec on every later press.
+        def fetch(url, dest):
+            with open(dest, "wb") as f:
+                f.write(b"partial")
+            raise OSError("connection reset")
+
+        with pytest.raises(RuntimeError, match="Could not install cloudflared"):
+            install_cloudflared(str(tmp_path), fetch, system="linux", machine="x86_64")
+        assert list(tmp_path.iterdir()) == []
+
+    def test_unsupported_platform_says_what_to_do_instead(self, tmp_path):
+        with pytest.raises(RuntimeError, match="No cloudflared build published"):
+            install_cloudflared(str(tmp_path), self._fake_fetch(), system="freebsd", machine="x86_64")
+
+    def test_archive_without_the_binary_is_an_error_not_a_silent_success(self, tmp_path):
+        archive = self._make_tgz(tmp_path, "README.md", b"nope")
+
+        def fetch(url, dest):
+            shutil.copyfile(archive, dest)
+
+        with pytest.raises(RuntimeError, match="Could not install cloudflared"):
+            install_cloudflared(str(tmp_path / "bin"), fetch, system="darwin", machine="arm64")
+
+    def test_downloaded_copy_is_preferred_over_a_system_one(self, tmp_path, monkeypatch):
+        # A later apt/brew install must not silently take over from the binary
+        # this box already downloaded and is known to work.
+        monkeypatch.setattr("stt.tunnel.shutil.which", lambda name: "/usr/bin/cloudflared")
+        install_cloudflared(str(tmp_path), self._fake_fetch(), system="linux", machine="x86_64")
+        assert resolve_binary("cloudflared", managed_dir=str(tmp_path)) == str(tmp_path / "cloudflared")
+
+    def test_managed_dir_is_skipped_when_empty(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("stt.tunnel.shutil.which", lambda name: "/usr/bin/cloudflared")
+        assert resolve_binary("cloudflared", managed_dir=str(tmp_path)) == "/usr/bin/cloudflared"
+
+    @staticmethod
+    def _make_tgz(tmp_path, member_name, payload):
+        import tarfile
+
+        inner = tmp_path / member_name
+        inner.write_bytes(payload)
+        archive = tmp_path / "asset.tgz"
+        with tarfile.open(archive, "w:gz") as tar:
+            tar.add(str(inner), arcname=member_name)
+        inner.unlink()
+        return str(archive)
