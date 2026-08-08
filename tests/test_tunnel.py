@@ -117,6 +117,14 @@ class TestShouldAutoStop:
         assert should_auto_stop(True, False, 100.0, 130.0, delay_seconds=120) is False
         assert should_auto_stop(True, False, 100.0, 230.0, delay_seconds=120) is True
 
+    def test_manual_mode_never_stops_it(self):
+        # Operator closes it by hand; no elapsed time should ever fire the stop.
+        assert should_auto_stop(True, False, 100.0, 99999.0, auto_stop_enabled=False) is False
+
+    def test_manual_mode_is_opt_in(self):
+        # The safe behaviour is the default: an omitted flag still auto-stops.
+        assert should_auto_stop(True, False, idle_since=100.0, now=200.0) is True
+
 
 class FakeProcess:
     """A cloudflared stand-in whose log stream the test drives line by line.

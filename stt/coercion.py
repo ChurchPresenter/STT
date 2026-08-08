@@ -26,6 +26,33 @@ def coerce_int(value: object, default: int, lo: Optional[int] = None, hi: Option
     return n
 
 
+#: Strings a checkbox or show-control surface sends for "on". A JSON body sends
+#: a real bool, but a form or query string can only send text, and "false"/"0"
+#: are truthy strings in Python — the trap this function exists to avoid.
+_TRUE_STRINGS = frozenset({"1", "true", "yes", "on", "y", "t"})
+_FALSE_STRINGS = frozenset({"0", "false", "no", "off", "n", "f", ""})
+
+
+def coerce_bool(value: object, default: bool = False) -> bool:
+    """Coerce ``value`` to a bool, falling back to ``default`` on any failure.
+
+    Real bools and numbers pass through. Strings are matched case-insensitively
+    against the usual on/off spellings; anything unrecognised returns
+    ``default`` rather than guessing, so a typo can't silently read as "on".
+    """
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        text = value.strip().lower()
+        if text in _TRUE_STRINGS:
+            return True
+        if text in _FALSE_STRINGS:
+            return False
+    return default
+
+
 def coerce_float(value: object, default: float, lo: Optional[float] = None, hi: Optional[float] = None) -> float:
     """Coerce ``value`` to a float, falling back to ``default`` on any failure.
 

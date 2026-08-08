@@ -57,7 +57,7 @@ for _mig_name in ("config.json", "custom_dictionary.json", "word_highlighting.js
 # safe_model_path is re-imported and safe_managed_path keeps its APP_DIR default.
 from stt import paths as _paths
 from stt.paths import safe_model_path  # noqa: F401
-from stt.coercion import coerce_float, coerce_int
+from stt.coercion import coerce_bool, coerce_float, coerce_int
 from stt import pair_tokens as _pair_tokens_mod
 from stt.http_params import merge_request_params, parse_json_body as _parse_json_body
 from stt.model_disk import dir_has_weights, dir_is_writable, has_weight_file, is_weight_file  # noqa: F401
@@ -9734,10 +9734,16 @@ def _tunnel_status_payload():
         _tunnel_config().get("auto_stop_seconds"), tunnel_mod.DEFAULT_AUTO_STOP_SECONDS, lo=0
     )
     status["binary"] = _tunnel_config().get("binary", "cloudflared")
+    status["auto_stop_enabled"] = bool(_tunnel_config().get("auto_stop_enabled", True))
     # Seconds until the auto-stop fires, so the UI can count down instead of
     # the tunnel vanishing unannounced. None when nothing is pending.
     idle_since = _transcription_idle_since
-    if status["status"] == tunnel_mod.STATUS_RUNNING and idle_since is not None and not _ts_get("running", False):
+    if (
+        status["auto_stop_enabled"]
+        and status["status"] == tunnel_mod.STATUS_RUNNING
+        and idle_since is not None
+        and not _ts_get("running", False)
+    ):
         remaining = status["auto_stop_seconds"] - (time.time() - idle_since)
         status["auto_stop_in"] = max(0, round(remaining))
     else:
@@ -9750,6 +9756,39 @@ def tunnel_status():
     """Current tunnel state, URL and pending auto-stop."""
     if not check_ip_whitelist():
         return jsonify({"success": False, "error": "Access Denied"}), 403
+    return jsonify(_tunnel_status_payload())
+
+
+@app.route("/api/tunnel/settings", methods=["POST"])
+def tunnel_settings():
+    """Update tunnel settings (auto-stop on/off, delay, cloudflared path).
+
+    Saved immediately rather than with the main settings form: the tunnel
+    controls live outside it, and the operator flipping auto-stop is usually
+    doing so about a tunnel that is already up."""
+    if not check_ip_whitelist():
+        return jsonify({"success": False, "error": "Access Denied"}), 403
+
+    global config
+    data = _control_params(keep_blank=True)
+
+    section = config.setdefault("web_server", {}).setdefault("cloudflare_tunnel", {})
+    changed = []
+
+    if "auto_stop_enabled" in data:
+        section["auto_stop_enabled"] = coerce_bool(data["auto_stop_enabled"])
+        changed.append(f"auto_stop={'on' if section['auto_stop_enabled'] else 'off'}")
+    if "auto_stop_seconds" in data:
+        section["auto_stop_seconds"] = coerce_int(
+            data["auto_stop_seconds"], tunnel_mod.DEFAULT_AUTO_STOP_SECONDS, lo=0, hi=86400
+        )
+        changed.append(f"delay={section['auto_stop_seconds']}s")
+    if "binary" in data:
+        section["binary"] = str(data["binary"]).strip() or "cloudflared"
+        changed.append(f"binary={section['binary']}")
+
+    save_config(config)
+    _note_access_detail("tunnel settings " + (", ".join(changed) if changed else "unchanged"))
     return jsonify(_tunnel_status_payload())
 
 
@@ -9830,7 +9869,8 @@ def _tunnel_auto_stop_watcher():
             )
             tunnel = _get_tunnel()
             if tunnel_mod.should_auto_stop(
-                tunnel.is_running(), running, _transcription_idle_since, time.time(), delay
+                tunnel.is_running(), running, _transcription_idle_since, time.time(), delay,
+                auto_stop_enabled=bool(_tunnel_config().get("auto_stop_enabled", True)),
             ):
                 print(f"[TUNNEL] Auto-stopping {delay}s after transcription ended")
                 tunnel.stop(reason="transcription ended")

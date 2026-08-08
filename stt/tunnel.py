@@ -103,8 +103,13 @@ def should_auto_stop(
     idle_since: Optional[float],
     now: float,
     delay_seconds: float = DEFAULT_AUTO_STOP_SECONDS,
+    auto_stop_enabled: bool = True,
 ) -> bool:
     """Whether a running tunnel has been idle long enough to shut itself down.
+
+    ``auto_stop_enabled`` False means the operator closes it by hand — useful
+    when the tunnel is wanted for something other than the service it happens
+    to sit alongside.
 
     ``idle_since`` is when transcription last stopped, or None if it has not
     run (or is running now). A tunnel started before any transcription stays
@@ -113,6 +118,8 @@ def should_auto_stop(
     it. Restarting transcription clears ``idle_since``, which cancels a pending
     stop rather than letting it fire mid-service.
     """
+    if not auto_stop_enabled:
+        return False
     if not tunnel_running or transcription_running or idle_since is None:
         return False
     return (now - idle_since) >= delay_seconds

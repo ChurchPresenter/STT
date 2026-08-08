@@ -1,6 +1,6 @@
 """Safe numeric coercion (stt/coercion.py)."""
 
-from stt.coercion import coerce_float, coerce_int
+from stt.coercion import coerce_bool, coerce_float, coerce_int
 
 
 class TestCoerceInt:
@@ -60,3 +60,33 @@ class TestCoerceFloat:
 
     def test_default_not_re_clamped(self):
         assert coerce_float("x", 1.0, lo=10.0, hi=20.0) == 1.0
+
+
+class TestCoerceBool:
+    def test_real_bools_pass_through(self):
+        assert coerce_bool(True) is True
+        assert coerce_bool(False) is False
+
+    def test_on_spellings(self):
+        for value in ("1", "true", "TRUE", " Yes ", "on", "y", "t"):
+            assert coerce_bool(value) is True, value
+
+    def test_off_spellings(self):
+        for value in ("0", "false", "No", "OFF", "n", "f", ""):
+            assert coerce_bool(value, default=True) is False, value
+
+    def test_the_string_false_is_not_truthy(self):
+        # The whole point: bool("false") is True in Python, and a form or query
+        # string can only ever send text.
+        assert coerce_bool("false") is False
+
+    def test_numbers_follow_truthiness(self):
+        assert coerce_bool(1) is True
+        assert coerce_bool(0) is False
+        assert coerce_bool(2.5) is True
+
+    def test_unrecognised_returns_the_default_rather_than_guessing(self):
+        assert coerce_bool("maybe", default=True) is True
+        assert coerce_bool("maybe", default=False) is False
+        assert coerce_bool(None, default=True) is True
+        assert coerce_bool({}, default=False) is False

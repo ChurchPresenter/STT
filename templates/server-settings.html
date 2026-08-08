@@ -435,8 +435,12 @@
                             <span id="tunnel-autostop" style="font-size: 0.78em; color: var(--text-secondary); font-variant-numeric: tabular-nums;"></span>
                         </div>
                         <div style="font-size: 0.82em; color: var(--text-secondary); margin-bottom: 10px;">
-                            Gives this server a public URL on demand. It closes itself
-                            <span id="tunnel-delay-label">60</span>s after transcription ends.
+                            Gives this server a public URL on demand.
+                            <span id="tunnel-mode-hint">It closes itself <span id="tunnel-delay-label">60</span>s after transcription ends.</span>
+                        </div>
+                        <div class="checkbox-group" style="margin-bottom: 10px;">
+                            <input type="checkbox" id="tunnel_auto_stop_enabled" onchange="saveTunnelAutoStop()" checked>
+                            <label for="tunnel_auto_stop_enabled">Close automatically after transcription ends</label>
                         </div>
                         <div style="display: flex; gap: 8px; margin-bottom: 10px; flex-wrap: wrap;">
                             <button type="button" id="tunnel-start-btn" onclick="startTunnel()" class="btn-save" style="background: var(--success); flex: 0 0 auto; width: auto; margin: 0; padding: 6px 14px;">▶️ Start</button>
@@ -729,6 +733,33 @@
         // =====================================================================
 
         let _tunnelUrl = null;
+        let _tunnelAutoStopSaving = false;
+
+        async function saveTunnelAutoStop() {
+            const box = document.getElementById('tunnel_auto_stop_enabled');
+            const wanted = box.checked;
+            _tunnelAutoStopSaving = true;
+            try {
+                const resp = await fetch('/api/tunnel/settings', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ auto_stop_enabled: wanted })
+                });
+                const data = await resp.json();
+                if (!data.success) throw new Error(data.error || 'save failed');
+                _tunnelAutoStopSaving = false;
+                renderTunnel(data);
+                showAlert(wanted
+                    ? '✅ Tunnel will close automatically after transcription ends'
+                    : '⚠️ Tunnel will stay open until you press Stop', wanted ? 'success' : 'info');
+            } catch (e) {
+                // Put the checkbox back: leaving it showing a setting that
+                // didn't save is how a tunnel gets left open by accident.
+                box.checked = !wanted;
+                _tunnelAutoStopSaving = false;
+                showAlert('❌ Could not save auto-stop setting: ' + e.message, 'error');
+            }
+        }
 
         function renderTunnel(data) {
             const badge = document.getElementById('tunnel-status-badge');
@@ -777,11 +808,21 @@
             if (typeof data.auto_stop_seconds === 'number') {
                 document.getElementById('tunnel-delay-label').textContent = data.auto_stop_seconds;
             }
+
+            // Don't fight the operator mid-click: only sync the checkbox from
+            // the server when a save isn't in flight.
+            const autoBox = document.getElementById('tunnel_auto_stop_enabled');
+            if (typeof data.auto_stop_enabled === 'boolean' && !_tunnelAutoStopSaving) {
+                autoBox.checked = data.auto_stop_enabled;
+            }
+            document.getElementById('tunnel-mode-hint').style.display =
+                autoBox.checked ? '' : 'none';
+
             // Count the pending auto-stop down rather than letting the tunnel
             // vanish without warning while someone is using the link.
             autoEl.textContent = (data.auto_stop_in !== null && data.auto_stop_in !== undefined)
                 ? `closing in ${data.auto_stop_in}s`
-                : '';
+                : (autoBox.checked ? '' : 'stays open until stopped');
         }
 
         async function loadTunnelStatus() {
