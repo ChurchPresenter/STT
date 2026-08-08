@@ -490,6 +490,9 @@
 
                 <hr class="divider">
 
+                <!-- Wrapped so the unsaved-changes tracker can tell a TTS edit
+                     from a translation edit: they save to different endpoints. -->
+                <div id="tts-settings-section">
                 <h3 style="color: var(--text-primary); font-size: 1em; margin: 12px 0 8px;">🔊 Text-to-Speech (TTS)</h3>
                 <small style="color: var(--text-secondary); display: block; margin-bottom: 10px;">Synthesize speech from translated text. Choose Edge TTS (cloud, 400+ voices) or Piper (local/offline).</small>
 
@@ -561,6 +564,7 @@
                     <strong>TTS Status:</strong>
                     <span id="tts_status_text" style="color: var(--text-secondary);">Disabled</span>
                 </p>
+                </div>
 
                 <div class="info-box" style="margin-top: 14px;">
                     💡 <strong>Hot Switch:</strong> Change target language instantly while transcription is running.
@@ -660,7 +664,7 @@
             <div class="unsaved-bar-inner">
                 <span class="unsaved-dot" aria-hidden="true"></span>
                 <span class="unsaved-label">Unsaved changes</span>
-                <button onclick="saveSettings()" class="btn-save unsaved-save">Save</button>
+                <button onclick="saveDirtySections()" class="btn-save unsaved-save">Save</button>
             </div>
         </div>
 {% endblock %}
@@ -671,18 +675,50 @@
         let availableLanguagesByMethod = {};
         let currentSettings = {};
         let lastRemoteModel = '';
-        let unsavedChanges = false;
+        // Which sections have unsaved edits. This panel holds two independent
+        // save targets — translation settings and TTS settings, different
+        // endpoints — so a single boolean let the bar's Save clear a TTS edit
+        // it had never sent anywhere.
+        const dirtySections = new Set();
 
-        function markDirty() {
-            if (!unsavedChanges) {
-                unsavedChanges = true;
-                document.getElementById('unsaved-bar').classList.add('is-visible');
-            }
+        function sectionOf(target) {
+            return (target && target.closest && target.closest('#tts-settings-section'))
+                ? 'tts' : 'translation';
+        }
+
+        function refreshUnsavedBar() {
+            document.getElementById('unsaved-bar')
+                .classList.toggle('is-visible', dirtySections.size > 0);
+        }
+
+        function markDirty(event) {
+            dirtySections.add(sectionOf(event && event.target));
+            refreshUnsavedBar();
         }
 
         function markClean() {
-            unsavedChanges = false;
-            document.getElementById('unsaved-bar').classList.remove('is-visible');
+            dirtySections.clear();
+            refreshUnsavedBar();
+        }
+
+        // Each saver clears only what it actually saved, so saving one section
+        // can't dismiss the other's pending edit.
+        function markSectionClean(section) {
+            dirtySections.delete(section);
+            refreshUnsavedBar();
+        }
+
+        // The bar promises to save whatever is unsaved, so it has to cover both
+        // endpoints. Only the sections actually edited are sent: re-posting
+        // untouched translation settings could overwrite a change made from
+        // another browser, or one Machine A pushed to us.
+        async function saveDirtySections() {
+            const sections = [...dirtySections];
+            if (!sections.length) return;
+            if (sections.includes('translation')) await saveSettings(true);
+            if (sections.includes('tts')) await saveTTSSettings(true);
+            // One message for one press, however many endpoints were involved.
+            if (!dirtySections.size) showAlert('Settings saved!', 'success');
         }
 
         // Socket.IO connection for real-time preview
@@ -1070,7 +1106,7 @@
             }
         }
 
-        async function saveSettings() {
+        async function saveSettings(quiet) {
             const loading = document.getElementById('loading');
             loading.style.display = 'block';
 
@@ -1110,8 +1146,8 @@
 
                 const data = await response.json();
                 if (data.success) {
-                    showAlert('Translation settings saved successfully!', 'success');
-                    markClean();
+                    if (!quiet) showAlert('Translation settings saved successfully!', 'success');
+                    markSectionClean('translation');
                     checkStatus();
                     if (window.refreshSysreqBanner) window.refreshSysreqBanner();
                     // Machine B may have been reconfigured on its own side while
@@ -2176,7 +2212,7 @@
             }
         }
 
-        async function saveTTSSettings() {
+        async function saveTTSSettings(quiet) {
             const backend = document.getElementById('tts_backend').value;
             const settings = {
                 enabled: document.getElementById('tts_enabled').checked,
@@ -2201,7 +2237,8 @@
                 });
                 const data = await response.json();
                 if (data.success) {
-                    showAlert('TTS settings saved!', 'success');
+                    if (!quiet) showAlert('TTS settings saved!', 'success');
+                    markSectionClean('tts');
                     // The operator's choice is now the server's, so let the next
                     // poll re-sync everything rather than treating it as unsaved.
                     _lastServerTts = null;
