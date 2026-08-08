@@ -1,6 +1,7 @@
 """Unit tests for stt.request_log — the size-capped SQLite access log."""
 
 import os
+import sqlite3
 
 import pytest
 
@@ -290,3 +291,64 @@ def test_distinct_ips_respects_limit(log):
     for i in range(10):
         log.log(source=SOURCE_WEB, kind=KIND_HTTP, path="/", ip=f"10.0.0.{i}")
     assert len(log.distinct_ips(limit=4)) == 4
+
+
+class TestOriginColumn:
+    def test_origin_is_stored_and_returned(self, tmp_path):
+        log = RequestLog(str(tmp_path / "a.db"))
+        log.log(source="api", kind="http", path="/api/config", ip="203.0.113.9", origin="tunnel")
+        rows = log.query()
+        assert rows[0]["origin"] == "tunnel"
+
+    def test_origin_filter_selects_only_that_traffic(self, tmp_path):
+        log = RequestLog(str(tmp_path / "b.db"))
+        log.log(source="api", kind="http", path="/a", origin="tunnel")
+        log.log(source="api", kind="http", path="/b", origin="lan")
+        log.log(source="api", kind="http", path="/c", origin="local")
+        assert [r["path"] for r in log.query(origin="tunnel")] == ["/a"]
+        assert len(log.query()) == 3
+
+    def test_rows_without_an_origin_still_work(self, tmp_path):
+        # Socket/HTTP paths that don't pass one must not break.
+        log = RequestLog(str(tmp_path / "c.db"))
+        log.log(source="web", kind="http", path="/")
+        assert log.query()[0]["origin"] is None
+
+    def test_migrates_a_database_created_before_the_column_existed(self, tmp_path):
+        # Deployed boxes upgrade in place and keep their access_log.db. Without
+        # the ALTER TABLE every insert against an old database would fail — and
+        # log() swallows exceptions, so it would fail *silently*.
+        db = tmp_path / "old.db"
+        legacy = sqlite3.connect(str(db))
+        legacy.execute(
+            """
+            CREATE TABLE access_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                ts REAL NOT NULL, source TEXT NOT NULL, kind TEXT NOT NULL,
+                method TEXT, path TEXT, status INTEGER, ip TEXT,
+                user_agent TEXT, duration_ms REAL, detail TEXT
+            )
+            """
+        )
+        legacy.execute(
+            "INSERT INTO access_log (ts, source, kind, path) VALUES (?, ?, ?, ?)",
+            (1.0, "web", "http", "/historic"),
+        )
+        legacy.commit()
+        legacy.close()
+
+        log = RequestLog(str(db))
+        log.log(source="api", kind="http", path="/new", origin="tunnel")
+
+        rows = log.query()
+        paths = [r["path"] for r in rows]
+        assert "/new" in paths, "insert after migration must succeed"
+        assert "/historic" in paths, "existing history must survive the migration"
+        assert next(r for r in rows if r["path"] == "/historic")["origin"] is None
+
+    def test_migration_is_idempotent(self, tmp_path):
+        db = str(tmp_path / "twice.db")
+        RequestLog(db).log(source="api", kind="http", path="/x", origin="lan")
+        reopened = RequestLog(db)  # second open must not try to re-add the column
+        reopened.log(source="api", kind="http", path="/y", origin="tunnel")
+        assert {r["path"] for r in reopened.query()} == {"/x", "/y"}

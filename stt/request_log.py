@@ -31,8 +31,15 @@ KIND_ACTION = "action"          # a named SocketIO event ("action")
 # route and template agree on the shape without duplicating the list.
 FIELDS = (
     "id", "ts", "source", "kind", "method", "path",
-    "status", "ip", "user_agent", "duration_ms", "detail",
+    "status", "ip", "user_agent", "duration_ms", "detail", "origin",
 )
+
+# How the request reached us, as classified by stt.request_origin. Distinct from
+# `source` (which describes the path/transport): a row can be api+tunnel or
+# web+lan. Kept as a plain column so the logs page can filter on it.
+ORIGIN_LOCAL = "local"
+ORIGIN_LAN = "lan"
+ORIGIN_TUNNEL = "tunnel"
 
 
 def classify_source(path: str, *, api_prefix: str = "/api/") -> str:
@@ -97,12 +104,28 @@ class RequestLog:
                 ip TEXT,
                 user_agent TEXT,
                 duration_ms REAL,
-                detail TEXT
+                detail TEXT,
+                origin TEXT
             )
             """
         )
+        self._migrate_locked()
         self._conn.execute("CREATE INDEX IF NOT EXISTS idx_access_log_id ON access_log(id)")
         self._conn.commit()
+
+    def _migrate_locked(self) -> None:
+        """Add columns missing from a database created by an older version.
+
+        CREATE TABLE IF NOT EXISTS does nothing to an existing table, so a box
+        that has been logging since before a column existed would fail every
+        insert. Deployed boxes upgrade themselves in place, so this has to be
+        handled here rather than by recreating the database (which would throw
+        away the operator's history).
+        """
+        existing = {row[1] for row in self._conn.execute("PRAGMA table_info(access_log)")}
+        for column, decl in (("origin", "TEXT"),):
+            if column not in existing:
+                self._conn.execute(f"ALTER TABLE access_log ADD COLUMN {column} {decl}")
 
     def log(
         self,
@@ -116,6 +139,7 @@ class RequestLog:
         user_agent: Optional[str] = None,
         duration_ms: Optional[float] = None,
         detail: Optional[str] = None,
+        origin: Optional[str] = None,
         ts: Optional[float] = None,
     ) -> None:
         """Record one event. Never raises — logging must not break a response."""
@@ -125,10 +149,10 @@ class RequestLog:
                 self._conn.execute(
                     """
                     INSERT INTO access_log
-                        (ts, source, kind, method, path, status, ip, user_agent, duration_ms, detail)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        (ts, source, kind, method, path, status, ip, user_agent, duration_ms, detail, origin)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
-                    (row_ts, source, kind, method, path, status, ip, user_agent, duration_ms, detail),
+                    (row_ts, source, kind, method, path, status, ip, user_agent, duration_ms, detail, origin),
                 )
                 self._since_prune += 1
                 if self._since_prune >= self.prune_every:
@@ -158,13 +182,14 @@ class RequestLog:
         source: Optional[str] = None,
         kind: Optional[str] = None,
         ip: Optional[str] = None,
+        origin: Optional[str] = None,
         search: Optional[str] = None,
         exclude_paths: Optional[List[str]] = None,
         limit: int = 200,
     ) -> List[Dict[str, Any]]:
         """Return the most recent matching rows, newest first, as dicts.
 
-        ``source``/``kind``/``ip`` are exact-match filters; ``search`` is a
+        ``source``/``kind``/``ip``/``origin`` are exact-match filters; ``search`` is a
         case-insensitive substring match against path, IP, and detail;
         ``exclude_paths`` drops rows whose path exactly equals any of the given
         paths (used to hide high-frequency dashboard polling from the view).
@@ -180,6 +205,9 @@ class RequestLog:
         if ip:
             clauses.append("ip = ?")
             params.append(ip)
+        if origin:
+            clauses.append("origin = ?")
+            params.append(origin)
         if search:
             like = f"%{search}%"
             clauses.append("(path LIKE ? OR ip LIKE ? OR detail LIKE ?)")

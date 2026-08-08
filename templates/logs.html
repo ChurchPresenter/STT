@@ -96,6 +96,9 @@
         .tag.web { background: var(--accent-subtle); color: var(--accent-hover); }
         .tag.api { background: var(--warning-bg); color: var(--warning); }
         .tag.socket { background: var(--success-bg); color: var(--success); }
+        .tag.local { background: var(--bg-elevated); color: var(--text-secondary); }
+        .tag.lan { background: var(--info-bg); color: var(--info); }
+        .tag.tunnel { background: var(--warning-bg); color: var(--warning); font-weight: 600; }
         .status-2xx { color: var(--success); }
         .status-3xx { color: var(--text-secondary); }
         .status-4xx { color: var(--warning); }
@@ -121,6 +124,12 @@
         <select id="filter-ip">
             <option value="">All IPs</option>
         </select>
+        <select id="filter-origin">
+            <option value="">All origins</option>
+            <option value="local">This machine</option>
+            <option value="lan">Local network</option>
+            <option value="tunnel">Cloudflare tunnel</option>
+        </select>
         <select id="filter-limit">
             <option value="200">200 rows</option>
             <option value="500">500 rows</option>
@@ -142,6 +151,7 @@
             <tr>
                 <th>Time</th>
                 <th>Source</th>
+                <th>Origin</th>
                 <th>Event</th>
                 <th>Method</th>
                 <th>Path / Action</th>
@@ -185,6 +195,9 @@
 
     function row(e) {
         const tag = `<span class="tag ${esc(e.source)}">${esc(e.source)}</span>`;
+        const originTag = e.origin
+            ? `<span class="tag ${esc(e.origin)}">${esc(e.origin)}</span>`
+            : '<span class="ua">—</span>';
         const status = e.status
             ? `<span class="${statusClass(e.status)}">${esc(e.status)}</span>` : "";
         const ms = (e.duration_ms === null || e.duration_ms === undefined)
@@ -193,6 +206,7 @@
         return `<tr>
             <td>${esc(fmtTime(e.ts))}</td>
             <td>${tag}</td>
+            <td>${originTag}</td>
             <td>${esc(e.kind)}</td>
             <td>${esc(e.method || "")}</td>
             <td class="path">${esc(e.path || "")}</td>
@@ -238,11 +252,13 @@
         const source = $("filter-source").value;
         const kind = $("filter-kind").value;
         const ip = $("filter-ip").value;
+        const origin = $("filter-origin").value;
         const search = $("filter-search").value.trim();
         const limit = $("filter-limit").value;
         if (source) params.set("source", source);
         if (kind) params.set("kind", kind);
         if (ip) params.set("ip", ip);
+        if (origin) params.set("origin", origin);
         if (search) params.set("search", search);
         if ($("hide-polling").checked) params.set("hide_polling", "1");
         params.set("limit", limit);
@@ -298,7 +314,7 @@
     $("refresh-btn").addEventListener("click", refresh);
     $("clear-btn").addEventListener("click", clearLogs);
     $("auto-refresh").addEventListener("change", scheduleAuto);
-    ["filter-source", "filter-kind", "filter-ip", "filter-limit"].forEach(
+    ["filter-source", "filter-kind", "filter-ip", "filter-origin", "filter-limit"].forEach(
         (id) => $(id).addEventListener("change", load));
     // Hiding polling changes which addresses count as clients, so the IP list
     // is rebuilt with it.

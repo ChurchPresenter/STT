@@ -452,10 +452,16 @@
                         </div>
                         <div id="tunnel-error" style="display: none; color: var(--danger); font-size: 0.82em; margin-bottom: 10px; word-break: break-word;"></div>
                         <div style="font-size: 0.8em; color: var(--warning); background: rgba(245,158,11,0.12); border-left: 3px solid var(--warning); padding: 8px 10px; border-radius: var(--radius-sm);">
-                            ⚠️ <strong>The URL is the only protection.</strong> Tunnelled requests reach the server as
-                            <code>127.0.0.1</code>, which counts as trusted — so anyone with this link has the same access
-                            as someone sitting at this machine, including settings and recordings. Share it carefully and
-                            let it close when the service ends.
+                            ⚠️ <strong>Anyone with this link can read the live transcript.</strong> The caption display is
+                            open on purpose so you can share it. Settings, recordings and anything that changes state need
+                            the server password — the same one you log in with here. Tunnel traffic shows in
+                            <a href="/logs?origin=tunnel" style="color: var(--warning); text-decoration: underline;">the logs</a>
+                            as <code>tunnel</code>, with the visitor's real IP.
+                        </div>
+                        <div id="tunnel-noauth-warning" style="display: none; font-size: 0.8em; color: var(--danger); background: rgba(239,68,68,0.12); border-left: 3px solid var(--danger); padding: 8px 10px; border-radius: var(--radius-sm); margin-top: 8px;">
+                            🔒 <strong>Password login is disabled.</strong> Nobody can authenticate over the tunnel, so it
+                            will serve only the caption display — every settings page and API returns 403. Enable
+                            <em>Password Authentication</em> to use the tunnel for anything else.
                         </div>
                     </div>
 
@@ -817,6 +823,11 @@
             }
             document.getElementById('tunnel-mode-hint').style.display =
                 autoBox.checked ? '' : 'none';
+
+            if (typeof data.password_auth_enabled === 'boolean') {
+                document.getElementById('tunnel-noauth-warning').style.display =
+                    data.password_auth_enabled ? 'none' : '';
+            }
 
             // Count the pending auto-stop down rather than letting the tunnel
             // vanish without warning while someone is using the link.

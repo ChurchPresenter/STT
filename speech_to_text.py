@@ -366,6 +366,7 @@ def _config_snapshot():
 # Config/validation/version helpers live in stt/config_utils.py (importable,
 # unit-tested); names are re-imported here so call sites stay unchanged.
 from stt import config_utils as _config_utils
+from stt import request_origin
 from stt import tunnel as tunnel_mod
 from stt.config_utils import (  # noqa: F401
     SUPPORTED_AUDIO_FORMATS,
@@ -4321,27 +4322,90 @@ def _access_log_skip_polling():
         return True
 
 
-def _record_socket_event(event_name, kind):
+def _record_socket_event(event_name, kind, refused=False):
     """Log a SocketIO connect/disconnect or action. Best-effort, never raises."""
     if request_logger is None or not _access_log_enabled():
         return
     try:
         sid = getattr(request, "sid", None)
+        origin = request_origin.classify(
+            getattr(request, "remote_addr", None),
+            getattr(request, "headers", None),
+        )
+        bits = [f"sid={sid}"] if sid else []
+        if origin.ray_id:
+            bits.append(f"ray={origin.ray_id}")
+        if refused:
+            bits.append("refused: tunnel connection not authenticated")
         request_logger.log(
             source=_request_log.SOURCE_SOCKET,
             kind=kind,
             path=event_name,
-            ip=getattr(request, "remote_addr", None),
+            # The real visitor, not our loopback: every tunnelled socket would
+            # otherwise log as 127.0.0.1 and be indistinguishable.
+            ip=origin.client_ip or None,
+            origin=origin.kind,
+            status=403 if refused else None,
             user_agent=request.headers.get("User-Agent") if request else None,
-            detail=(f"sid={sid}" if sid else None),
+            detail=("; ".join(bits) if bits else None),
         )
     except Exception:
         pass
 
 
+# Origin of each live socket connection, by sid. The websocket has no auth of
+# its own, so a tunnelled connection would otherwise be able to rewrite
+# transcripts and retime live output — gating HTTP alone would be theatre.
+# Recorded at connect (the handshake carries the CF headers and the auth cookie)
+# because later events cannot be re-classified: engineio may deliver them over a
+# polling request whose headers differ from the upgrade's.
+_socket_origins = {}
+_socket_origins_lock = threading.Lock()
+
+
+def _remember_socket_origin():
+    """Classify a connecting socket and note whether it authenticated."""
+    sid = getattr(request, "sid", None)
+    if sid is None:
+        return
+    origin = request_origin.classify(request.remote_addr, request.headers)
+    # check_ip_whitelist reads the same cookie/Bearer session the HTTP side uses,
+    # so a visitor who logged in over the tunnel keeps their socket privileges.
+    authed = check_ip_whitelist()
+    with _socket_origins_lock:
+        _socket_origins[sid] = (origin, authed)
+    if origin.is_tunnelled:
+        print(f"[SOCKET] Tunnelled connection {sid} from {origin.client_ip} (authenticated={authed})")
+
+
+def _forget_socket_origin():
+    sid = getattr(request, "sid", None)
+    if sid is not None:
+        with _socket_origins_lock:
+            _socket_origins.pop(sid, None)
+
+
+def _socket_event_allowed(event):
+    """Whether the current socket connection may run this event.
+
+    Unknown sids fail closed only for gated events — a reconnect that raced the
+    connect handler still gets the display feed.
+    """
+    sid = getattr(request, "sid", None)
+    with _socket_origins_lock:
+        entry = _socket_origins.get(sid)
+    if entry is None:
+        return True
+    origin, authed = entry
+    if authed:
+        return True
+    return not request_origin.socket_event_requires_auth(event, origin.kind)
+
+
 # Wrap socketio.on so every @socketio.on(...) handler registered below is
 # transparently logged — connect/disconnect as connections, everything else as
-# actions. Installed before any handler is defined so all of them are covered.
+# actions — and so state-changing events are gated for unauthenticated tunnel
+# connections. Installed before any handler is defined so all of them are covered.
 _socketio_on_orig = socketio.on
 
 
@@ -4352,8 +4416,25 @@ def _logging_socketio_on(message, namespace=None):
     def register(handler):
         @functools.wraps(handler)
         def instrumented(*args, **kwargs):
+            if message == "connect":
+                _remember_socket_origin()
+
+            if not _socket_event_allowed(message):
+                _record_socket_event(message, _kind, refused=True)
+                # Tell the caller rather than dropping it silently: a display
+                # that quietly stopped saving corrections would look like a bug.
+                emit("auth_required", {
+                    "event": message,
+                    "error": "Log in with the server password to make changes over the tunnel.",
+                })
+                return None
+
             _record_socket_event(message, _kind)
-            return handler(*args, **kwargs)
+            try:
+                return handler(*args, **kwargs)
+            finally:
+                if message == "disconnect":
+                    _forget_socket_origin()
         return decorator(instrumented)
     return register
 
@@ -4672,6 +4753,22 @@ def _control_params(keep_blank=False):
     return merge_request_params(body, request.form, request.args, keep_blank=keep_blank)
 
 
+def _request_origin():
+    """Where this request came from (local / lan / tunnel) and its real client IP.
+
+    Cached per request: check_ip_whitelist, the access log and the after_request
+    hook all want it, and re-reading headers three times invites them to drift.
+    """
+    origin = getattr(g, "_request_origin", None)
+    if origin is None:
+        origin = request_origin.classify(request.remote_addr, request.headers)
+        try:
+            g._request_origin = origin
+        except Exception:  # pragma: no cover - outside an app context
+            pass
+    return origin
+
+
 def check_ip_whitelist():
     """Check if the client IP is in the whitelist or has a valid password session"""
     import ipaddress
@@ -4681,19 +4778,30 @@ def check_ip_whitelist():
     password_auth_enabled = password_auth_config.get("enabled", False)
     access_token = str(config.get("web_server", {}).get("access_token", "") or "")
 
+    # A tunnelled request reaches us from our own loopback, so neither the
+    # localhost shortcut nor an empty whitelist may speak for it. Only a password
+    # session does. See stt/request_origin for why the CF headers can be believed.
+    origin = _request_origin()
+    transport_trusted = request_origin.is_trusted_transport(origin)
+
     # A request carrying ?key=<access_token> is granted directly, so a
     # non-whitelisted device (or an OBS/display source that can't use the login
     # page) can embed auth in the URL. _mint_access_token_cookie (after_request)
     # then sets a session cookie so the rest of that browser session works
     # without re-passing the key. Empty token = disabled.
-    if access_token:
+    #
+    # Not honoured over the tunnel: a URL key would travel in links, browser
+    # history and screenshots, and the public surface is exactly where that
+    # leaks. Password login only from there.
+    if access_token and transport_trusted:
         provided_key = request.args.get("key", "")
         if provided_key and secrets.compare_digest(provided_key, access_token):
             return True
 
     # Check for a valid session token (from password login OR a minted
-    # access-token session) via cookie or Authorization header.
-    if password_auth_enabled or access_token:
+    # access-token session) via cookie or Authorization header. A tunnelled
+    # caller must get here — it is the only door left open to it.
+    if password_auth_enabled or access_token or origin.is_tunnelled:
         # Check cookie first
         session_token = request.cookies.get("auth_session")
 
@@ -4711,14 +4819,22 @@ def check_ip_whitelist():
                 if session_data:
                     # Check if session is still valid
                     if session_data["expires"] > datetime.now():
-                        # Check if IP matches (prevent session hijacking)
-                        if session_data["ip"] == request.remote_addr:
+                        # Check if IP matches (prevent session hijacking).
+                        # origin.client_ip, not remote_addr: every tunnelled
+                        # session would otherwise bind to 127.0.0.1, which is
+                        # the same value for every visitor — no protection at all.
+                        if session_data["ip"] == origin.client_ip:
                             return True
                         else:
-                            print(f"[AUTH WARNING] Session token used from different IP: {request.remote_addr} != {session_data['ip']}")
+                            print(f"[AUTH WARNING] Session token used from different IP: {origin.client_ip} != {session_data['ip']}")
                     else:
                         # Session expired, remove it
                         del auth_sessions[session_token]
+
+    # Past this point access is granted on the caller's address alone, which a
+    # tunnelled request must never get: its address is our loopback.
+    if not transport_trusted:
+        return False
 
     whitelist = config.get("web_server", {}).get("settings_ip_whitelist", [])
 
@@ -4830,7 +4946,11 @@ def _access_log_record(response):
             path = request.path or ""
             if not (path.startswith("/static/") or path.startswith("/socket.io/")
                     or (_access_log_skip_polling() and path in POLLING_LOG_PATHS)):
-                verdict = _refusal_log_verdict(path, response.status_code, request.remote_addr)
+                origin = _request_origin()
+                # Thin repeats per real visitor: over the tunnel every caller
+                # shares remote_addr 127.0.0.1, so one noisy client would
+                # suppress everyone else's rows.
+                verdict = _refusal_log_verdict(path, response.status_code, origin.client_ip)
                 if not verdict.log:
                     return response
                 t0 = getattr(g, "_access_log_t0", None)
@@ -4839,13 +4959,18 @@ def _access_log_record(response):
                 if verdict.suppressed:
                     repeats = f"+{verdict.suppressed} identical since the last row"
                     detail = f"{detail} ({repeats})" if detail else repeats
+                if origin.ray_id:
+                    # Cloudflare's own request id — what makes a row traceable
+                    # back to their logs if something needs chasing.
+                    detail = f"{detail}; ray={origin.ray_id}" if detail else f"ray={origin.ray_id}"
                 request_logger.log(
                     source=_request_log.classify_source(path),
                     kind=_request_log.KIND_HTTP,
                     method=request.method,
                     path=path,
                     status=response.status_code,
-                    ip=request.remote_addr,
+                    ip=origin.client_ip,
+                    origin=origin.kind,
                     user_agent=request.headers.get("User-Agent"),
                     duration_ms=duration_ms,
                     detail=detail,
@@ -4867,6 +4992,10 @@ def _mint_access_token_cookie(response):
         access_token = str(config.get("web_server", {}).get("access_token", "") or "")
         if not access_token or request.cookies.get("auth_session"):
             return response
+        # check_ip_whitelist refuses ?key= over the tunnel, so minting a session
+        # from one here would reopen exactly the door it closes.
+        if not request_origin.is_trusted_transport(_request_origin()):
+            return response
         provided_key = request.args.get("key", "")
         if not (provided_key and secrets.compare_digest(provided_key, access_token)):
             return response
@@ -4875,7 +5004,7 @@ def _mint_access_token_cookie(response):
         token = generate_session_token()
         with auth_sessions_lock:
             auth_sessions[token] = {
-                "ip": request.remote_addr,
+                "ip": _request_origin().client_ip,
                 "expires": datetime.now() + timedelta(minutes=timeout_minutes),
                 "created": datetime.now(),
             }
@@ -4897,7 +5026,7 @@ def password_login():
             return jsonify({"success": False, "error": "Password authentication is disabled"}), 403
 
         # Reject early if this IP is currently locked out
-        client_ip = request.remote_addr
+        client_ip = _request_origin().client_ip
         with _login_attempts_lock:
             entry = _login_attempts.get(client_ip)
             if entry and entry.get("locked_until") and entry["locked_until"] > datetime.now():
@@ -4943,12 +5072,12 @@ def password_login():
 
         with auth_sessions_lock:
             auth_sessions[session_token] = {
-                "ip": request.remote_addr,
+                "ip": client_ip,
                 "expires": expires,
                 "created": datetime.now()
             }
 
-        print(f"[AUTH] Successful login from {request.remote_addr}, session expires in {timeout_minutes} minutes")
+        print(f"[AUTH] Successful login from {client_ip} ({_request_origin().kind}), session expires in {timeout_minutes} minutes")
 
         # Return session token
         response = jsonify({
@@ -5397,9 +5526,10 @@ POLLING_LOG_PATHS = [
 def api_logs():
     """Return recent access-log entries (newest first), with optional filters:
     ?source=web|api|socket, ?kind=http|connection|action, ?ip=<exact address>,
-    ?search=<substr>, ?hide_polling=1 (drop high-frequency dashboard polling),
-    ?limit=<n>. Each entry carries the reverse-DNS ``hostname`` for its IP when
-    one is already cached (see /api/logs/ips)."""
+    ?origin=local|lan|tunnel, ?search=<substr>, ?hide_polling=1 (drop
+    high-frequency dashboard polling), ?limit=<n>. Each entry carries the
+    reverse-DNS ``hostname`` for its IP when one is already cached (see
+    /api/logs/ips)."""
     if not check_ip_whitelist():
         return jsonify({"success": False, "error": "Access Denied"}), 403
     if request_logger is None:
@@ -5415,11 +5545,18 @@ def api_logs():
             source=(request.args.get("source") or None),
             kind=(request.args.get("kind") or None),
             ip=(request.args.get("ip") or None),
+            origin=(request.args.get("origin") or None),
             search=(request.args.get("search") or None),
             exclude_paths=POLLING_LOG_PATHS if hide_polling else None,
             limit=limit,
         )
-        names = hostname_cache.get_many({e.get("ip") for e in entries if e.get("ip")})
+        # Reverse-DNS only for addresses on our own network. Resolving a tunnel
+        # visitor's public IP would hand it to a DNS resolver for no operational
+        # benefit — the row already names them.
+        names = hostname_cache.get_many({
+            e.get("ip") for e in entries
+            if e.get("ip") and e.get("origin") != _request_log.ORIGIN_TUNNEL
+        })
         for entry in entries:
             entry["hostname"] = names.get(entry.get("ip"))
         return jsonify({
@@ -9764,6 +9901,11 @@ def _tunnel_status_payload():
     )
     status["binary"] = _tunnel_config().get("binary", "cloudflared")
     status["auto_stop_enabled"] = bool(_tunnel_config().get("auto_stop_enabled", True))
+    # Without password auth nobody can authenticate over the tunnel, so it would
+    # serve only the open caption display — worth saying before they press Start.
+    status["password_auth_enabled"] = bool(
+        config.get("web_server", {}).get("password_auth", {}).get("enabled", False)
+    )
     # Seconds until the auto-stop fires, so the UI can count down instead of
     # the tunnel vanishing unannounced. None when nothing is pending.
     idle_since = _transcription_idle_since
