@@ -8,10 +8,13 @@ The tunnel is started only on an explicit press and stops itself a configurable
 delay after transcription ends, so the public window is bounded by the service
 rather than left open indefinitely.
 
-**The URL is the only secret.** Requests arrive at the server from 127.0.0.1,
-which ``check_ip_whitelist`` treats as trusted, so anyone holding the URL has
-the same access as someone sitting at this machine. That is a deliberate
-choice by the operator; the short auto-stop window is what limits it.
+Requests arrive at the server from 127.0.0.1, which would make them look local
+and therefore fully trusted. ``stt.request_origin`` identifies them from
+Cloudflare's headers instead, so they get neither the localhost shortcut nor an
+empty whitelist and must log in with the server password. The caption display
+at ``/`` is deliberately left open, so **anyone holding the URL can read the
+live transcript** — everything else needs the password, and the auto-stop
+window bounds how long the URL is live at all.
 
 Stdlib-only, as required of every ``stt/`` logic module. All IO is injected
 (the spawn callable, the clock) so the lifecycle is testable without launching
@@ -250,9 +253,52 @@ def _remove_quietly(path: str) -> None:
         pass
 
 
-def build_command(binary: str, port: int, host: str = "127.0.0.1") -> List[str]:
-    """The cloudflared argv for a quick tunnel pointing at this server."""
-    return [binary, "tunnel", "--url", f"http://{host}:{port}"]
+#: Transports cloudflared will accept for --protocol. "auto" means don't pass
+#: the flag at all and let it choose (it prefers QUIC).
+PROTOCOL_AUTO = "auto"
+_EXPLICIT_PROTOCOLS = frozenset({"http2", "quic"})
+
+
+def build_command(
+    binary: str,
+    port: int,
+    host: str = "127.0.0.1",
+    protocol: str = PROTOCOL_AUTO,
+) -> List[str]:
+    """The cloudflared argv for a quick tunnel pointing at this server.
+
+    ``protocol`` is normally "auto". Forcing "http2" avoids QUIC, which matters
+    on hosts where the kernel's UDP receive buffer limit is too low for it —
+    cloudflared warns about that at startup and Cloudflare's own advice is to
+    either raise net.core.rmem_max or fall back to http2.
+    """
+    command = [binary, "tunnel", "--url", f"http://{host}:{port}"]
+    chosen = (protocol or PROTOCOL_AUTO).strip().lower()
+    if chosen in _EXPLICIT_PROTOCOLS:
+        command += ["--protocol", chosen]
+    return command
+
+
+#: cloudflared prints this when the kernel won't give QUIC the receive buffer it
+#: wants. Cloudflare documents the consequence as packet loss and degraded
+#: transfers, so it is worth surfacing rather than leaving buried in the log.
+_RECV_BUFFER_WARNING = "failed to sufficiently increase receive buffer size"
+
+
+def startup_warning(log_lines: Any) -> Optional[str]:
+    """An operator-actionable warning found in cloudflared's startup log, or None.
+
+    Returns advice rather than the raw line: the raw text names a Go library and
+    a byte count, neither of which tells anyone what to do about it.
+    """
+    for line in log_lines or ():
+        if _RECV_BUFFER_WARNING in str(line):
+            return (
+                "cloudflared could not get the UDP receive buffer QUIC wants, which can cause "
+                "dropped requests on poor connections. Either raise it on this host "
+                "(sysctl -w net.core.rmem_max=7500000) or set the tunnel protocol to http2."
+            )
+    return None
 
 
 def should_auto_stop(
@@ -315,7 +361,7 @@ class CloudflareTunnel:
 
     # ─── lifecycle ──────────────────────────────────────────────────────────
 
-    def start(self, port: int, host: str = "127.0.0.1") -> Dict[str, Any]:
+    def start(self, port: int, host: str = "127.0.0.1", protocol: str = PROTOCOL_AUTO) -> Dict[str, Any]:
         """Launch a tunnel to ``host:port``. A no-op if one is already up."""
         with self._lock:
             if self._status in (STATUS_STARTING, STATUS_RUNNING):
@@ -338,7 +384,7 @@ class CloudflareTunnel:
                 )
 
             try:
-                self._process = self._spawn(build_command(executable, port, host))
+                self._process = self._spawn(build_command(executable, port, host, protocol))
             except FileNotFoundError:
                 return self._fail_locked(f"cloudflared could not be executed at '{executable}'.")
             except Exception as exc:  # pragma: no cover - defensive
@@ -419,6 +465,7 @@ class CloudflareTunnel:
                 round(self._clock() - self._started_at, 1) if self._started_at else None
             ),
             "log_tail": list(self._log_tail),
+            "startup_warning": startup_warning(self._log_tail),
         }
 
     def _read_output(self, process: Any) -> None:

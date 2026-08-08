@@ -243,6 +243,14 @@
             successMessage.style.display = 'none';
         }
 
+        // Show why the login failed and hand the form back, so every failure
+        // path re-enables the button exactly once.
+        function failLogin(message) {
+            showError(message);
+            loginBtn.disabled = false;
+            loginBtn.innerHTML = 'Login';
+        }
+
         form.addEventListener('submit', async (e) => {
             e.preventDefault();
             hideMessages();
@@ -257,40 +265,63 @@
             loginBtn.disabled = true;
             loginBtn.innerHTML = 'Logging in<span class="loading"></span>';
 
+            // Three failures are worth telling apart, and the old handler said
+            // "Network error" for all of them: the request never left the
+            // device, something between here and the server answered with a
+            // page instead of JSON (a proxy or tunnel error), or the server
+            // answered properly and refused. Only the first is a network error,
+            // and reporting the other two as one wasted an investigation.
+            let response;
             try {
-                const response = await fetch('/api/auth/login', {
+                response = await fetch('/api/auth/login', {
                     method: 'POST',
                     headers: {
                         'Content-Type': 'application/json'
                     },
                     body: JSON.stringify({ password })
                 });
-
-                const data = await response.json();
-
-                if (data.success) {
-                    showSuccess('Login successful! Redirecting...');
-
-                    // Store session token in localStorage as backup
-                    localStorage.setItem('auth_session', data.session_token);
-
-                    // Reload the page - the cookie is already set by the server
-                    setTimeout(() => {
-                        window.location.reload();
-                    }, 500);
-                } else {
-                    showError(data.error || 'Login failed');
-                    loginBtn.disabled = false;
-                    loginBtn.innerHTML = 'Login';
-                    passwordInput.value = '';
-                    passwordInput.focus();
-                }
             } catch (error) {
-                console.error('Login error:', error);
-                showError('Network error. Please try again.');
-                loginBtn.disabled = false;
-                loginBtn.innerHTML = 'Login';
+                console.error('Login request failed before reaching the server:', error);
+                failLogin('Could not reach the server — the request never left this device. ' +
+                          'Check the connection and try again.');
+                return;
             }
+
+            let data = null;
+            const contentType = (response.headers.get('Content-Type') || '').toLowerCase();
+            if (contentType.includes('application/json')) {
+                try {
+                    data = await response.json();
+                } catch (error) {
+                    console.error('Malformed JSON from /api/auth/login:', error);
+                }
+            }
+
+            if (data === null) {
+                // A body that isn't JSON did not come from this app — it is a
+                // proxy, tunnel or gateway error page. The status is the clue.
+                console.error('Non-JSON login response', response.status, contentType);
+                failLogin(`Unexpected response from the server (HTTP ${response.status}). ` +
+                          'Something between your browser and the server answered instead of the app.');
+                return;
+            }
+
+            if (data.success) {
+                showSuccess('Login successful! Redirecting...');
+                // Store session token in localStorage as backup
+                localStorage.setItem('auth_session', data.session_token);
+                // Reload the page - the cookie is already set by the server
+                setTimeout(() => {
+                    window.location.reload();
+                }, 500);
+                return;
+            }
+
+            // The server answered and refused. Show its reason, and the status
+            // when there isn't one, so a 429 or 403 is never a blank message.
+            failLogin(data.error || `Login failed (HTTP ${response.status})`);
+            passwordInput.value = '';
+            passwordInput.focus();
         });
 
         // Clear messages on input

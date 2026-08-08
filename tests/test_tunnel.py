@@ -19,6 +19,7 @@ from stt.tunnel import (
     managed_binary_path,
     parse_quick_tunnel_url,
     resolve_binary,
+    startup_warning,
     should_auto_stop,
 )
 
@@ -404,3 +405,68 @@ class TestInstallCloudflared:
             tar.add(str(inner), arcname=member_name)
         inner.unlink()
         return str(archive)
+
+
+class TestProtocolFlag:
+    def test_auto_passes_no_flag(self):
+        # Letting cloudflared choose is the default; an explicit flag is opt-in.
+        assert "--protocol" not in build_command("cloudflared", 8080)
+        assert "--protocol" not in build_command("cloudflared", 8080, protocol="auto")
+
+    def test_http2_is_forced_when_asked(self):
+        cmd = build_command("cloudflared", 8080, protocol="http2")
+        assert cmd[-2:] == ["--protocol", "http2"]
+
+    def test_quic_can_be_forced_too(self):
+        assert build_command("cloudflared", 8080, protocol="quic")[-2:] == ["--protocol", "quic"]
+
+    def test_case_and_padding_tolerated(self):
+        assert build_command("cloudflared", 8080, protocol=" HTTP2 ")[-2:] == ["--protocol", "http2"]
+
+    def test_unknown_protocol_is_ignored_rather_than_passed_through(self):
+        # A typo in config must not make cloudflared refuse to start.
+        assert "--protocol" not in build_command("cloudflared", 8080, protocol="htp2")
+        assert "--protocol" not in build_command("cloudflared", 8080, protocol="")
+
+    def test_url_still_comes_first(self):
+        cmd = build_command("cloudflared", 9000, protocol="http2")
+        assert cmd[:4] == ["cloudflared", "tunnel", "--url", "http://127.0.0.1:9000"]
+
+
+class TestStartupWarning:
+    # The line .62 actually logged.
+    BUFFER_LINE = ("2026/08/07 21:59:28 failed to sufficiently increase receive buffer size "
+                   "(was: 208 kiB, wanted: 7168 kiB, got: 416 kiB). See https://github.com/quic-go")
+
+    def test_detects_the_receive_buffer_warning(self):
+        warning = startup_warning(["INF Initial protocol quic", self.BUFFER_LINE])
+        assert warning is not None
+        assert "net.core.rmem_max" in warning
+        assert "http2" in warning
+
+    def test_advice_not_the_raw_line(self):
+        # The raw text names a Go library and a byte count, which tells nobody
+        # what to do about it.
+        assert "quic-go" not in startup_warning([self.BUFFER_LINE])
+
+    def test_quiet_log_produces_no_warning(self):
+        assert startup_warning(["INF Registered tunnel connection", "INF Initial protocol quic"]) is None
+
+    def test_empty_and_none_are_safe(self):
+        assert startup_warning([]) is None
+        assert startup_warning(None) is None
+
+    def test_surfaced_in_status(self):
+        proc = FakeProcess([URL_LINE, TestStartupWarning.BUFFER_LINE])
+        tunnel = CloudflareTunnel(resolve=lambda b: b, spawn=lambda cmd: proc)
+        tunnel.start(8080)
+        tunnel.wait_for_url(timeout=5)
+        proc.wait_until_drained()
+        assert "net.core.rmem_max" in (tunnel.status()["startup_warning"] or "")
+
+    def test_status_carries_none_when_nothing_to_report(self):
+        proc = FakeProcess([URL_LINE])
+        tunnel = CloudflareTunnel(resolve=lambda b: b, spawn=lambda cmd: proc)
+        tunnel.start(8080)
+        tunnel.wait_for_url(timeout=5)
+        assert tunnel.status()["startup_warning"] is None

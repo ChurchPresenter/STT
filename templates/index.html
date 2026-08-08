@@ -897,6 +897,12 @@
             <div class="status-dot" id="translation-status-dot"></div>
             <span id="translation-status-text">Translation</span>
           </div>
+          <!-- Only over the tunnel: the display is open there but everything
+               else needs the password, and this button is the way in. On the
+               LAN it stays hidden — nothing there needs saying. -->
+          <div id="tunnel-login-hint" style="align-items: center; gap: 6px; display: none; color: var(--warning, #f59e0b); font-weight: 600;">
+            <span>🔒</span><span>Log in</span>
+          </div>
           <div id="disk-status-container" style="align-items: center; gap: 6px; display: none;">
             <div class="status-dot" id="disk-status-dot"></div>
             <span id="disk-status-text">Disk Space</span>
@@ -949,6 +955,23 @@
 
     <script>
       // Toast notifications and connection banner removed - status indicators provide all feedback
+
+      // Show the "Log in" hint when this page is being viewed over the tunnel
+      // without a session. The display itself is open there by design, so
+      // without this the only visible clue is that settings pages refuse.
+      async function updateTunnelLoginHint() {
+        try {
+          const response = await fetch('/api/auth/status');
+          const data = await response.json();
+          const hint = document.getElementById('tunnel-login-hint');
+          if (!hint) return;
+          const needsLogin = data.success && data.origin === 'tunnel' && !data.authenticated;
+          hint.style.display = needsLogin ? 'flex' : 'none';
+        } catch (error) {
+          // A failed check is not worth surfacing on the caption display.
+        }
+      }
+      document.addEventListener('DOMContentLoaded', updateTunnelLoginHint);
 
       // Redirect based on authentication status
       async function redirectBasedOnAuth() {

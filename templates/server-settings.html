@@ -451,6 +451,7 @@
                             <a id="tunnel-url" href="#" target="_blank" rel="noopener noreferrer" style="color: var(--accent); word-break: break-all; font-family: monospace; font-size: 0.88em;"></a>
                         </div>
                         <div id="tunnel-error" style="display: none; color: var(--danger); font-size: 0.82em; margin-bottom: 10px; word-break: break-word;"></div>
+                        <div id="tunnel-startup-warning" style="display: none; color: var(--warning); font-size: 0.8em; margin-bottom: 10px; word-break: break-word;"></div>
                         <div style="font-size: 0.8em; color: var(--warning); background: rgba(245,158,11,0.12); border-left: 3px solid var(--warning); padding: 8px 10px; border-radius: var(--radius-sm);">
                             ⚠️ <strong>Anyone with this link can read the live transcript.</strong> The caption display is
                             open on purpose so you can share it. Settings, recordings and anything that changes state need
@@ -809,6 +810,16 @@
                 errEl.style.display = '';
             } else {
                 errEl.style.display = 'none';
+            }
+
+            // cloudflared's own startup complaints, translated into something
+            // actionable. Buried in log_tail nobody would ever see them.
+            const warnEl = document.getElementById('tunnel-startup-warning');
+            if (data.startup_warning) {
+                warnEl.textContent = '⚠️ ' + data.startup_warning;
+                warnEl.style.display = '';
+            } else {
+                warnEl.style.display = 'none';
             }
 
             if (typeof data.auto_stop_seconds === 'number') {
@@ -1496,9 +1507,15 @@
                     }
                 });
 
-                const data = await response.json();
+                // Parse only if it claims to be JSON: a proxy or tunnel error
+                // page would otherwise be reported as a network failure, which
+                // sends anyone debugging it in the wrong direction.
+                const contentType = (response.headers.get('Content-Type') || '').toLowerCase();
+                const data = contentType.includes('application/json') ? await response.json() : null;
 
-                if (data.success) {
+                if (data === null) {
+                    showAlert(`Unexpected response from the server (HTTP ${response.status}).`, 'error');
+                } else if (data.success) {
                     showAlert('Logged out successfully. Redirecting...', 'success');
 
                     // Clear localStorage backup
@@ -1509,11 +1526,11 @@
                         window.location.href = '/';
                     }, 1000);
                 } else {
-                    showAlert('Logout failed: ' + (data.error || 'Unknown error'), 'error');
+                    showAlert('Logout failed: ' + (data.error || `HTTP ${response.status}`), 'error');
                 }
             } catch (error) {
                 console.error('Logout error:', error);
-                showAlert('Network error during logout. Please try again.', 'error');
+                showAlert('Could not reach the server to log out. Check the connection and try again.', 'error');
             }
         }
 

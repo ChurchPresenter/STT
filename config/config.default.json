@@ -175,6 +175,8 @@
       "_binary_comment": "Path to the cloudflared executable. Bare name = look in our own bin/ dir, then PATH, then the usual install locations. Set a full path only to force a specific build.",
       "auto_download": true,
       "_auto_download_comment": "Fetch the official cloudflared build (~40MB, from github.com/cloudflare/cloudflared releases) into bin/ the first time the tunnel is started, if it isn't already installed. cloudflared is a system binary, so the normal dependency sync — which only installs Python packages — can never deliver it. Cloudflare publishes no checksums for these assets, so HTTPS to github.com is the trust anchor; set this to false if you would rather install it yourself via apt/brew.",
+      "protocol": "auto",
+      "_protocol_comment": "Transport cloudflared uses: 'auto' (it picks, normally QUIC), 'http2' or 'quic'. Set 'http2' on a host whose kernel will not give QUIC the UDP receive buffer it wants — cloudflared warns about that at startup and the tunnel card repeats the warning. Anything unrecognised is treated as 'auto'.",
       "auto_stop_enabled": true,
       "_auto_stop_enabled_comment": "true = the tunnel closes itself after transcription ends (see auto_stop_seconds). false = it stays open until you press Stop. Leaving it on is the safer default: a tunnel nobody remembered to close is a server left reachable from the internet.",
       "auto_stop_seconds": 60,

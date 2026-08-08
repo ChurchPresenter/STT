@@ -5167,11 +5167,14 @@ def auth_status():
         # Determine redirect URL based on authentication
         redirect_url = "/live-settings" if is_authenticated else "/url-builder"
 
+        origin = _request_origin()
         return jsonify({
             "success": True,
             "authenticated": is_authenticated,
             "session": session_info,
-            "ip": request.remote_addr,
+            # The real caller, so a tunnel visitor doesn't see our loopback.
+            "ip": origin.client_ip,
+            "origin": origin.kind,
             "redirect_url": redirect_url
         })
 
@@ -9900,6 +9903,7 @@ def _tunnel_status_payload():
         _tunnel_config().get("auto_stop_seconds"), tunnel_mod.DEFAULT_AUTO_STOP_SECONDS, lo=0
     )
     status["binary"] = _tunnel_config().get("binary", "cloudflared")
+    status["protocol"] = _tunnel_config().get("protocol", tunnel_mod.PROTOCOL_AUTO)
     status["auto_stop_enabled"] = bool(_tunnel_config().get("auto_stop_enabled", True))
     # Without password auth nobody can authenticate over the tunnel, so it would
     # serve only the open caption display — worth saying before they press Start.
@@ -9957,6 +9961,9 @@ def tunnel_settings():
     if "binary" in data:
         section["binary"] = str(data["binary"]).strip() or "cloudflared"
         changed.append(f"binary={section['binary']}")
+    if "protocol" in data:
+        section["protocol"] = str(data["protocol"]).strip().lower() or tunnel_mod.PROTOCOL_AUTO
+        changed.append(f"protocol={section['protocol']}")
 
     save_config(config)
     _note_access_detail("tunnel settings " + (", ".join(changed) if changed else "unchanged"))
@@ -9999,8 +10006,9 @@ def tunnel_start():
             _note_access_detail(f"tunnel install failed: {e}")
             return jsonify(payload), 502
 
-    print(f"[TUNNEL] Starting Cloudflare quick tunnel to 127.0.0.1:{port}")
-    tunnel.start(port)
+    protocol = str(_tunnel_config().get("protocol", tunnel_mod.PROTOCOL_AUTO) or tunnel_mod.PROTOCOL_AUTO)
+    print(f"[TUNNEL] Starting Cloudflare quick tunnel to 127.0.0.1:{port} (protocol={protocol})")
+    tunnel.start(port, protocol=protocol)
     tunnel.wait_for_url(timeout=30)
 
     payload = _tunnel_status_payload()
