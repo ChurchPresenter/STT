@@ -386,9 +386,17 @@ class TestInstallCloudflared:
     def test_downloaded_copy_is_preferred_over_a_system_one(self, tmp_path, monkeypatch):
         # A later apt/brew install must not silently take over from the binary
         # this box already downloaded and is known to work.
+        #
+        # The platform is pinned rather than passed only to install_cloudflared:
+        # resolve_binary asks managed_binary_path, which uses the CURRENT system
+        # to decide between "cloudflared" and "cloudflared.exe". Installing as
+        # linux while resolving as the host meant the two looked for different
+        # filenames, which passed on POSIX and failed on the Windows runner.
+        monkeypatch.setattr("stt.tunnel._current_system", lambda: "linux")
+        monkeypatch.setattr("stt.tunnel._current_machine", lambda: "x86_64")
         monkeypatch.setattr("stt.tunnel.shutil.which", lambda name: "/usr/bin/cloudflared")
-        install_cloudflared(str(tmp_path), self._fake_fetch(), system="linux", machine="x86_64")
-        assert resolve_binary("cloudflared", managed_dir=str(tmp_path)) == str(tmp_path / "cloudflared")
+        installed = install_cloudflared(str(tmp_path), self._fake_fetch())
+        assert resolve_binary("cloudflared", managed_dir=str(tmp_path)) == installed
 
     def test_managed_dir_is_skipped_when_empty(self, tmp_path, monkeypatch):
         monkeypatch.setattr("stt.tunnel.shutil.which", lambda name: "/usr/bin/cloudflared")

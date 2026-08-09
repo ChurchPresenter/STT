@@ -129,6 +129,8 @@ def test_prune_with_keep_zero_removes_every_backup(tmp_path):
     assert file_backup.existing_backups(target) == []
 
 
+@pytest.mark.skipif(os.name == "nt",
+                    reason="POSIX directory permissions; chmod does not restrict writes on Windows, so the unwritable-directory case cannot be set up there")
 def test_a_backup_that_cannot_be_written_does_not_fail_the_save(tmp_path):
     """The safety net failing must never be what stops the save going through."""
     if os.geteuid() == 0:
@@ -143,6 +145,8 @@ def test_a_backup_that_cannot_be_written_does_not_fail_the_save(tmp_path):
         os.chmod(directory, 0o700)
 
 
+@pytest.mark.skipif(os.name == "nt",
+                    reason="POSIX directory permissions; chmod does not restrict writes on Windows, so the unwritable-directory case cannot be set up there")
 def test_a_backup_that_cannot_be_deleted_is_skipped_quietly(tmp_path):
     if os.geteuid() == 0:
         pytest.skip("root ignores directory permissions")
