@@ -565,28 +565,7 @@ config = load_config()
 _SENTRY_DEFAULT_DSN = "https://eff01fdec5e9330b80ffd96093038588@o4511050918723584.ingest.us.sentry.io/4511714251702272"
 
 
-def _sentry_scrub_request(event, hint):
-    """Drop the request body, query string and headers from every outgoing
-    event. Transcript segments, glossary terms, file paths and the ?key=
-    access token all travel in those, and none of them are ours to collect —
-    the UI promises no transcription content is sent, and this is what makes
-    that true. Stack traces, versions and OS context still go through."""
-    request = event.get("request")
-    if request:
-        for key in ("data", "query_string", "cookies", "headers", "env"):
-            request.pop(key, None)
-    # ArgvIntegration attaches the command line, which carries the install path
-    # (frequently including the operator's username).
-    extra = event.get("extra")
-    if extra:
-        extra.pop("sys.argv", None)
-    # Subprocess spans are named after the full command line, which for ffmpeg
-    # carries the input device name and for media jobs the file path.
-    for span in event.get("spans") or ():
-        if span.get("op", "").startswith("subprocess"):
-            span["description"] = (span.get("description", "").split() or ["subprocess"])[0]
-            span.pop("data", None)
-    return event
+from stt.crash_reports import scrub_event as _sentry_scrub_request  # noqa: E402
 
 
 def _init_sentry():
@@ -596,7 +575,8 @@ def _init_sentry():
     module), so both report. Never blocks boot.
 
     Deliberately configured to carry no user content: no request bodies, no
-    frame locals, no PII (IP addresses/headers). See _sentry_scrub_request."""
+    frame locals, no PII (IP addresses/headers). Scrubbing, and the dropping of
+    engineio's websocket-upgrade exceptions, live in stt/crash_reports.py."""
     cr = config.get("crash_reporting", {})
     if not cr.get("sentry_enabled", True):
         return
