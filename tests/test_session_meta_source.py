@@ -103,20 +103,41 @@ class TestTheWorkerPassesItsFreshConfig:
             "the worker must pass the config it reloaded for this session, not "
             "inherit the one it spawned with")
 
-    def test_the_worker_reloads_before_it_initialises_the_database(self):
+    def test_the_opener_passes_the_config_it_was_given(self):
+        """_open_session_db must hand its own argument to initialize_database.
+
+        The call moved into that helper when the session reset was added, so
+        this is where "which config describes the session" is now decided.
+        """
+        opener = self._func("_open_session_db")
+        param = opener.args.args[0].arg
+        call = next((n for n in ast.walk(opener)
+                     if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+                     and n.func.id == "initialize_database"), None)
+        assert call is not None, "_open_session_db no longer initialises the database"
+        assert isinstance(call.args[0], ast.Name) and call.args[0].id == param, (
+            "the opener must pass through the config it was given, not a global")
+
+    def test_the_worker_reloads_before_it_opens_the_session(self):
+        """The reload must precede the call that builds the session.
+
+        Checked against _open_session_db rather than initialize_database: the
+        latter now lives in a helper defined above the worker, so comparing its
+        line number would only measure where the helper sits in the file.
+        """
         reload_line = next(n.lineno for n in ast.walk(ast.parse(SRC))
                            if isinstance(n, ast.Assign)
                            and any(isinstance(t, ast.Name) and t.id == "process_config"
                                    for t in n.targets))
-        init_line = next(n.lineno for n in ast.walk(ast.parse(SRC))
+        open_line = next(n.lineno for n in ast.walk(ast.parse(SRC))
                          if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
-                         and n.func.id == "initialize_database")
-        assert reload_line < init_line, (
+                         and n.func.id == "_open_session_db")
+        assert reload_line < open_line, (
             "the fresh config must exist before the session is described by it")
 
 
 @pytest.mark.parametrize("name", ["_current_session_meta", "_session_meta_enabled",
-                                  "initialize_database"])
+                                  "initialize_database", "_open_session_db"])
 def test_the_functions_under_test_still_exist(name):
     """A rename would otherwise turn the structural tests into silent no-ops."""
     assert any(isinstance(n, ast.FunctionDef) and n.name == name

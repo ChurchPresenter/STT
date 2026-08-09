@@ -368,6 +368,7 @@ def _config_snapshot():
 # unit-tested); names are re-imported here so call sites stay unchanged.
 from stt import config_utils as _config_utils
 from stt import request_origin
+from stt.session_reset import SessionTracker
 from stt import tunnel as tunnel_mod
 from stt.config_utils import (  # noqa: F401
     SUPPORTED_AUDIO_FORMATS,
@@ -11868,6 +11869,67 @@ def get_transcription_status():
     )
 
 
+@app.route("/api/transcription/reset-session", methods=["POST"])
+def reset_session():
+    """Start a new session database without unloading or reloading any model.
+
+    The models are the expensive part of Stop/Start — minutes of dead air. An
+    operator splitting a service into parts, or starting clean after a false
+    start, only needs a new database, so this rolls one over while everything
+    stays loaded. The outgoing session is finalised exactly as a stop would
+    (checkpoint, SRT/HTML export) except for the file mover, which stays at the
+    real stop so a service is never delivered in halves.
+
+    Example: curl -X POST http://localhost:8080/api/transcription/reset-session
+    """
+    if not check_ip_whitelist():
+        return jsonify({"success": False, "error": "Access Denied"}), 403
+
+    # Serialised against start/stop: a rollover racing either of those would
+    # retire a database the other is in the middle of creating or closing.
+    with _transcription_start_lock:
+        if not _ts_get("running", False):
+            _note_access_detail("rejected: transcription not running")
+            return jsonify({
+                "success": False,
+                "error": "Transcription is not running — nothing to reset.",
+            }), 409
+
+        previous = _ts_get("session_id")
+        try:
+            control_queue.put({"command": "reset_session"})
+        except Exception as e:
+            _note_access_detail(f"reset-session failed to queue: {e}")
+            return jsonify({"success": False, "error": f"Could not reach the worker: {e}"}), 500
+
+    # The worker retires the old session (including a deliberate ~1s drain for
+    # in-flight readers) before publishing the new id, so wait rather than
+    # returning a session id the caller would have to poll for.
+    deadline = time.time() + 30
+    while time.time() < deadline:
+        current = _ts_get("session_id")
+        if current and current != previous:
+            _note_access_detail(f"session reset: {previous} -> {current}")
+            print(f"[RESET-SESSION] {previous} -> {current}")
+            return jsonify({
+                "success": True,
+                "message": "New session started.",
+                "previous_session_id": previous,
+                "session_id": current,
+                "db_name": _ts_get("db_name"),
+            })
+        if _ts_get("status") == "error":
+            break
+        sleep(0.25)
+
+    _note_access_detail("reset-session did not complete in time")
+    return jsonify({
+        "success": False,
+        "error": "The worker did not report a new session. Check the server log.",
+        "previous_session_id": previous,
+    }), 504
+
+
 @app.route("/api/transcription/force-reset", methods=["POST"])
 def force_reset_transcription():
     """API endpoint to force reset transcription state (emergency use)"""
@@ -15928,6 +15990,27 @@ def _service_phase_tick(is_running):
         pass  # a diagnostic broadcast must never break the emit loop
 
 
+# Caches keyed by database row id. Ids restart low in every new session
+# database, so anything carried across a rollover addresses unrelated rows.
+# Stop/Start used to be the only way to get a new database, and it reloads the
+# world anyway; a mid-run session reset does not, so the change has to be
+# noticed explicitly. See stt/session_reset.py for why None is not a change.
+_session_caches = SessionTracker()
+
+
+def _reset_caches_on_session_change():
+    """Drop per-session, id-keyed caches when the session database rolls over."""
+    if not _session_caches.changed(_ts_get("session_id")):
+        return
+    print("[SESSION] New session detected — clearing per-session caches", flush=True)
+    try:
+        get_translation_cache().clear()
+    except Exception as e:
+        print(f"[SESSION] Could not clear translation cache: {e}", flush=True)
+    _invalidate_entries_cache()
+    _set_mt_baseline_label("")
+
+
 def emit_new_entries():
     """Emit combined transcription updates and audio levels to web clients"""
     update_interval = config.get("web_server", {}).get("update_interval", 0.5)
@@ -15936,6 +16019,7 @@ def emit_new_entries():
             return
         # Check if transcription is running - if not, send empty data to clear display
         is_running = _ts_get("running", False)
+        _reset_caches_on_session_change()
 
         if not is_running:
             # Send empty data when stopped so frontend clears the display
@@ -17272,6 +17356,9 @@ def emit_audio_stream():
 # translation loop drains newest-first under backlog, so a lower id can be
 # translated after a higher one and must still get spoken (see stt/tts_queue.py).
 _tts_spoken = SpokenTracker()
+# Separate from _session_caches: this loop must act on the rollover too, and a
+# tracker reports a given change to exactly one caller.
+_tts_session = SessionTracker()
 
 def emit_tts_audio():
     """Background task that synthesizes speech from translated text and emits audio.
@@ -17307,6 +17394,15 @@ def emit_tts_audio():
             _tts_buffer.clear()
             socketio.sleep(1)
             continue
+
+        # A session rollover restarts row ids low. SpokenTracker's baseline is a
+        # monotonic high-water mark, so without this reset every new id looks
+        # already-spoken and TTS goes silent for the rest of the service —
+        # quietly, which is the worst way for it to fail.
+        if _tts_session.changed(_ts_get("session_id")):
+            print("[SESSION] New session — resetting TTS spoken tracker", flush=True)
+            _tts_spoken.reset()
+            _tts_buffer.clear()
 
         try:
             target_lang = trans_config.get("target_language", "en")
@@ -17526,6 +17622,198 @@ def install_crash_diagnostics(role="main"):
         threading.excepthook = _thread_hook
     except Exception:
         pass
+
+
+def _new_session_audio_path(process_config):
+    """Path for this session's .wav recording, or None if backup is off.
+
+    Shared by session start and the mid-run reset: a reset ends one recording
+    and begins another, because stt/session_cleanup.py pairs recordings to
+    databases by timestamp proximity and a recording spanning two databases
+    would attach to only one of them.
+    """
+    backup_config = process_config.get("audio_backup", {})
+    # Support both the old "enabled" key and the newer "wav_enabled".
+    if not backup_config.get("wav_enabled", backup_config.get("enabled", False)):
+        return None
+    try:
+        now = datetime.now(configured_timezone)
+        base_dir = backup_config.get("base_directory", "").strip() or BACKUP_DIR
+        path_format = backup_config.get("path_format", "").strip() or "%Y/%m"
+        full_dir_path = os.path.join(base_dir, now.strftime(path_format))
+        os.makedirs(full_dir_path, exist_ok=True)
+
+        filename_format = backup_config.get("filename_format", "").strip() or "%Y-%m-%d_%H%M%S"
+        filename_prefix = backup_config.get("filename_prefix", "")
+        stamp = now.strftime(filename_format)
+        session_filename = f"{stamp}_{filename_prefix}.wav" if filename_prefix else f"{stamp}.wav"
+        path = os.path.join(full_dir_path, session_filename)
+        print(f"[BACKUP] Full session file initialized: {path}")
+        return path
+    except Exception as e:
+        print(f"[WARNING] Failed to initialize session audio file: {e}")
+        return None
+
+
+def _open_session_db(process_config):
+    """Create the next session database and a worker connection to it.
+
+    Returns (db_path, connection, cursor). ``db_initialized`` is cleared first
+    because initialize_database early-returns on it and would otherwise hand
+    back the previous session's path — and it is the WORKER's copy of that
+    global that decides, not the web process's.
+    """
+    global db_initialized
+
+    db_initialized = False
+    db_path = initialize_database(process_config)
+
+    conn = sqlite3.connect(db_path, check_same_thread=False, timeout=30.0)
+    cursor = conn.cursor()
+    cursor.execute("PRAGMA journal_mode=WAL")
+    cursor.execute("PRAGMA synchronous=NORMAL")
+    cursor.execute("PRAGMA busy_timeout=30000")
+    # This connection (re)creates the WAL/SHM sidecars — keep them readable
+    # alongside the .db, as the rest of the archive is.
+    make_db_world_readable(db_path)
+    return db_path, conn, cursor
+
+
+def _finalize_session_audio(session_audio_file, session_audio_written, source):
+    """Rewrite the session recording's WAV header with its real length.
+
+    Audio is appended raw as it arrives, so the header written at the start
+    still claims the length the file had then. Without this pass the file is
+    complete but declares the wrong size and many players refuse it.
+
+    Shared by the stop path and the mid-run session reset: a reset ends one
+    recording and begins another, and the first is no less finished than the
+    last one just because the microphone kept running.
+    """
+    if not (session_audio_file and session_audio_written):
+        return
+    try:
+        with open(session_audio_file, "rb") as f:
+            data = f.read()
+
+        # Skip the stale 44-byte header and let AudioData write a correct one.
+        audio_data = sr.AudioData(data[44:], source.SAMPLE_RATE, source.SAMPLE_WIDTH)
+        with open(session_audio_file, "wb") as f:
+            f.write(audio_data.get_wav_data())
+
+        print(f"[BACKUP] Full session audio finalized: {session_audio_file}")
+    except Exception as e:
+        print(f"[WARNING] Failed to finalize session audio header: {e}")
+
+
+def _close_session_db(persistent_db_conn, persistent_db_cursor, db_path):
+    """Hand the current session database off and close the worker's connection.
+
+    Order matters and is load-bearing. The path is cleared from shared state
+    FIRST so the web process opens no new connections against it, then we wait
+    out any iteration already in flight: emit_translated_entries reads row ids
+    from one database and writes translations back seconds later, so closing
+    underneath it would land a translation for the old row N on the new row N.
+
+    Then the WAL is folded into the main file (TRUNCATE) and the connection
+    closed. WAL/SHM removal is deliberately left to _export_and_retire_session,
+    because export reopens the database and recreates them.
+    """
+    if not persistent_db_conn:
+        print("[DB-CLEANUP] persistent_db_conn is None, skipping cleanup", flush=True)
+        return
+    try:
+        print(f"[DB-CLEANUP] saved_db_path = {db_path}", flush=True)
+
+        with _transcription_state_lock:
+            transcription_state["db_name"] = None
+            transcription_state["session_id"] = None
+        print("[DB-CLEANUP] Cleared db_name from state (prevents new connections)", flush=True)
+
+        # emit_new_entries runs every 0.5s; a second covers an iteration in flight.
+        sleep(1)
+        print("[DB-CLEANUP] Waited for web server thread to release connections", flush=True)
+
+        try:
+            result = persistent_db_cursor.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            print(f"[DB-CLEANUP] WAL checkpoint completed: {result.fetchone()}", flush=True)
+        except Exception as checkpoint_error:
+            print(f"[DB-CLEANUP] WAL checkpoint failed: {checkpoint_error}", flush=True)
+
+        persistent_db_conn.close()
+        print("[DB-CLEANUP] Database connection closed", flush=True)
+    except Exception as e:
+        print(f"[DB-CLEANUP] Error closing DB connection: {e}", flush=True)
+        import traceback
+        traceback.print_exc()
+
+
+def _export_and_retire_session(session_db_name):
+    """Write a finished session's exports, then retire its WAL/SHM sidecars.
+
+    Everything a session needs after its rows stop arriving and before its
+    files are handed anywhere else. Shared by the stop path and the mid-run
+    session reset so the two cannot drift — the reset deliberately does NOT
+    call the file mover afterwards, so a service is never delivered in halves.
+
+    Config is re-read here rather than passed in: a session can run for hours
+    and the export toggles may have been changed since it started.
+    """
+    if not session_db_name:
+        return
+    # Check if SRT generation is enabled (reload config for fresh settings)
+    fresh_config = load_config()
+    srt_enabled = fresh_config.get("database", {}).get("srt_enabled", True)
+    html_enabled = fresh_config.get("database", {}).get("html_enabled", True)
+    if srt_enabled:
+        try:
+            print(f"[SRT] Converting session database to SRT: {session_db_name}")
+            srt_result = convert_db_to_srt(session_db_name)
+            if srt_result:
+                print("[SRT] Successfully created SRT file")
+            else:
+                print("[SRT] No SRT file created (no valid entries or error)")
+        except Exception as e:
+            print(f"[SRT] Error during SRT conversion: {e}")
+    else:
+        print("[SRT] SRT generation disabled in settings")
+        # Generate HTML separately if SRT is disabled but HTML is enabled
+        if html_enabled:
+            try:
+                print(f"[HTML] Generating HTML file: {session_db_name}")
+                convert_db_to_html(session_db_name)
+            except Exception as e:
+                print(f"[HTML] Error during HTML generation: {e}")
+
+    # Generate translation SRT if enabled
+    trans_srt_enabled = fresh_config.get("live_translation", {}).get("srt_enabled", True)
+    if trans_srt_enabled and fresh_config.get("live_translation", {}).get("enabled", False):
+        try:
+            print(f"[SRT-TRANSLATION] Converting translations to SRT: {session_db_name}")
+            trans_srt_result = convert_db_to_translation_srt(session_db_name)
+            if trans_srt_result:
+                print("[SRT-TRANSLATION] Successfully created translation SRT file")
+            else:
+                print("[SRT-TRANSLATION] No translation SRT created (no translated entries)")
+        except Exception as e:
+            print(f"[SRT-TRANSLATION] Error: {e}")
+
+    # NOW retire the WAL/SHM sidecars, after SRT conversion:
+    # that opens its own connection, which recreates them.
+    #
+    # This used to unlink both files directly. It was safe here
+    # because a TRUNCATE checkpoint had already run, but it is
+    # the wrong pattern to have lying around — deleting a WAL
+    # that has not been checkpointed discards committed rows.
+    # The shared helper folds the WAL in first and lets SQLite
+    # remove it, so no caller can copy the unsafe shape.
+    print("[WAL-CLEANUP] Retiring WAL/SHM files after SRT conversion...", flush=True)
+    if _db_checkpoint_and_release(session_db_name):
+        print("[WAL-CLEANUP] Sidecars retired", flush=True)
+    else:
+        print("[WAL-CLEANUP] Sidecars still present; the startup "
+              "sweep will retry", flush=True)
+
 
 
 def thread1_function(ts, cq, cfq, cal_state, cal_data, cal_step1, asq):
@@ -18171,24 +18459,8 @@ def thread1_function(ts, cq, cfq, cal_state, cal_data, cal_step1, asq):
                     try:
                         # process_config was just reloaded from disk for this
                         # session; the worker's module-level config is older.
-                        db_path = initialize_database(process_config)
-
-                        # Create persistent database connection for this process
-                        # This avoids overhead of opening/closing connection on every transcription
-                        persistent_db_conn = sqlite3.connect(
-                            db_path, check_same_thread=False, timeout=30.0
-                        )
-                        persistent_db_cursor = persistent_db_conn.cursor()
-
-                        # Enable WAL mode for this connection too
-                        persistent_db_cursor.execute("PRAGMA journal_mode=WAL")
-                        persistent_db_cursor.execute("PRAGMA synchronous=NORMAL")
-                        persistent_db_cursor.execute(
-                            "PRAGMA busy_timeout=30000"
-                        )  # 30 second timeout
-                        # WAL/SHM sidecars are (re)created here by this connection —
-                        # keep them readable by all users alongside the .db file.
-                        make_db_world_readable(db_path)
+                        db_path, persistent_db_conn, persistent_db_cursor = \
+                            _open_session_db(process_config)
 
                         print(f"[OK] Database initialized: {db_path}")
                     except Exception as e:
@@ -18225,40 +18497,7 @@ def thread1_function(ts, cq, cfq, cal_state, cal_data, cal_step1, asq):
                         return
 
                     # Initialize full session audio file (if .wav backup is enabled)
-                    backup_config = process_config.get("audio_backup", {})
-                    # Support both old "enabled" key and new "wav_enabled" key for backward compatibility
-                    wav_backup_enabled = backup_config.get("wav_enabled", backup_config.get("enabled", False))
-                    if wav_backup_enabled:
-                        try:
-                            now = datetime.now(configured_timezone)
-                            base_dir = backup_config.get(
-                                "base_directory", ""
-                            ).strip() or BACKUP_DIR
-                            path_format = backup_config.get("path_format", "").strip() or "%Y/%m"
-                            formatted_path = now.strftime(path_format)
-                            full_dir_path = os.path.join(base_dir, formatted_path)
-                            os.makedirs(full_dir_path, exist_ok=True)
-
-                            filename_format = backup_config.get(
-                                "filename_format", ""
-                            ).strip() or "%Y-%m-%d_%H%M%S"
-                            filename_prefix = backup_config.get("filename_prefix", "")
-                            # Build filename: {timestamp}_{prefix}.wav or {timestamp}.wav
-                            if filename_prefix:
-                                session_filename = f"{now.strftime(filename_format)}_{filename_prefix}.wav"
-                            else:
-                                session_filename = f"{now.strftime(filename_format)}.wav"
-                            session_audio_file = os.path.join(
-                                full_dir_path, session_filename
-                            )
-                            print(
-                                f"[BACKUP] Full session file initialized: {session_audio_file}"
-                            )
-                        except Exception as e:
-                            print(
-                                f"[WARNING] Failed to initialize session audio file: {e}"
-                            )
-                            session_audio_file = None
+                    session_audio_file = _new_session_audio_path(process_config)
 
                     def has_speech(audio_bytes, sample_rate=16000):
                         """
@@ -18557,6 +18796,59 @@ def thread1_function(ts, cq, cfq, cal_state, cal_data, cal_step1, asq):
                                         print("[LOOP] Stop command received, exiting main loop")
                                         is_running = False
                                         break
+                                    elif command["command"] == "reset_session":
+                                        # Roll to a fresh session database without
+                                        # disturbing the loaded models. Only reachable
+                                        # from here: the connection, db path, recording
+                                        # and partial-row trackers are locals of this
+                                        # function, so the outer control loop — which
+                                        # only runs between sessions — cannot touch them.
+                                        try:
+                                            outgoing_db = db_path
+                                            print(f"[RESET-SESSION] Retiring {outgoing_db}", flush=True)
+
+                                            # Finish the outgoing session exactly as a stop
+                                            # would, minus the file mover: delivering a
+                                            # service in halves is worse than delivering
+                                            # it once at the real stop.
+                                            _finalize_session_audio(
+                                                session_audio_file, session_audio_written, source)
+                                            _close_session_db(
+                                                persistent_db_conn, persistent_db_cursor, outgoing_db)
+                                            _export_and_retire_session(outgoing_db)
+
+                                            db_path, persistent_db_conn, persistent_db_cursor = \
+                                                _open_session_db(process_config)
+                                            session_audio_file = _new_session_audio_path(process_config)
+                                            session_audio_written = False
+
+                                            # Everything below is keyed by row id, and ids
+                                            # restart low in the new database — carrying any
+                                            # of it over would address unrelated rows.
+                                            current_partial_row_ids = []
+                                            current_partial_seq = 0
+                                            last_partial_text = ""
+                                            last_partial_write_ms = 0
+                                            _hyp_buffer = LocalAgreementBuffer()
+                                            pending_remainder = ""
+                                            pending_remainder_since = None
+                                            pending_remainder_meta = None
+                                            _perf_state = None
+                                            _perf_first_ts = None
+                                            _perf_last_push = 0.0
+
+                                            print(f"[RESET-SESSION] New session: {db_path}", flush=True)
+                                        except Exception as reset_error:
+                                            # Better to stop than to keep transcribing into
+                                            # a connection that was closed underneath us.
+                                            print(f"[RESET-SESSION] Failed: {reset_error}", flush=True)
+                                            import traceback
+                                            traceback.print_exc()
+                                            with _transcription_state_lock:
+                                                transcription_state["status"] = "error"
+                                                transcription_state["error"] = f"Session reset failed: {reset_error}"
+                                            is_running = False
+                                            break
                                     elif command["command"] == "start_calibration":
                                         # Handle calibration start command in inner loop - use local state
                                         calibration_mode = True
@@ -19861,71 +20153,10 @@ def thread1_function(ts, cq, cfq, cal_state, cal_data, cal_step1, asq):
                         except Exception as e:
                             print(f"[CLEANUP] WARNING: Error stopping audio source: {e}")
 
-                    # Fix WAV header for session audio file (update file size in header)
-                    if session_audio_file and session_audio_written:
-                        try:
-                            # Read all data
-                            with open(session_audio_file, "rb") as f:
-                                data = f.read()
-
-                            # Recreate proper WAV file with correct header
-                            audio_data = sr.AudioData(
-                                data[44:], source.SAMPLE_RATE, source.SAMPLE_WIDTH
-                            )  # Skip old header
-                            correct_wav = audio_data.get_wav_data()
-
-                            with open(session_audio_file, "wb") as f:
-                                f.write(correct_wav)
-
-                            print(
-                                f"[BACKUP] Full session audio finalized: {session_audio_file}"
-                            )
-                        except Exception as e:
-                            print(
-                                f"[WARNING] Failed to finalize session audio header: {e}"
-                            )
+                    _finalize_session_audio(session_audio_file, session_audio_written, source)
 
                     print("[DB-CLEANUP] Starting database cleanup...", flush=True)
-                    try:
-                        if persistent_db_conn:
-                            # Save db_path for SRT conversion and WAL/SHM cleanup later
-                            saved_db_path = db_path
-                            print(f"[DB-CLEANUP] saved_db_path = {saved_db_path}", flush=True)
-                            print(f"[DB-CLEANUP] global db_name = {db_name}", flush=True)
-
-                            # CRITICAL: Clear db_name from state BEFORE cleanup to prevent
-                            # web server thread (emit_new_entries) from opening new connections
-                            with _transcription_state_lock:
-                                transcription_state["db_name"] = None
-                                transcription_state["session_id"] = None
-                            print("[DB-CLEANUP] Cleared db_name from state (prevents new connections)", flush=True)
-
-                            # Wait for any in-flight emit_new_entries() iterations to complete
-                            # emit_new_entries runs every 0.5 seconds, so 1 second should be safe
-                            sleep(1)
-                            print("[DB-CLEANUP] Waited for web server thread to release connections", flush=True)
-
-                            # Checkpoint WAL to flush all changes to main database file
-                            # TRUNCATE mode removes WAL file after checkpoint
-                            try:
-                                result = persistent_db_cursor.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-                                checkpoint_result = result.fetchone()
-                                print(f"[DB-CLEANUP] WAL checkpoint completed: {checkpoint_result}", flush=True)
-                            except Exception as checkpoint_error:
-                                print(f"[DB-CLEANUP] WAL checkpoint failed: {checkpoint_error}", flush=True)
-
-                            persistent_db_conn.close()
-                            print("[DB-CLEANUP] Database connection closed", flush=True)
-
-                            # NOTE: WAL/SHM file deletion is deferred until AFTER SRT conversion
-                            # because SRT conversion opens a new connection which recreates these files
-                            # The actual deletion happens after SRT conversion outside of main()
-                        else:
-                            print("[DB-CLEANUP] persistent_db_conn is None, skipping cleanup", flush=True)
-                    except Exception as e:
-                        print(f"[DB-CLEANUP] Error closing DB connection: {e}", flush=True)
-                        import traceback
-                        traceback.print_exc()
+                    _close_session_db(persistent_db_conn, persistent_db_cursor, db_path)
 
                     try:
                         if os.path.exists(temp_file):
@@ -19984,60 +20215,7 @@ def thread1_function(ts, cq, cfq, cal_state, cal_data, cal_step1, asq):
                     # db_name already cleared in cleanup code above
                 print("[INFO] Transcription stopped successfully")
 
-                # Convert database to SRT before file mover runs
-                if session_db_name:
-                    # Check if SRT generation is enabled (reload config for fresh settings)
-                    fresh_config = load_config()
-                    srt_enabled = fresh_config.get("database", {}).get("srt_enabled", True)
-                    html_enabled = fresh_config.get("database", {}).get("html_enabled", True)
-                    if srt_enabled:
-                        try:
-                            print(f"[SRT] Converting session database to SRT: {session_db_name}")
-                            srt_result = convert_db_to_srt(session_db_name)
-                            if srt_result:
-                                print("[SRT] Successfully created SRT file")
-                            else:
-                                print("[SRT] No SRT file created (no valid entries or error)")
-                        except Exception as e:
-                            print(f"[SRT] Error during SRT conversion: {e}")
-                    else:
-                        print("[SRT] SRT generation disabled in settings")
-                        # Generate HTML separately if SRT is disabled but HTML is enabled
-                        if html_enabled:
-                            try:
-                                print(f"[HTML] Generating HTML file: {session_db_name}")
-                                convert_db_to_html(session_db_name)
-                            except Exception as e:
-                                print(f"[HTML] Error during HTML generation: {e}")
-
-                    # Generate translation SRT if enabled
-                    trans_srt_enabled = fresh_config.get("live_translation", {}).get("srt_enabled", True)
-                    if trans_srt_enabled and fresh_config.get("live_translation", {}).get("enabled", False):
-                        try:
-                            print(f"[SRT-TRANSLATION] Converting translations to SRT: {session_db_name}")
-                            trans_srt_result = convert_db_to_translation_srt(session_db_name)
-                            if trans_srt_result:
-                                print("[SRT-TRANSLATION] Successfully created translation SRT file")
-                            else:
-                                print("[SRT-TRANSLATION] No translation SRT created (no translated entries)")
-                        except Exception as e:
-                            print(f"[SRT-TRANSLATION] Error: {e}")
-
-                    # NOW retire the WAL/SHM sidecars, after SRT conversion:
-                    # that opens its own connection, which recreates them.
-                    #
-                    # This used to unlink both files directly. It was safe here
-                    # because a TRUNCATE checkpoint had already run, but it is
-                    # the wrong pattern to have lying around — deleting a WAL
-                    # that has not been checkpointed discards committed rows.
-                    # The shared helper folds the WAL in first and lets SQLite
-                    # remove it, so no caller can copy the unsafe shape.
-                    print("[WAL-CLEANUP] Retiring WAL/SHM files after SRT conversion...", flush=True)
-                    if _db_checkpoint_and_release(session_db_name):
-                        print("[WAL-CLEANUP] Sidecars retired", flush=True)
-                    else:
-                        print("[WAL-CLEANUP] Sidecars still present; the startup "
-                              "sweep will retry", flush=True)
+                _export_and_retire_session(session_db_name)
 
                 # File mover is THE VERY LAST operation after everything is fully stopped
                 # Wait 10 seconds to ensure all file handles are released

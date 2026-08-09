@@ -296,8 +296,26 @@
         let autoScroll = true;        // stick to bottom; paused when user scrolls up
         let pendingNew = 0;           // new segments arrived while paused (for the pill badge)
 
+        // Row ids restart low in each session database, and this page can UPDATE
+        // and DELETE by id — so carrying segments across a rollover would let a
+        // click act on an unrelated row. Drop everything when the session changes.
+        let _lastKnownSessionId = null;
+
+        function checkSessionChanged(sessionId) {
+            if (sessionId === undefined || sessionId === null) return;
+            if (_lastKnownSessionId !== null && sessionId !== _lastKnownSessionId) {
+                segments = {};
+                stagedSegs = [];
+                inProgress = null;
+                pendingNew = 0;
+                render();
+            }
+            _lastKnownSessionId = sessionId;
+        }
+
         // === Socket: Transcription ===
         socket.on("transcription_update", function(data) {
+            checkSessionChanged(data.session_id);
             updateStatusFromData(data);
             const segs = data.segments || [];
             if (data.delay_enabled !== undefined) { delayEnabled = data.delay_enabled; updateDelayBtn(); }

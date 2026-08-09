@@ -62,6 +62,8 @@ module = [
     "stt.repeat_filter",
     "stt.tts_backends",
     "stt.tunnel",
+    "stt.request_origin",
+    "stt.session_reset",
 ]
 disallow_untyped_defs = true
 

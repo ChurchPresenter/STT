@@ -875,6 +875,9 @@
                         <button id="btn_stop" class="control-btn btn-stop" onclick="stopTranscription()" disabled>
                             Stop
                         </button>
+                        <button id="btn_reset_session" class="control-btn" onclick="resetSession()" disabled>
+                            New Session
+                        </button>
                         <button id="btn_force_reset" class="control-btn btn-force-reset" onclick="forceResetTranscription()">
                             Force Reset
                         </button>
@@ -1379,6 +1382,40 @@
             previewLastInProgressText = '';
         }
 
+        // Roll to a new session database without touching the loaded models —
+        // the expensive part of Stop/Start is reloading them, and splitting a
+        // service into parts does not need that.
+        async function resetSession() {
+            if (!confirm('Start a new session?\n\nThe current recording and transcript are finished off and saved, and a new session begins immediately. Models stay loaded, so there is no gap.')) {
+                return;
+            }
+            const btn = document.getElementById('btn_reset_session');
+            const original = btn.textContent;
+            btn.disabled = true;
+            btn.textContent = 'Starting…';
+            try {
+                // The server finishes the old session before answering, which
+                // includes a deliberate pause for in-flight readers.
+                const response = await fetch('/api/transcription/reset-session', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' }
+                });
+                const data = await response.json();
+                if (data.success) {
+                    showAlert('New session started: ' + data.session_id, 'success');
+                    clearTranscriptionDisplay();
+                    updateStatus();
+                } else {
+                    showAlert('Error: ' + (data.error || 'Session reset failed'), 'error');
+                }
+            } catch (error) {
+                showAlert('Error resetting session: ' + error.message, 'error');
+            } finally {
+                btn.textContent = original;
+                btn.disabled = false;
+            }
+        }
+
         async function forceResetTranscription() {
             if (!confirm('WARNING: Force reset will forcefully kill the transcription process and reset the state.\n\nThis should only be used if the system is stuck.\n\nAre you sure you want to continue?')) {
                 return;
@@ -1488,6 +1525,7 @@
                     const statusIndicator = document.getElementById('status_indicator');
                     const btnStart = document.getElementById('btn_start');
                     const btnStop = document.getElementById('btn_stop');
+                    const btnResetSession = document.getElementById('btn_reset_session');
 
                     // Reflect setup readiness in the checklist and Start button.
                     renderSetupChecklist(setup);
@@ -1524,6 +1562,8 @@
                     if (!playbackIsFile) renderPlaybackBar(null);
 
                     // Handle different status states
+                    if (btnResetSession) btnResetSession.disabled = (state.status !== 'running');
+
                     if (state.status === 'running') {
                         statusIndicator.className = 'status-indicator running';
                         btnStart.disabled = true;
