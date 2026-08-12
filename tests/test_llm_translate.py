@@ -30,6 +30,15 @@ from stt.llm_translate import (
     uses_local_llm,
     numbers_survived,
     validate_translation,
+    PROMPT_STYLE_CHAT,
+    PROMPT_STYLE_TRANSLATEGEMMA,
+    build_translategemma_messages,
+    build_translategemma_prompt,
+    build_translategemma_user,
+    is_model_gguf,
+    resolve_prompt_style,
+    translategemma_lang_code,
+    uses_system_prompt,
 )
 
 NAMES = {"en": "English", "es": "Spanish", "de": "German", "ru": "Russian"}
@@ -945,3 +954,176 @@ class TestLooksLikeReasoningName:
     def test_a_quantisation_name_is_not_mistaken_for_r1(self):
         # "r1" alone would flag half of Llama's file names.
         assert looks_like_reasoning_name("Llama-3.1-8B-Instruct-Q4_K_M.gguf") is False
+
+
+class TestResolvePromptStyle:
+    """Which shape of model is being talked to.
+
+    Getting this wrong is not a degradation, it is a different failure in each
+    direction: a chat prompt sent to a TranslateGemma is translated rather than
+    obeyed, so the prompt itself reaches the screen; the field prompt sent to a chat
+    model asks it to translate a line of punctuation.
+    """
+
+    @pytest.mark.parametrize("name", [
+        "mradermacher/translategemma-12b-it-GGUF",
+        "translategemma-4b-it.Q4_K_M.gguf",
+        "google/TranslateGemma-27B-it",
+        "/models/TRANSLATEGEMMA_12b/model.gguf",
+        "translate-gemma-12b",
+    ])
+    def test_translategemma_is_recognised_by_name(self, name):
+        assert resolve_prompt_style("auto", name) == PROMPT_STYLE_TRANSLATEGEMMA
+
+    @pytest.mark.parametrize("name", [
+        "unsloth/gemma-4-12B-it-GGUF",
+        "ggml-org/gemma-3-12b-it-GGUF",
+        "bartowski/Qwen2.5-7B-Instruct-GGUF",
+        "bartowski/aya-expanse-8b-GGUF",
+    ])
+    def test_instruction_models_stay_on_the_chat_style(self, name):
+        assert resolve_prompt_style("auto", name) == PROMPT_STYLE_CHAT
+
+    def test_an_unknown_name_defaults_to_chat(self):
+        # Chat is the safe default of the two: it still translates on a translation
+        # model, where the field format on a chat model does not.
+        assert resolve_prompt_style("auto", "some-local-finetune") == PROMPT_STYLE_CHAT
+        assert resolve_prompt_style(None, None, None) == PROMPT_STYLE_CHAT
+
+    def test_an_explicit_setting_beats_the_name(self):
+        # A fine-tune whose name says nothing about its lineage still has to be
+        # runnable, and an operator who has met one must be able to say so.
+        assert resolve_prompt_style("translategemma", "my-model") == PROMPT_STYLE_TRANSLATEGEMMA
+        assert resolve_prompt_style("chat", "translategemma-12b") == PROMPT_STYLE_CHAT
+
+    def test_any_of_the_names_can_carry_it(self):
+        # The repo may be generic while the filename is not, and the reverse.
+        assert resolve_prompt_style("auto", "someone/GGUF-quants",
+                                    "translategemma-12b-it.Q4_K_M.gguf") == PROMPT_STYLE_TRANSLATEGEMMA
+
+    def test_a_bad_value_falls_back_to_detection_not_to_a_style(self):
+        assert resolve_prompt_style("nonsense", "translategemma-4b") == PROMPT_STYLE_TRANSLATEGEMMA
+
+    def test_only_the_chat_style_has_a_system_prompt(self):
+        assert uses_system_prompt(PROMPT_STYLE_CHAT) is True
+        assert uses_system_prompt(PROMPT_STYLE_TRANSLATEGEMMA) is False
+
+
+class TestTranslategemmaLangCode:
+    @pytest.mark.parametrize("code,expected", [
+        ("ru", "ru"), ("EN", "en"), ("  es  ", "es"),
+        ("pt-BR", "pt_BR"), ("en_us", "en_US"),
+    ])
+    def test_codes_the_model_accepts(self, code, expected):
+        assert translategemma_lang_code(code) == expected
+
+    @pytest.mark.parametrize("code", ["auto", "", None, "   ", "unknown"])
+    def test_a_non_code_is_dropped_rather_than_guessed(self, code):
+        # Naming the wrong source language tells the model the caption is already in
+        # the target language, and it hands the source straight back.
+        assert translategemma_lang_code(code) == ""
+
+    def test_a_language_name_is_not_a_code(self):
+        assert translategemma_lang_code("Russian") == ""
+
+
+class TestTranslategemmaPrompt:
+    def test_the_published_field_order(self):
+        got = build_translategemma_user("Мир вам.", "ru", "en")
+        assert got == "type:text,source_lang_code:ru,target_lang_code:en,text:Мир вам."
+
+    def test_the_caption_is_last_so_a_comma_in_it_reads_as_text(self):
+        # A caption contains commas constantly; anything after "text:" must belong to
+        # the caption and not be parsed as another field.
+        caption = "Слава Богу, братья и сёстры."
+        got = build_translategemma_user(caption, "ru", "en")
+        assert got.split(",text:", 1)[1] == caption
+        assert "lang_code" not in got.split(",text:", 1)[1]
+
+    def test_an_unknown_source_omits_the_field(self):
+        got = build_translategemma_user("Мир вам.", "auto", "en")
+        assert "source_lang_code" not in got
+        assert got == "type:text,target_lang_code:en,text:Мир вам."
+
+    def test_an_unknown_target_still_names_one(self):
+        # The target is what the caption is for; a prompt without it would ask the
+        # model to guess what the congregation reads.
+        assert "target_lang_code:en" in build_translategemma_user("x", "ru", "")
+
+    def test_no_system_turn_in_the_messages(self):
+        msgs = build_translategemma_messages("Мир вам.", "ru", "en")
+        assert [m["role"] for m in msgs] == ["user"]
+        assert msgs[0]["content"] == build_translategemma_user("Мир вам.", "ru", "en")
+
+    def test_the_local_prompt_primes_the_model_turn(self):
+        prompt = build_translategemma_prompt("Мир вам.", "ru", "en")
+        assert prompt.startswith("<start_of_turn>user\n")
+        assert "<end_of_turn>\n<start_of_turn>model\n" in prompt
+        # Primed with the same header and left mid-line, so the model continues with
+        # the translation instead of spending caption budget restating the fields.
+        assert prompt.endswith("type:text,source_lang_code:ru,target_lang_code:en,text:")
+
+    def test_the_local_prompt_carries_no_bos(self):
+        # llama.cpp adds one from the model's own metadata; a second measurably
+        # degrades Gemma output.
+        assert "<bos>" not in build_translategemma_prompt("x", "ru", "en")
+
+
+class TestTranslategemmaEcho:
+    """The model answers in the format it was asked in; the header is not a caption."""
+
+    def test_the_echoed_header_is_stripped(self):
+        raw = "type:text,source_lang_code:ru,target_lang_code:en,text:Peace be with you."
+        assert validate_translation(raw, SRC, "en") == "Peace be with you."
+
+    def test_a_header_without_a_source_field_is_stripped(self):
+        raw = "type:text,target_lang_code:en,text:Peace be with you."
+        assert validate_translation(raw, SRC, "en") == "Peace be with you."
+
+    def test_spacing_does_not_hide_it(self):
+        raw = "type: text, source_lang_code: ru, target_lang_code: en, text: Peace be with you."
+        assert validate_translation(raw, SRC, "en") == "Peace be with you."
+
+    def test_a_caption_that_merely_mentions_text_is_untouched(self):
+        # The rule anchors at the start; a caption is not a prompt because it
+        # contains a colon.
+        caption = "The text says: peace be with you."
+        assert validate_translation(caption, SRC, "en") == caption
+
+    def test_a_stripped_header_leaving_nothing_is_still_rejected(self):
+        assert validate_translation("type:text,target_lang_code:en,text:", SRC, "en") is None
+
+
+class TestIsModelGguf:
+    @pytest.mark.parametrize("name", [
+        "gemma-4-12b-it-Q4_K_M.gguf",
+        "translategemma-12b-it.Q4_K_M.gguf",
+        "Qwen2.5-7B-Instruct-Q4_K_M.gguf",
+    ])
+    def test_a_quantisation_is_a_model(self, name):
+        assert is_model_gguf(name) is True
+
+    @pytest.mark.parametrize("name", [
+        "mmproj-gemma-4-12B-it-Q8_0.gguf",          # vision projector
+        "translategemma-12b-it.mmproj-f16.gguf",
+        "mtp-gemma-4-12B-it-Q4_0.gguf",             # multi-token-prediction head
+    ])
+    def test_companion_files_are_not_offered_as_models(self, name):
+        # These sit beside the quantisations at a fraction of their size, so in a
+        # picker they read as the cheap option and load as something that cannot
+        # answer a caption.
+        assert is_model_gguf(name) is False
+
+    def test_only_gguf_files_qualify(self):
+        assert is_model_gguf("config.json") is False
+        assert is_model_gguf("") is False
+
+
+class TestScanSkipsCompanionGgufs:
+    def test_a_multimodal_release_lists_only_its_quantisations(self, tmp_path):
+        repo = tmp_path / "mradermacher--translategemma-12b-it-GGUF"
+        repo.mkdir()
+        (repo / "translategemma-12b-it.Q4_K_M.gguf").write_bytes(b"x" * 10)
+        (repo / "translategemma-12b-it.mmproj-f16.gguf").write_bytes(b"x" * 3)
+        found = scan_gguf_models(str(tmp_path))
+        assert [f["name"] for f in found[0]["files"]] == ["translategemma-12b-it.Q4_K_M.gguf"]

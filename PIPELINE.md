@@ -443,6 +443,20 @@ every new rule a net loss on the captions it caught: the LLM usually had the cap
 right and broke one stated rule. So the caption is asked for again with that rule named, and
 only the second failure falls back. `live_translation.llm.retry_on_reject` turns this off.
 
+**Two prompt formats, and they are not interchangeable.** `live_translation.llm.prompt_style`
+(default `auto`, which reads the model name) picks between them:
+
+| Style | Sent | Trade |
+|-------|------|-------|
+| `chat` | System prompt + the caption | The prompt is the tuning surface — terminology, register, scripture rules — and a rejection can be retried with the broken rule named |
+| `translategemma` | `type:text,source_lang_code:…,target_lang_code:…,text:…` and nothing else | Google's TranslateGemma translates better unprompted (the 12B beats the Gemma 3 27B baseline on WMT24++) but supports no system prompt or instruction at all, so the terminology prompt and the retry are both inert under it |
+
+Under `translategemma` the source language must be a real code, so `auto` is resolved to
+`audio.language` first and dropped if that is `auto` too — naming the wrong source tells the
+model the caption is already translated, and it hands the source straight back. The local path
+renders Gemma's turn markers itself and primes the model turn with the field header, so the
+reply is the translation alone; an echoed header is stripped in any case.
+
 Not retried: `empty` (the call itself failed) and `wrong_script` (the model is not translating
 at all) — both spend a caption's budget to fail the same way. Nor is anything retried after a
 timeout or a transport error, and on the endpoint path the retry is bounded by what remains of

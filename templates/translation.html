@@ -364,13 +364,34 @@
                         </div>
                         <div class="form-group">
                             <label for="llm_model">Model Name</label>
-                            <input type="text" id="llm_model" placeholder="qwen2.5:7b-instruct" style="width:100%;">
+                            <input type="text" id="llm_model" placeholder="qwen2.5:7b-instruct" style="width:100%;"
+                                   oninput="refreshLlmPromptStyleNotice()">
                         </div>
                         <div class="form-group">
                             <label for="llm_api_key">API Key <span style="color: var(--text-secondary); font-weight: normal;">(optional)</span></label>
                             <input type="password" id="llm_api_key" autocomplete="off" style="width:100%;">
                             <small style="color: var(--text-secondary); font-size: 0.75em;">Sent as a bearer token. Leave empty for a local server.</small>
                         </div>
+                    </div>
+
+                    <!-- Two kinds of model, instructed in incompatible ways. A chat
+                         model is taught the service's terminology by the prompt below;
+                         a TranslateGemma reads four fields and no instructions at all,
+                         so choosing it turns that prompt — and the corrective retry —
+                         off. Auto reads the model name and is right for both. -->
+                    <div class="form-group">
+                        <label for="llm_prompt_style">Prompt Format</label>
+                        <select id="llm_prompt_style" onchange="onLlmPromptStyleChange()">
+                            <option value="auto">Auto — detect from the model name</option>
+                            <option value="chat">Chat — system prompt + caption (Gemma, Qwen, Aya)</option>
+                            <option value="translategemma">TranslateGemma — translation fields, no prompt</option>
+                        </select>
+                        <small style="color: var(--text-secondary); font-size: 0.75em;">
+                            TranslateGemma translates better out of the box — the 12B beats the
+                            Gemma 3 27B baseline on WMT24++ — but Google states it does not support
+                            system prompts or instructions, so the terminology prompt below is not
+                            sent under that format and a rejected caption is not retried.
+                        </small>
                     </div>
 
                     <button onclick="testLlmConnection()" class="btn-save" id="llm_test_btn">Test Translation</button>
@@ -392,6 +413,13 @@
                             prompt written for one language still follows a later switch. Clear the box
                             to fall back to the built-in prompt.
                         </small>
+                        <div id="llm_prompt_inert_notice" style="display:none; margin-top: 6px; background: var(--warning-bg); border: 1px solid var(--warning); border-radius: var(--radius-sm); padding: 8px 12px;">
+                            <small style="color: #ffcc00;">
+                                <strong>Not sent to this model.</strong> The selected prompt format is
+                                TranslateGemma, which takes only the caption and a pair of language
+                                codes. This text is kept — switch the format back to Chat to use it.
+                            </small>
+                        </div>
                         <div style="display: flex; gap: 8px; margin-top: 6px; flex-wrap: wrap;">
                             <button type="button" onclick="resetLlmPrompt()" class="btn-save" style="width: auto; margin: 0; padding: 3px 12px; font-size: 0.8em;">Reset to Default</button>
                             <button type="button" onclick="clearLlmPrompt()" class="btn-save btn-warning" style="width: auto; margin: 0; padding: 3px 12px; font-size: 0.8em;">Clear</button>
@@ -1587,6 +1615,7 @@
             // captions with the wrong engine.
             document.getElementById('llm_unavailable_notice').style.display =
                 (local && llmLocalAvailable === false) ? '' : 'none';
+            refreshLlmPromptStyleNotice();  // the name "auto" reads differs per provider
         }
 
         function onLlmGgufRepoChange(selectFile) {
@@ -1611,6 +1640,7 @@
                 sel.insertBefore(missing, sel.firstChild);
             }
             if (selectFile) sel.value = selectFile;
+            refreshLlmPromptStyleNotice();  // "auto" reads the repo/file name
         }
 
         async function loadLlmModels(selectRepo, selectFile) {
@@ -1715,9 +1745,39 @@
             showAlert('Prompt cleared — the built-in prompt will be used. Save Settings to apply.', 'success');
         }
 
+        // Which format the caption will actually be sent in, resolving "auto" the way
+        // the server does. Only a hint — stt/llm_translate.resolve_prompt_style is the
+        // one that decides — but the operator has to see that picking a TranslateGemma
+        // silenced the prompt box, and seeing it after a save is too late.
+        function resolvedLlmPromptStyle() {
+            const style = document.getElementById('llm_prompt_style').value;
+            if (style === 'chat' || style === 'translategemma') return style;
+            const local = document.getElementById('llm_provider').value === 'local';
+            const name = (local
+                ? document.getElementById('llm_gguf_repo').value + ' ' + document.getElementById('llm_gguf_file').value
+                : document.getElementById('llm_model').value).toLowerCase().replace(/[\s_/.]+/g, '-');
+            return name.includes('translategemma') || name.includes('translate-gemma')
+                ? 'translategemma' : 'chat';
+        }
+
+        // Split from the handler because applyLlmSettings() calls it while loading the
+        // saved settings, and marking the form dirty there would offer to save a
+        // change the operator never made.
+        function refreshLlmPromptStyleNotice() {
+            const inert = resolvedLlmPromptStyle() === 'translategemma';
+            document.getElementById('llm_prompt_inert_notice').style.display = inert ? '' : 'none';
+            document.getElementById('llm_system_prompt').style.opacity = inert ? '0.5' : '';
+        }
+
+        function onLlmPromptStyleChange() {
+            refreshLlmPromptStyleNotice();
+            markDirty();
+        }
+
         function collectLlmSettings() {
             return {
                 provider: document.getElementById('llm_provider').value,
+                prompt_style: document.getElementById('llm_prompt_style').value,
                 endpoint: document.getElementById('llm_endpoint').value.trim(),
                 model: document.getElementById('llm_model').value.trim(),
                 api_key: document.getElementById('llm_api_key').value,
@@ -1734,6 +1794,8 @@
         function applyLlmSettings(llm) {
             if (!llm) llm = {};
             document.getElementById('llm_provider').value = llm.provider === 'endpoint' ? 'endpoint' : 'local';
+            document.getElementById('llm_prompt_style').value =
+                ['chat', 'translategemma'].includes(llm.prompt_style) ? llm.prompt_style : 'auto';
             document.getElementById('llm_endpoint').value = llm.endpoint || '';
             document.getElementById('llm_model').value = llm.model || '';
             document.getElementById('llm_api_key').value = llm.api_key || '';

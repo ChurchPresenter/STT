@@ -921,6 +921,15 @@ from stt.llm_translate import (
     scan_gguf_models as _scan_gguf_models,
     extract_chat_text as _llm_extract_text,
     uses_local_llm as _uses_local_llm,
+    # Prompt styles: a chat model is instructed with a system prompt, a
+    # TranslateGemma with four fields and no instruction at all.
+    PROMPT_STYLE_TRANSLATEGEMMA as _LLM_STYLE_TRANSLATEGEMMA,
+    build_translategemma_messages as _llm_tg_messages,
+    build_translategemma_prompt as _llm_tg_prompt,
+    is_model_gguf as _is_model_gguf,
+    PROMPT_STYLES as _LLM_PROMPT_STYLES,
+    resolve_prompt_style as _llm_prompt_style,
+    uses_system_prompt as _llm_uses_system_prompt,
 )
 # Service-phase detection lives in stt/service_phase.py (importable, unit-tested);
 # the monolith supplies the connection and the live config and does nothing else.
@@ -7123,6 +7132,12 @@ def save_translation_settings():
                      "gguf_repo", "gguf_file", "gguf_path"):
             if _key in _sent:
                 _llm[_key] = str(_sent.get(_key) or "")
+        # Prompt style is a closed set, and an unknown value must not silently become
+        # one of the two: "auto" reads the model name, which is the answer that stays
+        # right when the model is changed and this field is not.
+        if "prompt_style" in _sent:
+            _style = str(_sent.get("prompt_style") or "auto").strip().lower()
+            _llm["prompt_style"] = _style if _style in _LLM_PROMPT_STYLES else "auto"
         # n_gpu_layers is "auto" or an int, so it is kept as a string-or-number
         # rather than coerced — resolve_gpu_layers() interprets it at load time.
         if "n_gpu_layers" in _sent:
@@ -7907,9 +7922,13 @@ def list_gguf_repo_files():
     try:
         from huggingface_hub import HfApi as _HfApi
         info = _HfApi().model_info(repo_id, files_metadata=True)
+        # Companion GGUFs are excluded: a multimodal release ships a vision
+        # projector, and Gemma 4 ships a multi-token-prediction head, both of which
+        # sit beside the quantisations at a fraction of their size. Left in the list
+        # they read as the cheap option and download as something that cannot answer.
         files = [{"name": s.rfilename, "size_bytes": s.size or 0}
                  for s in (info.siblings or [])
-                 if s.rfilename.lower().endswith(".gguf")]
+                 if _is_model_gguf(s.rfilename)]
     except Exception as e:
         return jsonify({"success": False, "error": f"{type(e).__name__}: {e}"}), 502
 
@@ -7956,10 +7975,21 @@ def get_llm_prompt():
     if custom is None:
         custom = llm_cfg.get("system_prompt") or ""
 
+    # The resolved style, so the page can say the prompt is not sent at all rather
+    # than letting an operator tune a field the configured model never reads.
+    _is_local = (llm_cfg.get("provider") or "endpoint").strip().lower() == "local"
+    style = _llm_prompt_style(
+        llm_cfg.get("prompt_style"),
+        llm_cfg.get("gguf_repo") if _is_local else llm_cfg.get("model"),
+        llm_cfg.get("gguf_file") if _is_local else None,
+        llm_cfg.get("gguf_path") if _is_local else None)
+
     return jsonify({
         "success": True,
         "default_template": _DEFAULT_LLM_SYSTEM_PROMPT,
         "is_custom": bool((custom or "").strip()),
+        "prompt_style": style,
+        "uses_system_prompt": _llm_uses_system_prompt(style),
         "target_language": target,
         "language_name": TRANSLATION_LANGUAGES.get(target, target),
         "effective": _llm_system_prompt(custom or _DEFAULT_LLM_SYSTEM_PROMPT,
@@ -16373,8 +16403,13 @@ def _llm_budget_for(llm_cfg, system_prompt, max_tokens):
     return _llm_input_budget(n_ctx, max_tokens, system_prompt, counter=counter), counter
 
 
-def _translate_via_local_llm(text, system_prompt, max_tokens, llm_cfg_override=None):
+def _translate_via_local_llm(text, system_prompt, max_tokens, llm_cfg_override=None,
+                             raw_prompt=None):
     """One caption through the in-process GGUF model. Returns raw text or None.
+
+    ``raw_prompt`` bypasses the chat template with a prompt rendered by the caller —
+    the TranslateGemma path, whose format the OpenAI-style message shape cannot
+    express and whose model turn is primed so the reply is the translation alone.
 
     Timed into the same EMA the NMT paths feed: this is inference on this box, so
     the number means what it means for MADLAD, and the health dashboard would
@@ -16387,11 +16422,22 @@ def _translate_via_local_llm(text, system_prompt, max_tokens, llm_cfg_override=N
         return None
     _t0 = time.perf_counter()
     try:
-        out = llm.create_chat_completion(
-            messages=_llm_chat_messages(text, system_prompt),
-            temperature=0.0,
-            max_tokens=max_tokens,
-        )
+        if raw_prompt is not None:
+            # Stopped on the turn marker as well as EOS: the primed model turn is an
+            # unfinished line, and a model that decides to open a second turn would
+            # otherwise put the marker itself into the caption.
+            out = llm.create_completion(
+                prompt=raw_prompt,
+                temperature=0.0,
+                max_tokens=max_tokens,
+                stop=["<end_of_turn>", "<eos>", "<start_of_turn>"],
+            )
+        else:
+            out = llm.create_chat_completion(
+                messages=_llm_chat_messages(text, system_prompt),
+                temperature=0.0,
+                max_tokens=max_tokens,
+            )
         try:
             _record_local_translate_ms((time.perf_counter() - _t0) * 1000.0)
         except Exception:
@@ -16481,18 +16527,50 @@ def _translate_via_llm(text, source_lang, target_lang, timeout_override=None,
     """
     llm_cfg = llm_cfg_override if llm_cfg_override is not None else (
         config.get("live_translation", {}).get("llm") or {})
+    is_local = (llm_cfg.get("provider") or "endpoint").strip().lower() == "local"
+    # Which shape of model this is. A TranslateGemma takes four fields and no
+    # instruction, so it has no system prompt, no terminology conventions and no
+    # corrective retry; a chat model has all three. Everything below branches on this
+    # one answer rather than re-deriving it, so the prompt, the token budget and the
+    # retry cannot disagree about which model is being talked to.
+    style = _llm_prompt_style(
+        llm_cfg.get("prompt_style"),
+        llm_cfg.get("gguf_repo") if is_local else llm_cfg.get("model"),
+        llm_cfg.get("gguf_file") if is_local else None,
+        llm_cfg.get("gguf_path") if is_local else None)
     # The configured target language must reach the prompt, not just the validator:
     # the wrong-script screen looks for Cyrillic, so an English answer to a Spanish
     # request passes it and the session captions the wrong language in silence.
     system_prompt = _llm_system_prompt(
         llm_cfg.get("system_prompt") or _DEFAULT_LLM_SYSTEM_PROMPT,
-        target_lang, TRANSLATION_LANGUAGES)
+        target_lang, TRANSLATION_LANGUAGES) if _llm_uses_system_prompt(style) else ""
     max_tokens = coerce_int(llm_cfg.get("max_tokens"), 160, lo=16, hi=1024)
+    # TranslateGemma names the source language explicitly, so "auto" — which every
+    # other engine here treats as "let the model work it out" — has to be resolved to
+    # a code first. Same resolution the live caption path already does, repeated here
+    # because /api/translate and the batch paths reach this function with "auto"
+    # still in hand.
+    if style == _LLM_STYLE_TRANSLATEGEMMA and (source_lang or "auto") == "auto":
+        source_lang = config.get("audio", {}).get("language", "en")
+        if source_lang == "auto":
+            source_lang = ""
+
+    def _retry_prompt_for(reason):
+        """The corrective retry prompt, or None when this style cannot be nudged.
+
+        A retry works by appending a note naming the broken rule to the system
+        prompt. TranslateGemma has no system prompt to append to and does not read
+        instructions, so a second identical call would spend a caption's latency to
+        get the same answer: it declines to the NMT model on the first rejection.
+        """
+        if not (_llm_uses_system_prompt(style) and _llm_retry_enabled(llm_cfg)):
+            return None
+        return _llm_retry_prompt(system_prompt, reason)
 
     # provider "local" runs the model in-process from a GGUF: no server, no extra
     # installer, no port — which is what makes this workable on a fresh install that
     # has no inference runtime of its own.
-    if (llm_cfg.get("provider") or "endpoint").strip().lower() == "local":
+    if is_local:
         # Too long for the context window is a decline, not an attempt. llama.cpp
         # raises once the prompt exceeds n_ctx, which reaches the caller as a generic
         # failure; measuring first turns that into the same orderly fallback every
@@ -16506,10 +16584,13 @@ def _translate_via_llm(text, source_lang, target_lang, timeout_override=None,
             print(f"[LLM-TRANSLATE] input exceeds the {_budget}-token context budget "
                   f"({len(text)} chars); using the NMT model")
             return (None, None, "input exceeds context budget") if return_raw else None
-        raw = _translate_via_local_llm(text, system_prompt, max_tokens, llm_cfg_override)
+        raw_prompt = (_llm_tg_prompt(text, source_lang, target_lang)
+                      if style == _LLM_STYLE_TRANSLATEGEMMA else None)
+        raw = _translate_via_local_llm(text, system_prompt, max_tokens, llm_cfg_override,
+                                       raw_prompt=raw_prompt)
         clean, reason = _llm_check(raw, text, target_lang)
         if clean is None:
-            retry_prompt = _llm_retry_prompt(system_prompt, reason) if _llm_retry_enabled(llm_cfg) else None
+            retry_prompt = _retry_prompt_for(reason)
             if retry_prompt is not None:
                 print(f"[LLM-TRANSLATE] retrying once ({reason})")
                 raw2 = _translate_via_local_llm(text, retry_prompt, max_tokens, llm_cfg_override)
@@ -16532,6 +16613,12 @@ def _translate_via_llm(text, source_lang, target_lang, timeout_override=None,
         # captions. Servers that don't know the field ignore it.
         keep_alive=llm_cfg.get("keep_alive", -1),
     )
+    if style == _LLM_STYLE_TRANSLATEGEMMA:
+        # One user turn carrying the four fields, and no system turn: the server
+        # applies the model's own chat template around it. Replacing the messages
+        # after the fact keeps every other field of the payload — keep_alive,
+        # temperature, the token cap — identical between the two styles.
+        payload["messages"] = _llm_tg_messages(text, source_lang, target_lang)
     headers = {"Content-Type": "application/json"}
     if (llm_cfg.get("api_key") or "").strip():
         headers["Authorization"] = f"Bearer {llm_cfg['api_key'].strip()}"
@@ -16560,7 +16647,7 @@ def _translate_via_llm(text, source_lang, target_lang, timeout_override=None,
         # second full-length attempt would make it later than it is worth showing.
         # Nothing here retries a timeout or a transport error — those return above.
         remaining = timeout - (time.time() - _started_at)
-        retry_prompt = _llm_retry_prompt(system_prompt, reason) if _llm_retry_enabled(llm_cfg) else None
+        retry_prompt = _retry_prompt_for(reason)
         if retry_prompt is not None and remaining >= _LLM_RETRY_MIN_SECONDS:
             print(f"[LLM-TRANSLATE] retrying once ({reason}, {remaining:.1f}s left)")
             payload["messages"] = _llm_chat_messages(text, retry_prompt)
@@ -16868,9 +16955,15 @@ def emit_translated_entries():
                 try:
                     _cw_llm_cfg = trans_config.get("llm") or {}
                     _cw_max_tokens = coerce_int(_cw_llm_cfg.get("max_tokens"), 160, lo=16, hi=1024)
+                    # A style with no system prompt reserves nothing for one; sizing
+                    # the prefix against a prompt that is never sent would shed
+                    # context the window actually had room for.
+                    _cw_style = _llm_prompt_style(
+                        _cw_llm_cfg.get("prompt_style"), _cw_llm_cfg.get("gguf_repo"),
+                        _cw_llm_cfg.get("gguf_file"), _cw_llm_cfg.get("gguf_path"))
                     _cw_prompt = _llm_system_prompt(
                         _cw_llm_cfg.get("system_prompt") or _DEFAULT_LLM_SYSTEM_PROMPT,
-                        target_lang, TRANSLATION_LANGUAGES)
+                        target_lang, TRANSLATION_LANGUAGES) if _llm_uses_system_prompt(_cw_style) else ""
                     _llm_ctx_budget, _llm_ctx_counter = _llm_budget_for(
                         _cw_llm_cfg, _cw_prompt, _cw_max_tokens)
                 except Exception:

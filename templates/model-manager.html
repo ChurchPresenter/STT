@@ -735,7 +735,16 @@
                                     <option value="bartowski/Ministral-8B-Instruct-2410-GGUF">Ministral 8B Instruct — ~4.6 GB</option>
                                     <option value="bartowski/aya-expanse-8b-GGUF">Aya Expanse 8B — ~4.7 GB, built for multilingual work</option>
                                     <option value="ggml-org/gemma-3-12b-it-GGUF">Gemma 3 12B Instruct — ~6.8 GB, needs ~11 GB free RAM</option>
+                                    <option value="unsloth/gemma-4-12B-it-GGUF">Gemma 4 12B Instruct — ~7.1 GB, the Gemma 3 12B successor</option>
                                     <option value="bartowski/Qwen2.5-14B-Instruct-GGUF">Qwen2.5 14B Instruct — ~8.4 GB, needs ~13 GB free RAM</option>
+                                    <!-- Translation-specialised, and a different kind of
+                                         model: TranslateGemma reads four fields and no
+                                         instructions, so selecting one turns the system
+                                         prompt off. Better raw translation, no terminology
+                                         tuning — the trade is stated on the Translation
+                                         page, where the style is chosen. -->
+                                    <option value="mradermacher/translategemma-4b-it-GGUF">TranslateGemma 4B — ~2.5 GB, translation-only: no system prompt</option>
+                                    <option value="mradermacher/translategemma-12b-it-GGUF">TranslateGemma 12B — ~7.3 GB, translation-only: no system prompt</option>
                                 </datalist>
                                 <button class="model-btn" onclick="loadGgufRepoFiles()" style="background: var(--accent); padding: 5px 10px; font-size: 0.8em;">Browse Quantisations</button>
                             </div>

@@ -180,6 +180,149 @@ def build_system_prompt(base_prompt: str, target_lang: Optional[str],
     return f"{text}\n\nTranslate into {name}. Output only {name}."
 
 
+# --- Prompt styles ---------------------------------------------------------------
+#
+# Two shapes of translation model, and they take instruction in incompatible ways.
+#
+# "chat" is a general instruction model (Gemma 3, Gemma 4, Qwen2.5, Aya): a system
+# prompt teaches it the service's terminology, which is the entire reason an LLM beats
+# an NMT model on this material and the reason the prompt is a config field.
+#
+# "translategemma" is Google's translation-specialised Gemma fine-tune. It scores
+# higher on translation — the 12B beats the Gemma 3 27B baseline on WMT24++ — but it
+# is not an instruction model at all: it reads four fields (type, source_lang_code,
+# target_lang_code, text) and Google states it "does not currently support separate
+# system prompts or instruction-style parameters". Anything put in ``text`` is
+# translated rather than obeyed, so the system prompt, the retry notes, and every
+# terminology convention an operator has written are simply not available in this
+# style. That is the trade, and it is why the style is explicit in config rather than
+# inferred silently: it changes what the tuning surface *is*.
+PROMPT_STYLE_CHAT = "chat"
+PROMPT_STYLE_TRANSLATEGEMMA = "translategemma"
+PROMPT_STYLE_AUTO = "auto"
+PROMPT_STYLES = (PROMPT_STYLE_AUTO, PROMPT_STYLE_CHAT, PROMPT_STYLE_TRANSLATEGEMMA)
+
+# Name fragments that mark a translation-fielded model. Matched on the repo, file or
+# endpoint model name because the alternative is discovering the mismatch during a
+# service: a TranslateGemma sent a chat prompt translates the system prompt itself and
+# puts an instruction sheet on the screen.
+_TRANSLATEGEMMA_NAME_MARKERS = ("translategemma", "translate-gemma", "translate_gemma")
+
+
+def resolve_prompt_style(configured: Optional[str], *names: Optional[str]) -> str:
+    """The prompt style to use: never "auto", always "chat" or "translategemma".
+
+    An explicit setting always wins — an operator running a fine-tune whose name says
+    nothing about its lineage has to be able to say so. "auto" (the default) reads the
+    model name, which is what a picker can offer before anything is downloaded.
+
+    Defaults to "chat" for an unrecognised name: a chat prompt sent to a translation
+    model still translates, where the field prompt sent to a chat model asks it to
+    translate a line of "type:text,source_lang_code:..." punctuation.
+    """
+    style = (configured or PROMPT_STYLE_AUTO).strip().lower()
+    if style in (PROMPT_STYLE_CHAT, PROMPT_STYLE_TRANSLATEGEMMA):
+        return style
+    for name in names:
+        normalised = re.sub(r"[\s_/.]+", "-", str(name or "").strip().lower())
+        if any(marker.replace("_", "-") in normalised
+               for marker in _TRANSLATEGEMMA_NAME_MARKERS):
+            return PROMPT_STYLE_TRANSLATEGEMMA
+    return PROMPT_STYLE_CHAT
+
+
+def uses_system_prompt(style: str) -> bool:
+    """Whether this style carries a system prompt at all.
+
+    Callers use it for three things that must agree: whether to send one, whether the
+    input budget has to reserve room for one, and whether a rejected caption can be
+    retried — :func:`retry_system_prompt` works by appending a note to the system
+    prompt, so a style without one has no retry.
+    """
+    return style != PROMPT_STYLE_TRANSLATEGEMMA
+
+
+def translategemma_lang_code(code: Optional[str]) -> str:
+    """A language code TranslateGemma accepts, or "" if we do not have one.
+
+    The model takes ISO 639-1 ("ru") or a regionalised variant ("en_US", "pt-BR"),
+    which is what this app's language codes already are. "auto" is not one of them:
+    the source language is resolved to a real code before it gets here, and if it
+    could not be, the field is dropped rather than sent as a word the model would
+    read as a language name.
+    """
+    text = (code or "").strip().replace("_", "-")
+    if not text or text.lower() in ("auto", "und", "unknown"):
+        return ""
+    parts = text.split("-", 1)
+    lang = parts[0].lower()
+    if not re.fullmatch(r"[a-z]{2,3}", lang):
+        return ""
+    if len(parts) == 2 and re.fullmatch(r"[A-Za-z]{2}", parts[1]):
+        return "%s_%s" % (lang, parts[1].upper())
+    return lang
+
+
+def build_translategemma_user(text: str, source_lang: Optional[str],
+                              target_lang: Optional[str]) -> str:
+    """The user turn TranslateGemma expects, as one line of fields.
+
+    The published format is ``type:text,source_lang_code:{SL},target_lang_code:{TL},
+    text:{TEXT}``. ``text`` is last so a caption containing a comma cannot be read as
+    another field, which is why the order here is fixed and not cosmetic.
+
+    An unknown source language drops the field rather than guessing one. Guessing is
+    the worse failure: naming the wrong source tells the model the caption is already
+    in the target language, and it hands the source straight back.
+    """
+    fields = ["type:text"]
+    source = translategemma_lang_code(source_lang)
+    if source:
+        fields.append("source_lang_code:%s" % source)
+    fields.append("target_lang_code:%s" % (translategemma_lang_code(target_lang) or "en"))
+    return ",".join(fields) + ",text:" + (text or "").strip()
+
+
+def build_translategemma_messages(text: str, source_lang: Optional[str],
+                                  target_lang: Optional[str]) -> List[Dict[str, str]]:
+    """The field prompt as chat messages, for an OpenAI-compatible server.
+
+    One user turn and no system turn — see :data:`PROMPT_STYLE_TRANSLATEGEMMA`. The
+    server applies the model's own chat template around it, which is why this path
+    hands over a plain string rather than the turn markers the local path renders.
+    """
+    return [{"role": "user", "content": build_translategemma_user(text, source_lang, target_lang)}]
+
+
+# Gemma's turn markers. The local path renders them itself instead of going through
+# create_chat_completion, for two reasons: the GGUF's own chat template builds this
+# line out of a structured content list that an OpenAI-style message cannot express,
+# and rendering it here lets the model turn be *primed* with the same field header, so
+# the model continues the line with the translation instead of re-emitting the header
+# and spending caption budget on it. Both are the format published with the model.
+_GEMMA_TURN = "<start_of_turn>%s\n%s<end_of_turn>\n"
+
+
+def build_translategemma_prompt(text: str, source_lang: Optional[str],
+                                target_lang: Optional[str]) -> str:
+    """The full rendered prompt for the in-process GGUF, with the model turn primed.
+
+    Returned without a leading BOS: llama.cpp adds one from the model's own metadata,
+    and a second one measurably degrades Gemma output.
+    """
+    user = build_translategemma_user(text, source_lang, target_lang)
+    header = user.split(",text:", 1)[0]
+    return (_GEMMA_TURN % ("user", user)) + "<start_of_turn>model\n" + header + ",text:"
+
+
+# The field header, echoed back by the model when the turn was not primed with it.
+# Tolerant of spacing and of a missing source field, since either shape has been
+# produced depending on how the caller rendered the turn.
+_TRANSLATEGEMMA_ECHO = re.compile(
+    r"^\s*type\s*:\s*(?:text|image)\s*(?:,\s*\w+_lang_code\s*:\s*[\w-]*\s*)*,\s*text\s*:\s*",
+    re.IGNORECASE)
+
+
 def build_chat_messages(text: str, system_prompt: str,
                         draft: Optional[str] = None,
                         source_name: str = "Source") -> List[Dict[str, str]]:
@@ -330,6 +473,21 @@ def local_model_path(models_dir: str, gguf_repo: str, gguf_file: str) -> str:
 # standalone GGUF release.
 _TRANSFORMERS_WEIGHTS = (".safetensors", ".bin", ".msgpack", ".h5")
 
+# GGUF files in a release that are not the model: a vision projector shipped for the
+# multimodal variants (TranslateGemma and Gemma 4 both publish one), and Gemma 4's
+# multi-token-prediction head. Both sit in the repo beside the real quantisations,
+# are a fraction of their size, and load as a model that cannot answer — so they are
+# kept out of the picker rather than left as a plausible-looking choice.
+_NON_MODEL_GGUF_MARKERS = ("mmproj", "mtp-", "-mtp", ".mtp")
+
+
+def is_model_gguf(name: str) -> bool:
+    """Whether a .gguf filename is the model itself rather than a companion file."""
+    low = (name or "").lower()
+    if not low.endswith(".gguf"):
+        return False
+    return not any(marker in low for marker in _NON_MODEL_GGUF_MARKERS)
+
 
 def scan_gguf_models(models_dir: str) -> List[Dict[str, Any]]:
     """Downloaded GGUF models as [{repo, files: [{name, size_bytes}]}], repo-sorted.
@@ -338,6 +496,9 @@ def scan_gguf_models(models_dir: str) -> List[Dict[str, Any]]:
     replaced by "--", holding one or more quantisations. Only directories that
     actually contain a .gguf are reported, so a half-deleted or unrelated model
     directory does not appear as an empty choice in the picker.
+
+    Companion GGUFs — a vision projector, a multi-token-prediction head — are left
+    out; see :func:`is_model_gguf`.
 
     A directory that also holds transformers weights is skipped even when it does
     contain .gguf files. google/madlad400-3b-mt is the case that forced this: the
@@ -368,7 +529,7 @@ def scan_gguf_models(models_dir: str) -> List[Dict[str, Any]]:
         if any(n.lower().endswith(_TRANSFORMERS_WEIGHTS) for n in names):
             continue
         for name in names:
-            if not name.lower().endswith(".gguf"):
+            if not is_model_gguf(name):
                 continue
             try:
                 size = os.path.getsize(os.path.join(path, name))
@@ -427,6 +588,17 @@ def extract_chat_text(response: Optional[Mapping[str, Any]]) -> Optional[str]:
 def _strip_wrappers(text: str) -> str:
     """Remove quote wrappers, labels, and an echoed prompt block."""
     out = text.strip()
+
+    # TranslateGemma answers in the same field format it was asked in. When the model
+    # turn was primed with the header the reply is bare, but an endpoint server applies
+    # its own template and the header comes back — as would a second copy if the model
+    # restated it. Stripped before anything else, because the header contains a colon
+    # and language codes that the label and script checks below would misread.
+    for _ in range(2):
+        stripped = _TRANSLATEGEMMA_ECHO.sub("", out, count=1).strip()
+        if stripped == out:
+            break
+        out = stripped
 
     # An echoed prompt: keep only what follows the last "Draft translation:" or the
     # trailing line, since the model repeated our own framing back at us.

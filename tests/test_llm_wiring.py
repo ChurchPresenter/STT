@@ -644,3 +644,112 @@ class TestPreloadWarmsTheRightEngine:
         body = ns["translate_preload"]()
         assert loaded == {"nmt": 0, "llm": 1}
         assert body["engine"] == "llm"
+
+
+class TestPromptStyleWiring:
+    """_translate_via_llm branches on the shape of the configured model.
+
+    A TranslateGemma is not an instruction model: it takes four fields and no
+    prompt. Sending it the chat prompt would put the terminology instructions
+    themselves on the screen, translated — and every rule that hangs off the system
+    prompt (the input budget's reservation, the corrective retry) has to agree with
+    that same decision or the caption is sized and retried against a prompt that was
+    never sent.
+    """
+
+    def ns(self, llm_cfg, audio_language="ru"):
+        from stt import llm_translate as L
+
+        calls = []
+
+        def _local(text, system_prompt, max_tokens, override=None, raw_prompt=None):
+            calls.append({"text": text, "system_prompt": system_prompt,
+                          "raw_prompt": raw_prompt})
+            return "Peace be with you."
+
+        ns = extract_definitions(
+            "speech_to_text.py", ["_translate_via_llm"],
+            {"config": {"live_translation": {"llm": llm_cfg},
+                        "audio": {"language": audio_language}},
+             "TRANSLATION_LANGUAGES": {"en": "English", "ru": "Russian"},
+             "coerce_int": lambda v, d, lo=None, hi=None: int(v) if v not in (None, "") else d,
+             "coerce_float": lambda v, d, lo=None, hi=None: float(v) if v not in (None, "") else d,
+             "_DEFAULT_LLM_SYSTEM_PROMPT": L.DEFAULT_SYSTEM_PROMPT_TEMPLATE,
+             "_LLM_STYLE_TRANSLATEGEMMA": L.PROMPT_STYLE_TRANSLATEGEMMA,
+             "_LLM_RETRY_MIN_SECONDS": 1.5,
+             "_llm_prompt_style": L.resolve_prompt_style,
+             "_llm_uses_system_prompt": L.uses_system_prompt,
+             "_llm_system_prompt": L.build_system_prompt,
+             "_llm_tg_prompt": L.build_translategemma_prompt,
+             "_llm_tg_messages": L.build_translategemma_messages,
+             "_llm_check": L.check_translation,
+             "_llm_retry_prompt": L.retry_system_prompt,
+             "_llm_retry_enabled": lambda cfg: True,
+             "_llm_budget_for": lambda cfg, prompt, mt: (4096, None),
+             "_llm_input_fits": lambda text, budget, counter=None: True,
+             "_translate_via_local_llm": _local,
+             "_calls": calls})
+        return ns, calls
+
+    LOCAL_TG = {"provider": "local", "gguf_repo": "mradermacher/translategemma-12b-it-GGUF",
+                "gguf_file": "translategemma-12b-it.Q4_K_M.gguf"}
+    LOCAL_CHAT = {"provider": "local", "gguf_repo": "unsloth/gemma-4-12B-it-GGUF",
+                  "gguf_file": "gemma-4-12b-it-Q4_K_M.gguf"}
+
+    def test_a_chat_model_gets_the_system_prompt_and_no_raw_prompt(self):
+        ns, calls = self.ns(dict(self.LOCAL_CHAT))
+        assert ns["_translate_via_llm"]("Мир вам.", "ru", "en") == "Peace be with you."
+        assert calls[0]["raw_prompt"] is None
+        assert "church service" in calls[0]["system_prompt"]
+
+    def test_a_translategemma_gets_the_field_prompt_and_no_system_prompt(self):
+        ns, calls = self.ns(dict(self.LOCAL_TG))
+        assert ns["_translate_via_llm"]("Мир вам.", "ru", "en") == "Peace be with you."
+        assert calls[0]["system_prompt"] == ""
+        assert calls[0]["raw_prompt"].endswith(
+            "type:text,source_lang_code:ru,target_lang_code:en,text:")
+
+    def test_an_explicit_style_overrides_the_model_name(self):
+        cfg = dict(self.LOCAL_CHAT)
+        cfg["prompt_style"] = "translategemma"
+        ns, calls = self.ns(cfg)
+        ns["_translate_via_llm"]("Мир вам.", "ru", "en")
+        assert calls[0]["raw_prompt"] is not None
+
+    def test_auto_source_language_is_resolved_before_the_fields_are_built(self):
+        # Every other engine reads "auto" as "work it out"; TranslateGemma names the
+        # source explicitly, and /api/translate reaches here with "auto" in hand.
+        ns, calls = self.ns(dict(self.LOCAL_TG), audio_language="ru")
+        ns["_translate_via_llm"]("Мир вам.", "auto", "en")
+        assert "source_lang_code:ru" in calls[0]["raw_prompt"]
+
+    def test_an_unresolvable_source_omits_the_field_rather_than_guessing(self):
+        ns, calls = self.ns(dict(self.LOCAL_TG), audio_language="auto")
+        ns["_translate_via_llm"]("Мир вам.", "auto", "en")
+        assert "source_lang_code" not in calls[0]["raw_prompt"]
+
+    def test_a_rejected_caption_is_retried_on_a_chat_model(self):
+        ns, calls = self.ns(dict(self.LOCAL_CHAT))
+        ns["_translate_via_local_llm"] = lambda *a, **k: None
+        # A rejection the retry table has a note for: numbers lost from a reference.
+        ns["_translate_via_local_llm"] = self._rejecting(calls)
+        ns["_translate_via_llm"]("1 Фессалоникийцам 5 глава.", "ru", "en")
+        assert len(calls) == 2, "the chat style names the broken rule and asks again"
+        assert "previous answer" in calls[1]["system_prompt"]
+
+    def test_a_rejected_caption_is_not_retried_on_a_translategemma(self):
+        # There is no system prompt to name the broken rule in, so a second call
+        # would spend a caption's latency to get the same answer back.
+        ns, calls = self.ns(dict(self.LOCAL_TG))
+        ns["_translate_via_local_llm"] = self._rejecting(calls)
+        assert ns["_translate_via_llm"]("1 Фессалоникийцам 5 глава.", "ru", "en") is None
+        assert len(calls) == 1
+
+    @staticmethod
+    def _rejecting(calls):
+        def _local(text, system_prompt, max_tokens, override=None, raw_prompt=None):
+            calls.append({"text": text, "system_prompt": system_prompt,
+                          "raw_prompt": raw_prompt})
+            # The measured failure: a reference answered with a different passage.
+            return "1 Corinthians 11:1-24 — and the recited text of the passage."
+        return _local
