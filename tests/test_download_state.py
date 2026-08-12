@@ -186,3 +186,89 @@ def test_path_size_file_and_directory(tmp_path):
     (tmp_path / "sub").mkdir()
     (tmp_path / "sub" / "b.bin").write_bytes(b"y" * 5)
     assert downloads._path_size(str(tmp_path)) == 15
+
+
+class TestSelectRepoFiles:
+    FILES = [
+        "gemma-4-12b-it-Q4_K_M.gguf",
+        "gemma-4-12b-it-Q4_0.gguf",
+        "mmproj-gemma-4-12B-it-Q8_0.gguf",
+        "README.md",
+    ]
+
+    def test_no_filter_selects_everything(self):
+        assert downloads.select_repo_files(self.FILES) == self.FILES
+
+    def test_an_exact_name_selects_one_quantisation(self):
+        # The whole point of the filter: a GGUF repo publishes a dozen variants and
+        # fetching them all pulls 40+ GB to obtain the one that was picked.
+        assert downloads.select_repo_files(
+            self.FILES, "gemma-4-12b-it-Q4_K_M.gguf") == ["gemma-4-12b-it-Q4_K_M.gguf"]
+
+    def test_a_list_and_a_pattern_both_work(self):
+        assert downloads.select_repo_files(self.FILES, ["README.md"]) == ["README.md"]
+        assert downloads.select_repo_files(self.FILES, "*Q4_0.gguf") == ["gemma-4-12b-it-Q4_0.gguf"]
+
+    def test_repo_order_is_preserved(self):
+        got = downloads.select_repo_files(self.FILES, ["README.md", "*Q4_0.gguf"])
+        assert got == ["gemma-4-12b-it-Q4_0.gguf", "README.md"]
+
+    def test_no_match_is_empty_not_everything(self):
+        # The caller raises on this; selecting everything instead would silently
+        # download the whole repo.
+        assert downloads.select_repo_files(self.FILES, "nope.gguf") == []
+
+
+class TestSetDownloadTotal:
+    """A single-file download reported nothing until it finished.
+
+    The route registers before it knows the repo's sizes, so the entry starts with no
+    total; the file-count progress inside the downloader writes one update, before the
+    first file, at 0%. A 7 GB GGUF therefore sat at "starting download" for ten
+    minutes with the bytes arriving the whole time — indistinguishable from a hang.
+    """
+
+    def test_the_total_arrives_after_registration(self):
+        downloads.try_register_download("repo")
+        assert downloads.active_downloads["repo"]["total"] is None
+        downloads.set_download_total("repo", 7_120_000_000)
+        assert downloads.active_downloads["repo"]["total"] == 7_120_000_000
+
+    def test_a_percentage_becomes_possible(self):
+        downloads.try_register_download("repo")
+        assert downloads.active_downloads["repo"]["percentage"] is None
+        downloads.set_download_total("repo", 1000)
+        assert downloads.active_downloads["repo"]["percentage"] == 0
+        with downloads.active_downloads_lock:
+            downloads.active_downloads["repo"]["downloaded"] = 500
+        downloads.set_download_total("repo", 1000)
+        assert downloads.active_downloads["repo"]["percentage"] == 50
+
+    def test_it_never_reports_complete(self):
+        # 100 belongs to finish_download; a full-looking bar while the file is still
+        # being written is the same lie in the other direction.
+        downloads.try_register_download("repo")
+        with downloads.active_downloads_lock:
+            downloads.active_downloads["repo"]["downloaded"] = 1000
+        downloads.set_download_total("repo", 1000)
+        assert downloads.active_downloads["repo"]["percentage"] == 99
+
+    @pytest.mark.parametrize("total", [None, 0, -1])
+    def test_an_unknown_size_leaves_the_entry_alone(self, total):
+        # A gated or unreachable repo must still download; it just reports bytes
+        # without a percentage.
+        downloads.try_register_download("repo")
+        downloads.set_download_total("repo", total)
+        assert downloads.active_downloads["repo"]["total"] is None
+        assert downloads.active_downloads["repo"]["percentage"] is None
+
+    def test_a_finished_download_is_not_reopened(self):
+        downloads.try_register_download("repo")
+        downloads.finish_download("repo")
+        downloads.set_download_total("repo", 1000)
+        assert downloads.active_downloads["repo"]["percentage"] == 100
+        assert downloads.active_downloads["repo"]["status"] == "completed"
+
+    def test_an_unknown_key_is_ignored(self):
+        downloads.set_download_total("never-registered", 1000)
+        assert "never-registered" not in downloads.active_downloads

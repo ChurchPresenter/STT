@@ -12716,6 +12716,8 @@ from stt.downloads import (  # noqa: F401
     load_download_progress,
     monitor_download_progress,
     save_download_progress,
+    select_repo_files,
+    set_download_total,
     start_download_monitor,
     try_register_download,
 )
@@ -12784,20 +12786,16 @@ def download_hf_repo_files(repo_id, local_dir, download_key, log=print, include=
     file the user picked.
 
     Returns "ok" or "cancelled"; raises on failure after retries."""
-    import fnmatch
-
     from huggingface_hub import list_repo_files, hf_hub_url
 
     os.makedirs(local_dir, exist_ok=True)
     local_root = os.path.abspath(local_dir)
     files = list_repo_files(repo_id=repo_id)
     if include:
-        patterns = [include] if isinstance(include, str) else list(include)
-        selected = [f for f in files
-                    if any(f == p or fnmatch.fnmatch(f, p) for p in patterns)]
+        selected = select_repo_files(files, include)
         if not selected:
-            raise ValueError(f"No file in {repo_id} matches {patterns}")
-        log(f"[DOWNLOAD] {len(selected)} of {len(files)} files match {patterns}")
+            raise ValueError(f"No file in {repo_id} matches {include}")
+        log(f"[DOWNLOAD] {len(selected)} of {len(files)} files match {include}")
         files = selected
     log(f"[DOWNLOAD] Found {len(files)} files to download for {repo_id}")
 
@@ -13041,6 +13039,34 @@ def download_model():
             _include = data.get("include") or data.get("gguf_file") or None
             if isinstance(_include, str):
                 _include = [_include]
+
+            # Byte progress needs a denominator and something to measure. Without
+            # both, a single-file download reports nothing at all until it finishes:
+            # the file-count progress inside download_hf_repo_files is written before
+            # each file starts, so one file means one update, at 0%. A 7 GB GGUF then
+            # sat at "starting download" for its whole ten minutes, which reads as a
+            # hang — the file was arriving the entire time.
+            #
+            # The file itself is measured when exactly one was asked for, rather than
+            # the directory: a repo folder that already holds another quantisation
+            # would otherwise start the new download somewhere past 50%.
+            _dl_total = None
+            _dl_watch = local_dir
+            try:
+                from huggingface_hub import HfApi as _HfApi
+                _sizes = {s.rfilename: (s.size or 0)
+                          for s in (_HfApi().model_info(model_id, files_metadata=True).siblings or [])}
+                _wanted = select_repo_files(list(_sizes), _include)
+                _dl_total = sum(_sizes.get(f, 0) for f in _wanted) or None
+                if len(_wanted) == 1:
+                    _dl_watch = os.path.join(local_dir, _wanted[0])
+            except Exception as _e:
+                # Sizing is progress reporting, not the download. A gated repo or an
+                # offline metadata call must not stop the bytes from being fetched.
+                print(f"[DOWNLOAD] could not size {model_id} ({type(_e).__name__}: {_e}); "
+                      f"progress will report bytes without a percentage")
+            set_download_total(model_id, _dl_total)
+            start_download_monitor(model_id, _dl_watch, total=_dl_total)
 
             try:
                 # Per-file download with resume + cancellation

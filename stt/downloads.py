@@ -9,12 +9,13 @@ progress-file path before persistence matters, then load_state() to restore
 the previous run's entries in place.
 """
 
+import fnmatch
 import json
 import os
 import shutil
 import threading
 import time
-from typing import Any, Callable, Dict, Optional, Set
+from typing import Any, Callable, Dict, List, Optional, Sequence, Set
 
 # Path of the JSON progress file; set via configure(). While None, persistence
 # is skipped (state-machine behavior is unaffected).
@@ -134,6 +135,44 @@ def try_register_download(key: str, total: Optional[int] = None) -> bool:
         }
     save_download_progress()
     return True
+
+
+def set_download_total(key: str, total: Optional[int]) -> None:
+    """Fill in a download's byte total once it is known.
+
+    Registration happens before the repo is queried — the key is what makes a second
+    request a 409 rather than a second download — so the total arrives a moment later.
+    Without it a download has no denominator: percentage stays None and the UI can
+    only say "starting", which is indistinguishable from a stall for as long as the
+    file takes.
+    """
+    if not total or total <= 0:
+        return
+    with active_downloads_lock:
+        entry = active_downloads.get(key)
+        if entry is None or entry.get("status") != "downloading":
+            return
+        entry["total"] = int(total)
+        downloaded = entry.get("downloaded") or 0
+        entry["percentage"] = min(int((downloaded / total) * 100), 99)
+        entry["last_update"] = time.time()
+    save_download_progress()
+
+
+def select_repo_files(files: Sequence[str], include: Optional[Any] = None) -> List[str]:
+    """The repo files an ``include`` filter selects, in repo order.
+
+    ``include`` is a filename or a list of them, matched exactly or as an fnmatch
+    pattern; None selects everything. Shared by the downloader and by the size lookup
+    that gives it a denominator — computing the total over a different set than the
+    one being fetched is how a progress bar ends at 40% or at 300%.
+    """
+    names = list(files)
+    if not include:
+        return names
+    patterns = [include] if isinstance(include, str) else list(include)
+    return [f for f in names
+            if any(f == p or fnmatch.fnmatch(f, p) for p in patterns)]
 
 
 def finish_download(key: str, error: Optional[Any] = None, cancelled: bool = False) -> None:
