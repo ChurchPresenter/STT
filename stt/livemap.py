@@ -122,32 +122,75 @@ def transcription_model_label(config: Mapping[str, Any]) -> str:
     return _clean((model.get("whisper") or {}).get("model"), _MODEL_LABEL_MAX)
 
 
+def _model_basename(value: Any) -> str:
+    """A model name, reduced to its filename when it is a filesystem path.
+
+    A GGUF is configured by path on some installs, and that path is on the operator's
+    disk — routinely under their own name. The filename identifies the model;
+    everything to the left of it identifies the person.
+
+    Only paths are cut. A Hugging Face id ("facebook/nllb-200-distilled-600M") also
+    contains a slash, but the org half is part of the model's identity and nothing to
+    do with the machine it runs on, so it survives intact.
+
+    The directory is dropped before the length cap, never after: truncating a long path
+    first would leave a prefix whose last segment is a directory — which is the very
+    part that names the operator.
+    """
+    text = " ".join(str(value or "").split())
+    looks_like_a_path = ("\\" in text or text.startswith(("/", "~", "."))
+                         or (len(text) > 1 and text[1] == ":"))
+    if looks_like_a_path:
+        text = text.replace("\\", "/").rsplit("/", 1)[-1]
+    return _clean(text, _MODEL_LABEL_MAX)
+
+
+def _engine_label(method: str, model: Any) -> str:
+    """``"<engine>:<model>"``, or the engine alone when the model is unknown.
+
+    Prefixed by engine because they are not comparable: an NLLB checkpoint, a MADLAD one
+    and a GGUF chat model produce different translations at different speeds, and the
+    map would otherwise show three unrelated things in one column. An unrecognised
+    engine still reports itself rather than nothing.
+    """
+    engine = _clean(method, _MODEL_LABEL_MAX).lower()
+    name = _model_basename(model)
+    if not engine:
+        return name
+    return (engine + ":" + name) if name else engine
+
+
 def translation_model_label(config: Mapping[str, Any]) -> str:
     """Which translator this install is configured to run, "" when translation is off.
 
-    Prefixed by method because the engines are not comparable: an NLLB checkpoint, a
-    MADLAD one and a GGUF chat model produce different translations at different
-    speeds, and the map would otherwise show three unrelated things in one column. The
-    NMT methods name their checkpoint in ``translation_model``; only "llm" reads the
-    llm section, and an unknown method still reports itself rather than nothing.
+    The NMT engines name their checkpoint in ``translation_model``; only "llm" reads the
+    llm section, where a locally-run GGUF has no model name at all, only a file.
 
-    A GGUF reports its filename only, and the endpoint and API key are never reported
-    at all — an endpoint URL identifies the operator's own infrastructure.
+    The endpoint and API key are never reported — an endpoint URL identifies the
+    operator's own infrastructure.
     """
     translation = config.get("live_translation") or {}
     if not translation.get("enabled"):
         return ""
     method = str(translation.get("translation_method") or "nllb").strip().lower() or "nllb"
     if method != "llm":
-        model = _clean(translation.get("translation_model"), _MODEL_LABEL_MAX)
-        return (method + ":" + model) if model else method
+        return _engine_label(method, translation.get("translation_model"))
     llm = translation.get("llm") or {}
-    name = _clean(llm.get("model"), _MODEL_LABEL_MAX)
-    if not name:
-        # A locally-run GGUF has no model name, only a file. Basename, never the path.
-        name = _clean(str(llm.get("gguf_file") or "").replace("\\", "/").rsplit("/", 1)[-1],
-                      _MODEL_LABEL_MAX)
-    return ("llm:" + name) if name else "llm"
+    return _engine_label("llm", llm.get("model") or llm.get("gguf_file"))
+
+
+def remote_model_label(model: str = "", method: str = "") -> str:
+    """What a paired machine translates with, marked as being that machine's.
+
+    On an offloaded install the local translation config is a standby that never
+    translates a caption, so reporting it would name the wrong model — and reporting it
+    unmarked would hide that the work happens on another box entirely.
+
+    Bare "remote" is a real answer, not a failure: it says this install offloads and the
+    peer did not say what it runs, which is itself worth seeing.
+    """
+    engine = _engine_label(method, model)
+    return ("remote:" + engine) if engine else "remote"
 
 
 def numeric_version(display_version: Optional[str],
@@ -232,17 +275,30 @@ def ping_fields_from_config(config: Mapping[str, Any]) -> Dict[str, Any]:
     }
 
 
-def install_fields_from_config(config: Mapping[str, Any]) -> Dict[str, str]:
+def install_fields_from_config(config: Mapping[str, Any], *, remote_model: str = "",
+                               remote_method: str = "") -> Dict[str, str]:
     """The configured-model fields, which both events carry.
 
     Unlike ``ping_fields_from_config`` these describe how the install is set up rather
     than what a session is doing, and they are equally true at boot — so app_start
     reports them too. That is the point: a machine left running all week with no model
     configured is a support case, and it never reaches a transcription start to say so.
+
+    ``mt_model`` names whatever actually translates. On an offloading box that is the
+    paired machine's model, reported through ``remote_model_label``: the local setting
+    there is a standby that never runs. This is also the only way app_start can say the
+    install offloads at all — ``offloaded=1`` rides on the session fields and so appears
+    on the transcription event only.
     """
+    translation = config.get("live_translation") or {}
+    remote = translation.get("remote") or {}
+    offloading = bool(remote.get("enabled") and remote.get("endpoint"))
+    mt_model = translation_model_label(config)
+    if offloading and mt_model:
+        mt_model = remote_model_label(remote_model, remote_method)
     return {
         "stt_model": transcription_model_label(config),
-        "mt_model": translation_model_label(config),
+        "mt_model": mt_model,
     }
 
 

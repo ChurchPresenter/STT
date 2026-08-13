@@ -4576,6 +4576,29 @@ except Exception:
     SERVER_ARCH = ""
 
 
+def _remote_ping_provenance():
+    """``(model, method)`` of the paired machine, or ("", "") when not offloading.
+
+    Only those two of the provenance keys: the same probe returns the remote's LLM
+    endpoint and system prompt, which are the operator's own infrastructure and must
+    never leave the building.
+
+    The cache is preferred and a probe is the fallback, because it is empty until
+    something has asked — which on a boot-time app_start ping is always. Affording the
+    probe is what makes an idle offloading box report its peer at all; it costs a
+    5-second timeout on a thread whose whole job is fire-and-forget.
+    """
+    try:
+        remote = (config.get("live_translation") or {}).get("remote") or {}
+        if not (remote.get("enabled") and remote.get("endpoint")):
+            return "", ""
+        provenance = _remote_effective or _fetch_remote_provenance()
+        return (provenance.get("mt.remote.effective.model", ""),
+                provenance.get("mt.remote.effective.method", ""))
+    except Exception:
+        return "", ""  # an unreachable peer still leaves an install worth counting
+
+
 def _send_livemap_ping(event, **fields):
     """Send one anonymous live-map ping. Returns whether the collector was reached.
 
@@ -4589,8 +4612,13 @@ def _send_livemap_ping(event, **fields):
     id, the hardware probe, and the request itself.
     """
     try:
+        endpoint = (config.get("analytics", {}) or {}).get("endpoint")
+        # No collector, no probe: an opted-out install does no analytics work at all,
+        # not even the LAN round trip to its own peer.
+        _remote_model, _remote_method = (_remote_ping_provenance()
+                                         if str(endpoint or "").strip() else ("", ""))
         url = _livemap.build_ping_url(
-            (config.get("analytics", {}) or {}).get("endpoint"),
+            endpoint,
             event=event,
             os_name=_livemap.os_name_for_platform(sys.platform),
             version=_livemap.numeric_version(SERVER_DISPLAY_VERSION, SERVER_VERSION),
@@ -4600,7 +4628,8 @@ def _send_livemap_ping(event, **fields):
             # Cached after the first probe; on a CPU-only box this is blank, which is
             # itself the answer to half the "why is it slow" questions.
             gpu=_livemap.gpu_label(_probe_hardware().get("gpu_name") or ""),
-            **_livemap.install_fields_from_config(config),
+            **_livemap.install_fields_from_config(config, remote_model=_remote_model,
+                                                  remote_method=_remote_method),
             **fields)
         if url is None:
             return False  # blank endpoint: the operator has opted out

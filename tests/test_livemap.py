@@ -19,6 +19,7 @@ from stt.livemap import (
     os_name_for_platform,
     os_version_label,
     ping_fields_from_config,
+    remote_model_label,
     transcription_model_label,
     translation_model_label,
 )
@@ -240,9 +241,18 @@ class TestTranslationModelLabel:
             {"live_translation": {"enabled": True, "translation_method": "llm",
                                   "llm": {"model": "gemma-3-12b-it"}}}) == "llm:gemma-3-12b-it"
 
+    def test_a_hugging_face_id_keeps_its_org(self):
+        # It contains a slash but is not a path: the org half identifies the model, not
+        # the machine, and cutting it would report a different model's name.
+        assert translation_model_label(
+            {"live_translation": {"enabled": True, "translation_method": "llm",
+                                  "llm": {"model": "unsloth/gemma-3-12b-it-GGUF"}}}
+        ) == "llm:unsloth/gemma-3-12b-it-GGUF"
+
     def test_a_local_gguf_reports_its_filename_not_its_path(self):
         for path in ("/home/pastor-smith/models/gemma-3-12b-it-Q4_K_M.gguf",
-                     r"C:\Users\pastor-smith\models\gemma-3-12b-it-Q4_K_M.gguf"):
+                     r"C:\Users\pastor-smith\models\gemma-3-12b-it-Q4_K_M.gguf",
+                     "~/models/gemma-3-12b-it-Q4_K_M.gguf"):
             assert translation_model_label(
                 {"live_translation": {"enabled": True, "translation_method": "llm",
                                       "llm": {"model": "", "gguf_file": path}}}
@@ -257,6 +267,66 @@ class TestTranslationModelLabel:
         assert translation_model_label({}) == ""
 
 
+class TestRemoteModelLabel:
+    def test_the_peers_engine_and_model_are_marked_as_the_peers(self):
+        assert remote_model_label("facebook/nllb-200-distilled-600M",
+                                  "nllb") == "remote:nllb:facebook/nllb-200-distilled-600M"
+
+    def test_a_peer_gguf_reports_its_filename_not_its_path(self):
+        assert remote_model_label("/srv/models/gemma-4-12b-it-Q4_K_M.gguf",
+                                  "llm") == "remote:llm:gemma-4-12b-it-Q4_K_M.gguf"
+
+    def test_a_deeply_nested_path_still_reduces_to_the_filename(self):
+        # The directory has to go before the length cap: truncating first would leave a
+        # prefix whose last segment is a directory — the part that names the operator.
+        deep = "/home/pastor-smith/" + "nested/" * 20 + "gemma.gguf"
+        assert remote_model_label(deep, "llm") == "remote:llm:gemma.gguf"
+
+    def test_a_peer_that_named_only_its_engine(self):
+        assert remote_model_label("", "llm") == "remote:llm"
+
+    def test_an_unreachable_peer_still_says_this_install_offloads(self):
+        # "remote" alone is a real answer: the work happens elsewhere and the peer did
+        # not say what it runs. Reporting nothing would read as "no translation".
+        assert remote_model_label() == "remote"
+        assert remote_model_label("  ", "  ") == "remote"
+
+
+class TestInstallFieldsWhenOffloading:
+    OFFLOADED = {
+        "live_translation": {
+            "enabled": True, "translation_method": "nllb",
+            "translation_model": "facebook/nllb-200-distilled-600M",
+            "remote": {"enabled": True, "endpoint": "http://192.168.2.52:8080"},
+        },
+    }
+
+    def test_the_peers_model_replaces_the_local_one(self):
+        # The case this exists for: the local NLLB is a standby that never translates a
+        # caption, and reporting it named the wrong model on every offloaded install.
+        fields = install_fields_from_config(self.OFFLOADED, remote_model="gemma-4-12b.gguf",
+                                            remote_method="llm")
+        assert fields["mt_model"] == "remote:llm:gemma-4-12b.gguf"
+
+    def test_an_unreachable_peer_still_reports_that_it_offloads(self):
+        # This is also the only way app_start can say so — offloaded=1 rides on the
+        # session fields and appears on the transcription event only.
+        assert install_fields_from_config(self.OFFLOADED)["mt_model"] == "remote"
+
+    def test_an_endpointless_remote_is_not_offloading(self):
+        # Same rule as the existing offloaded flag: the switch alone does nothing.
+        config = {"live_translation": {"enabled": True, "translation_method": "nllb",
+                                       "translation_model": "facebook/nllb-200",
+                                       "remote": {"enabled": True, "endpoint": ""}}}
+        assert install_fields_from_config(config, remote_model="x", remote_method="llm")[
+            "mt_model"] == "nllb:facebook/nllb-200"
+
+    def test_translation_off_reports_nothing_even_when_offloading(self):
+        config = {"live_translation": dict(self.OFFLOADED["live_translation"], enabled=False)}
+        assert install_fields_from_config(config, remote_model="gemma.gguf",
+                                          remote_method="llm")["mt_model"] == ""
+
+
 class TestInstallFieldsNeverLeakSecrets:
     def test_no_endpoint_key_or_path_reaches_the_url(self):
         # The load-bearing case: an endpoint URL identifies the operator's own
@@ -267,7 +337,6 @@ class TestInstallFieldsNeverLeakSecrets:
                                  "model_path": "/home/pastor-smith/models/mine"}},
             "live_translation": {
                 "enabled": True, "translation_method": "llm",
-                "remote": {"enabled": True, "endpoint": "http://192.168.2.52:8080"},
                 "llm": {"model": "", "endpoint": "http://192.168.2.52:11434",
                         "api_key": "sk-secret-token",
                         "gguf_file": "gemma.gguf",
@@ -280,6 +349,23 @@ class TestInstallFieldsNeverLeakSecrets:
             assert secret not in url
         assert "stt_model=custom%3Awhisper" in url
         assert "mt_model=llm%3Agemma.gguf" in url
+
+    def test_the_peers_path_does_not_reach_the_url_either(self):
+        # The provenance probe returns the peer's LLM endpoint and system prompt
+        # alongside its model; only the model and engine may be reported.
+        config = {"live_translation": {
+            "enabled": True, "translation_method": "nllb",
+            "remote": {"enabled": True, "endpoint": "http://192.168.2.52:8080",
+                       "token": "pair-secret"}}}
+        url = build_ping_url(ENDPOINT, event=EVENT_APP_START, os_name="linux",
+                             version="26.1.22",
+                             **install_fields_from_config(
+                                 config,
+                                 remote_model="/home/pastor-smith/models/gemma.gguf",
+                                 remote_method="llm"))
+        for secret in ("pastor-smith", "pair-secret", "192.168.2.52", "/home/"):
+            assert secret not in url
+        assert "mt_model=remote%3Allm%3Agemma.gguf" in url
 
     def test_both_events_can_carry_them(self):
         # They describe the install, not a session, so app_start reports them too.

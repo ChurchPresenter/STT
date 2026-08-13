@@ -31,14 +31,22 @@ class _Recorder:
         return object()
 
 
-def _ns(config, requests_stub, *, saves=None, ids=("generated-id",), gpu="Test GPU"):
+def _ns(config, requests_stub, *, saves=None, ids=("generated-id",), gpu="Test GPU",
+        remote=None, probes=None):
     """_send_livemap_ping and _get_install_id over a controlled config.
 
     The machine description (OS release, arch, GPU) is stubbed rather than probed: the
     real values come from platform and nvidia-smi, and a test that asserted on them
-    would assert on whichever machine happened to run it.
+    would assert on whichever machine happened to run it. ``remote`` stands in for the
+    paired machine's provenance, and ``probes`` (a list) records each time the peer
+    would have been asked.
     """
     remaining = list(ids)
+
+    def _fetch_remote_provenance():
+        if probes is not None:
+            probes.append(True)
+        return dict(remote or {})
 
     def _save_config(cfg):
         if saves is not None:
@@ -46,7 +54,8 @@ def _ns(config, requests_stub, *, saves=None, ids=("generated-id",), gpu="Test G
         return True
 
     ns = extract_definitions(
-        "speech_to_text.py", ["_send_livemap_ping", "_get_install_id"],
+        "speech_to_text.py",
+        ["_send_livemap_ping", "_get_install_id", "_remote_ping_provenance"],
         {"config": config,
          "_livemap": _livemap,
          "_install_id_lock": threading.Lock(),
@@ -58,7 +67,9 @@ def _ns(config, requests_stub, *, saves=None, ids=("generated-id",), gpu="Test G
          "SERVER_COMMIT": "c588d29",
          "SERVER_OS_VERSION": "15.5",
          "SERVER_ARCH": "arm64",
-         "_probe_hardware": lambda: {"gpu_name": gpu}})
+         "_probe_hardware": lambda: {"gpu_name": gpu},
+         "_remote_effective": {},
+         "_fetch_remote_provenance": _fetch_remote_provenance})
     # The function imports requests lazily inside its body, so the stub is installed
     # under the name the import binds.
     import sys as _real_sys
@@ -137,6 +148,54 @@ class TestPingSent:
             assert "gpu=NVIDIA%20GeForce%20RTX%204060" in url
             assert "stt_model=large-v3" in url
             assert "mt_model=nllb%3Afacebook%2Fnllb-200" in url
+
+    def test_an_offloading_box_reports_its_peers_model_on_both_events(self):
+        # The local translation config on such a box is a standby that never runs.
+        req = _Recorder()
+        config = {"analytics": {"endpoint": "https://c/api/ping", "install_id": "abc"},
+                  "live_translation": {
+                      "enabled": True, "translation_method": "nllb",
+                      "translation_model": "facebook/nllb-200",
+                      "remote": {"enabled": True, "endpoint": "http://192.168.2.52:8080"}}}
+        ns = _ns(config, req,
+                 remote={"mt.remote.effective.model": "gemma-4-12b-it-Q4_K_M.gguf",
+                         "mt.remote.effective.method": "llm",
+                         "mt.remote.effective.llm_endpoint": "http://192.168.2.52:11434"})
+        ns["_send_livemap_ping"](_livemap.EVENT_APP_START)
+        ns["_send_livemap_ping"](_livemap.EVENT_TRANSCRIPTION_START)
+        for call in req.calls:
+            assert "mt_model=remote%3Allm%3Agemma-4-12b-it-Q4_K_M.gguf" in call["url"]
+            assert "192.168.2.52" not in call["url"], "the peer's endpoint is not ours to report"
+            assert "11434" not in call["url"]
+
+    def test_an_unreachable_peer_still_pings_as_offloaded(self):
+        req = _Recorder()
+        config = {"analytics": {"endpoint": "https://c/api/ping", "install_id": "abc"},
+                  "live_translation": {
+                      "enabled": True,
+                      "remote": {"enabled": True, "endpoint": "http://192.168.2.52:8080"}}}
+        ns = _ns(config, req, remote={})
+        assert ns["_send_livemap_ping"](_livemap.EVENT_APP_START) is True
+        assert "mt_model=remote&" in req.calls[0]["url"]
+
+    def test_an_opted_out_install_does_not_even_probe_its_peer(self):
+        # The kill switch means no analytics work at all, not just no collector call.
+        probes = []
+        config = {"analytics": {"endpoint": "", "install_id": "abc"},
+                  "live_translation": {
+                      "enabled": True,
+                      "remote": {"enabled": True, "endpoint": "http://192.168.2.52:8080"}}}
+        ns = _ns(config, _Recorder(), probes=probes)
+        assert ns["_send_livemap_ping"](_livemap.EVENT_APP_START) is False
+        assert probes == []
+
+    def test_a_box_that_does_not_offload_never_probes(self):
+        probes = []
+        ns = _ns({"analytics": {"endpoint": "https://c/api/ping", "install_id": "abc"},
+                  "live_translation": {"enabled": True, "translation_method": "nllb"}},
+                 _Recorder(), probes=probes)
+        ns["_send_livemap_ping"](_livemap.EVENT_APP_START)
+        assert probes == []
 
     def test_an_unprobeable_machine_still_pings(self):
         # Every probe fails open: a box where nvidia-smi is absent and platform tells
