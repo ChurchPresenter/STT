@@ -1052,7 +1052,17 @@ def _load_ct2_translator(hf_model_path, model_id, use_gpu, ct2_compute_type):
     global _live_translation_device
     import ctranslate2
     device = "cuda" if (use_gpu and torch.cuda.is_available()) else "cpu"
-    compute_type = _ct2_resolve_compute_type(ct2_compute_type or "auto", device)
+    # The card's capability decides whether fp16 is worth naming: a pre-Volta GPU
+    # has no fast fp16 path, and int8_float16 there only earns a second cache
+    # directory holding the same weights.
+    _capability = None
+    if device == "cuda":
+        try:
+            _props = torch.cuda.get_device_properties(0)
+            _capability = float(f"{_props.major}.{_props.minor}")
+        except Exception:
+            _capability = None  # unknown keeps the long-standing answer
+    compute_type = _ct2_resolve_compute_type(ct2_compute_type or "auto", device, _capability)
     if not os.path.isdir(hf_model_path):
         raise RuntimeError(
             f"CTranslate2 backend needs '{model_id}' downloaded locally first "
@@ -18880,47 +18890,6 @@ def thread1_function(ts, cq, cfq, cal_state, cal_data, cal_step1, asq):
                             filepath = os.path.join(full_dir_path, filename)
 
                             # Save audio file
-                            with open(filepath, "wb") as f:
-                                f.write(wav_data_bytes)
-
-                            return filepath
-                        except Exception as e:
-                            print(f"[WARNING] Failed to save audio backup: {e}")
-                            return None
-
-                        try:
-                            # Get current time in configured timezone
-                            now = datetime.now(configured_timezone)
-
-                            # Create directory structure: base/YYYY/YYYY-MM/
-                            # Use same default as database if not specified
-                            base_dir = backup_config.get("base_directory", "").strip()
-                            if not base_dir:
-                                base_dir = BACKUP_DIR
-                            year_dir = os.path.join(base_dir, now.strftime("%Y"))
-                            month_dir = os.path.join(year_dir, now.strftime("%Y-%m"))
-
-                            # Create directories if they don't exist
-                            os.makedirs(month_dir, exist_ok=True)
-
-                            # Create filename: YYYY-MM-DD-HHmmss.wav or with custom prefix
-                            audio_format = backup_config.get("format", "wav")
-                            filename_prefix = backup_config.get(
-                                "filename_prefix", ""
-                            ).strip()
-
-                            if filename_prefix:
-                                filename = now.strftime(
-                                    f"%Y-%m-%d-%H%M%S_{filename_prefix}.{audio_format}"
-                                )
-                            else:
-                                filename = now.strftime(
-                                    f"%Y-%m-%d-%H%M%S.{audio_format}"
-                                )
-
-                            filepath = os.path.join(month_dir, filename)
-
-                            # Save the audio file
                             with open(filepath, "wb") as f:
                                 f.write(wav_data_bytes)
 

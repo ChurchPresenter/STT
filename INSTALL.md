@@ -121,7 +121,8 @@ start_watchdog.bat
 .\start_watchdog.ps1
 ```
 
-Logs go to `~/.stt/logs/watchdog.log` (binary) or `logs/watchdog.log` (source).
+Logs go to `~/.stt/logs/watchdog.log` — the data directory is the same for a binary and a
+source install (override it with `STT_DATA_DIR`).
 
 **Source install:**
 
@@ -295,10 +296,14 @@ pip install -r requirements.txt --force-reinstall
 ## Configuration
 
 ### Main Config File
-`config/config.json` is created automatically on first run by copying `config/config.default.json`.
-It is gitignored — edit it freely without worrying about committing passwords or personal settings.
+The live config is **`~/.stt/config/config.json`** (`%USERPROFILE%\.stt\config\config.json` on
+Windows), created automatically on first run by copying the bundled
+`config/config.default.json`. Set `STT_DATA_DIR` to put the data directory somewhere else.
 
-To start from scratch: delete `config/config.json` and restart the app.
+This holds for a source checkout too, not just a packaged install: the `config/` directory in
+the repo contains only the template, and editing it changes nothing about a running server.
+
+To start from scratch: delete `~/.stt/config/config.json` and restart the app.
 To update the default template for others: edit `config/config.default.json` and commit it.
 
 ### Sentry Error Reporting

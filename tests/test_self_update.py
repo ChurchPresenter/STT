@@ -6,6 +6,7 @@ guarantees under test are the developer-safety ones: a dirty tree or unpushed
 local commits must never be touched.
 """
 
+import logging
 import os
 import re
 import shutil
@@ -587,3 +588,53 @@ class TestRequirementsWithout:
         kept = [ln for ln in out.splitlines() if ln.strip() and not ln.strip().startswith("#")]
         assert len(kept) > 5
         assert not any(ln.lower().startswith(("torch==", "torchaudio==")) for ln in kept)
+
+
+class TestRestartViaExecvFlushesFirst:
+    """The update message was lost with the process image.
+
+    execv replaces the process without running any cleanup, so whatever sat in
+    Python's stdout buffer went with it — including "Update pulled at startup;
+    restarting...". An operator watching a normal, block-buffered service run saw
+    nothing about the update, then saw the *restarted* process report "up-to-date",
+    which reads as though nothing had happened. It only appeared with
+    PYTHONUNBUFFERED=1, which is not how the service runs.
+    """
+
+    def test_stdout_and_stderr_are_flushed_before_the_exec(self, monkeypatch):
+        events = []
+
+        class _Stream:
+            def __init__(self, name):
+                self.name = name
+
+            def flush(self):
+                events.append(f"flush:{self.name}")
+
+        monkeypatch.setattr(self_update.sys, "stdout", _Stream("stdout"))
+        monkeypatch.setattr(self_update.sys, "stderr", _Stream("stderr"))
+        monkeypatch.setattr(self_update.os, "execv",
+                            lambda *a: events.append("execv"))
+
+        self_update.restart_via_execv()
+
+        assert "execv" in events, "the restart must still happen"
+        assert events.index("flush:stdout") < events.index("execv")
+        assert events.index("flush:stderr") < events.index("execv")
+
+    def test_a_failing_log_handler_does_not_stop_the_restart(self, monkeypatch):
+        # An update that cannot apply because a log handler raised would be a far
+        # worse trade than a missing line of output.
+        class _BadHandler(logging.Handler):
+            def flush(self):
+                raise OSError("stream closed")
+
+        bad = _BadHandler()
+        self_update.log.addHandler(bad)
+        try:
+            called = []
+            monkeypatch.setattr(self_update.os, "execv", lambda *a: called.append(a))
+            self_update.restart_via_execv()
+            assert called, "execv must still be reached"
+        finally:
+            self_update.log.removeHandler(bad)

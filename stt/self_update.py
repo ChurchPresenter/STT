@@ -355,6 +355,19 @@ def restart_via_execv() -> None:
     running, use ``perform_server_restart()`` in speech_to_text.py instead.
     """
     log.info("[self-update] restarting to load updated code")
+    # execv replaces the process image without running any cleanup, so anything
+    # still sitting in Python's stdout buffer is discarded — including the line
+    # above. An operator watching a normal (block-buffered, non-tty) run therefore
+    # saw nothing about the update, and then saw the *restarted* process report
+    # "up-to-date", which reads as though no update had happened. Only visible with
+    # PYTHONUNBUFFERED=1, which is not how the service runs.
+    sys.stdout.flush()
+    sys.stderr.flush()
+    for handler in list(logging.getLogger().handlers) + list(log.handlers):
+        try:
+            handler.flush()
+        except Exception:
+            pass  # a log flush must never be the reason an update fails to apply
     os.execv(sys.executable, [sys.executable, *sys.argv])
 
 

@@ -46,6 +46,27 @@ class TestComputeType:
         assert resolve_compute_type("auto", "mps") == "int8"   # CT2 has no Metal -> CPU int8
         assert resolve_compute_type("auto", "cuda") == "int8_float16"
 
+    def test_auto_drops_fp16_on_a_pre_volta_card(self):
+        # Pascal and older have no fast fp16 path. CT2 accepts int8_float16 and
+        # reports back something else, so it looks like it worked while naming a
+        # type the card does not list — and it builds a second cache directory of
+        # the same weights beside the int8 one.
+        assert resolve_compute_type("auto", "cuda", 6.1) == "int8"
+        assert resolve_compute_type("auto", "cuda", 5.2) == "int8"
+
+    def test_volta_and_newer_keep_fp16(self):
+        assert resolve_compute_type("auto", "cuda", 7.0) == "int8_float16"
+        assert resolve_compute_type("auto", "cuda", 8.9) == "int8_float16"
+
+    def test_an_unknown_capability_keeps_the_long_standing_answer(self):
+        # The caller cannot always determine it, and int8_float16 is right on every
+        # card new enough to ship with CUDA 12.
+        assert resolve_compute_type("auto", "cuda", None) == "int8_float16"
+
+    def test_an_explicit_choice_still_wins_on_any_card(self):
+        # The operator pinning a type is not overridden by a capability probe.
+        assert resolve_compute_type("int8_float16", "cuda", 6.1) == "int8_float16"
+
 
 class TestModelDir:
     def test_cache_dir_keyed_by_type(self):

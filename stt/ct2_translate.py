@@ -22,13 +22,35 @@ from typing import Any, List, Optional
 from stt.nllb_catalog import build_madlad_input
 
 
-def resolve_compute_type(configured: str, device: str) -> str:
+# Volta. Below it a card has no fast fp16 path, so the float16 half of
+# int8_float16 buys nothing — see resolve_compute_type.
+_MIN_FP16_CAPABILITY = 7.0
+
+
+def resolve_compute_type(configured: str, device: str,
+                         compute_capability: Optional[float] = None) -> str:
     """Concrete CTranslate2 compute type. "auto" -> int8_float16 on CUDA,
     int8 on CPU (the low-RAM win, and the only option on Apple Silicon since
-    CT2 has no Metal backend)."""
+    CT2 has no Metal backend).
+
+    On a pre-Volta CUDA card "auto" resolves to plain int8 instead. Those cards
+    have no fast fp16 path: CTranslate2 accepts int8_float16 and quietly reports
+    back something else, so it looks like it worked while naming a type the card
+    does not list — and the mismatch also builds a second, redundant
+    "-ct2-int8_float16" cache directory beside the int8 one. The faster-whisper
+    loader already makes the same distinction at major >= 7.
+
+    ``compute_capability`` None means "not known", which keeps today's answer:
+    the caller cannot always determine it, and int8_float16 is right on every
+    card new enough to be sold with CUDA 12.
+    """
     if configured and configured != "auto":
         return configured
-    return "int8_float16" if device == "cuda" else "int8"
+    if device != "cuda":
+        return "int8"
+    if compute_capability is not None and compute_capability < _MIN_FP16_CAPABILITY:
+        return "int8"
+    return "int8_float16"
 
 
 def ct2_model_dir(hf_model_dir: str, compute_type: str) -> str:
