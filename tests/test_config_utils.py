@@ -300,3 +300,62 @@ class TestShippedTemplateCredentials:
 
         walk(template)
         assert not offenders, f"unintended shipped credential values: {offenders}"
+
+
+class TestShippedInstallIsInert:
+    """A fresh install must download nothing and translate nothing until asked.
+
+    The shipped file used to arrive with live translation on and an NLLB model named
+    in four places, so the first press of Start pulled ~1.2 GB from HuggingFace
+    unattended and a file upload with translation on pulled ~2.5 GB more. Nobody chose
+    either. These pin the inert defaults so a later edit re-arming them fails here
+    rather than on someone's metered connection.
+
+    Only fresh installs are affected: _merge_missing_keys never overwrites a key that
+    already exists (see TestMergeMissingKeys), so a deployment that already translates
+    keeps doing so.
+    """
+
+    PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                        "config", "config.default.json")
+
+    @pytest.fixture
+    def template(self):
+        with open(self.PATH, encoding="utf-8") as fh:
+            return json.load(fh)
+
+    def test_live_translation_ships_off(self, template):
+        assert template["live_translation"]["enabled"] is False
+
+    def test_file_translation_ships_off(self, template):
+        # The code's own fallback has always been False (ft_config.get(..., False));
+        # the shipped file disagreed with it until now.
+        assert template["file_transcription"]["translate_enabled"] is False
+
+    @pytest.mark.parametrize("path", [
+        ("model", "whisper", "model"),
+        ("model", "huggingface", "model_id"),
+        ("file_transcription", "model", "whisper", "model"),
+        ("live_translation", "translation_model"),
+        ("file_transcription", "translation_model"),
+        ("live_translation", "llm", "gguf_repo"),
+        ("live_translation", "llm", "gguf_file"),
+    ])
+    def test_no_model_is_preselected(self, template, path):
+        node = template
+        for key in path:
+            node = node[key]
+        assert node == "", f"{'.'.join(path)} ships a model; a fresh install must pick one"
+
+    def test_the_mode_selectors_are_left_alone(self, template):
+        # Emptying these would not disable anything — it would silently change
+        # behaviour: no type is an unhandled ValueError, and no backend switches the
+        # install from faster-whisper to openai-whisper.
+        assert template["model"]["type"] == "whisper"
+        assert template["model"]["backend"] == "faster-whisper"
+        assert template["live_translation"]["translation_method"] == "nllb"
+
+    def test_nothing_starts_by_itself(self, template):
+        # With autostart on, an inert install would still load whatever it could at
+        # boot; this is the other half of "a fresh install does nothing until asked".
+        assert template["audio"]["autostart"] is False

@@ -10,7 +10,7 @@
       "custom"
     ],
     "whisper": {
-      "model": "small",
+      "model": "",
       "_model_options": [
         "tiny",
         "base",
@@ -21,13 +21,13 @@
         "large-v2",
         "large-v3"
       ],
-      "_model_comment": "Whisper model size. Use .en suffix for English-only (e.g., small.en). tiny/base for real-time, medium/large for accuracy"
+      "_model_comment": "Whisper model size. Use .en suffix for English-only (e.g., small.en). tiny/base for real-time, medium/large for accuracy. Ships empty on purpose: a model is several GB and which one to run depends on the machine, so a fresh install picks and downloads one in the Model Manager rather than inheriting a guess. Until then the Start button stays disabled with that hint."
     },
     "backend": "faster-whisper",
     "_backend_comment": "Whisper backend: 'faster-whisper' (CTranslate2, 4-10x faster, default) or 'whisper' (OpenAI)",
     "huggingface": {
-      "model_id": "openai/whisper-tiny",
-      "_model_id_comment": "Hugging Face model ID. Popular options below",
+      "model_id": "",
+      "_model_id_comment": "Hugging Face model ID, used only when type is 'huggingface'. Ships empty so nothing is downloaded until one is chosen; popular options below.",
       "_popular_models": {
         "whisper": [
           "openai/whisper-tiny",
@@ -226,7 +226,8 @@
     "model": {
       "type": "whisper",
       "whisper": {
-        "model": "tiny.en"
+        "model": "",
+        "_model_comment": "Whisper model for batch file transcription. Empty on a fresh install; pick a downloaded one in the Model Manager. A file can afford a larger model than the live path, since nothing is waiting on it in real time."
       },
       "backend": "",
       "_backend_comment": "Backend for file transcription. Empty = use same as main model."
@@ -235,9 +236,11 @@
     "_use_gpu_comment": "Use GPU for file transcription if available",
     "language": "auto",
     "_language_comment": "Language code for transcription (auto, en, es, fr, de, etc.)",
-    "translate_enabled": true,
+    "translate_enabled": false,
+    "_translate_enabled_comment": "Translate a transcribed file after transcription. Off by default: translation loads a separate multi-GB model, and a file upload should not pull one down unasked. This is also what the code has always assumed when the key was missing.",
     "translate_to": "en",
-    "translation_model": "facebook/nllb-200-distilled-600M"
+    "translation_model": "",
+    "_translation_model_comment": "NMT model for file translation. Empty means none is chosen: the file is transcribed and left untranslated rather than downloading several GB mid-upload. Pick one in the Model Manager."
   },
   "whisper_decoding": {
     "_comment": "Advanced Whisper decoding parameters. Only modify if you understand Whisper internals. Defaults are optimized for each use case.",
@@ -386,8 +389,8 @@
     "_words_comment": "List of words to replace. Case-insensitive, word-boundary matched (so 'ass' won't match 'bass' or 'classic')"
   },
   "live_translation": {
-    "enabled": true,
-    "_enabled_comment": "Enable real-time translation of live transcription",
+    "enabled": false,
+    "_enabled_comment": "Enable real-time translation of live transcription. Off by default: turning it on loads a separate multi-GB NMT model, which a fresh install should download deliberately rather than discover on the first Start.",
     "target_language": "en",
     "_target_language_comment": "Target language code (e.g., 'en', 'es', 'fr', 'de', 'ru')",
     "source_language": "auto",
@@ -401,8 +404,8 @@
       "side_by_side",
       "stacked"
     ],
-    "translation_model": "facebook/nllb-200-distilled-600M",
-    "_translation_model_comment": "HuggingFace model ID for translation. Empty means no model: on nllb/madlad that leaves captions untranslated, and on an LLM session it means no fallback for the captions the LLM declines — several GB not held in memory, which on a memory-bound machine is the room a larger LLM needs. Selectable as \"None\" on the Translations and Model Manager pages.",
+    "translation_model": "",
+    "_translation_model_comment": "HuggingFace model ID for translation. Ships empty so no weights are fetched until one is chosen in the Model Manager. Empty means no model: on nllb/madlad that leaves captions untranslated, and on an LLM session it means no fallback for the captions the LLM declines — several GB not held in memory, which on a memory-bound machine is the room a larger LLM needs. Selectable as \"None\" on the Translations and Model Manager pages.",
     "use_gpu": true,
     "_use_gpu_comment": "Use GPU for translation model. Disable to run NLLB on CPU and free VRAM for Whisper",
     "warmup": true,

@@ -64,9 +64,16 @@ Open http://localhost:8080 in your browser (port is configurable in `config/conf
 
 ## First Time Setup
 
-1. Go to `/model-manager` to download Whisper models
+A new install ships inert: no model is selected and translation is off, so nothing is
+downloaded until you choose it. Start is disabled until steps 1 and 2 are done, and the
+page says which one is outstanding.
+
+1. Go to `/model-manager` to download a Whisper model, then select it
 2. Go to `/live-settings` to select your microphone and language
 3. Start transcribing on the home page
+
+Translation is optional and separate: enable it on `/translation`, where you also pick
+the model or endpoint that does the translating.
 
 ## Running Headless (No GUI)
 

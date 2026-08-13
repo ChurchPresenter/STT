@@ -6729,7 +6729,9 @@ def _selected_model_downloaded(cfg):
     model_cfg = cfg.get("model", {})
     mtype = model_cfg.get("type", "whisper")
     if mtype == "whisper":
-        name = model_cfg.get("whisper", {}).get("model", "small")
+        name = (model_cfg.get("whisper", {}).get("model") or "").strip()
+        if not name:
+            return False  # nothing selected yet — a fresh install ships no model
         backend = model_cfg.get("backend", "whisper")
         if backend == "faster-whisper":
             return os.path.isdir(os.path.join(MODELS_DIR, f"faster-whisper-{name}"))
@@ -6738,7 +6740,12 @@ def _selected_model_downloaded(cfg):
             return True
         return os.path.exists(os.path.expanduser(f"~/.cache/whisper/{name}.pt"))
     if mtype == "huggingface":
-        model_id = model_cfg.get("huggingface", {}).get("model_id", "openai/whisper-tiny")
+        model_id = (model_cfg.get("huggingface", {}).get("model_id") or "").strip()
+        # Guarded, not just tidied: "" joined to MODELS_DIR is the models directory
+        # itself, which exists — so an unset model reported as downloaded, and the
+        # Start button was offered for a model that was never chosen.
+        if not model_id:
+            return False
         return os.path.isdir(os.path.join(MODELS_DIR, model_id.replace("/", "--")))
     if mtype == "custom":
         return os.path.exists(model_cfg.get("custom", {}).get("model_path", ""))
@@ -9684,7 +9691,13 @@ def process_file_transcription(file_path, output_format, session_id, filename, l
                     socketio.emit("file_progress", {"session_id": session_id, "percent": 92,
                                                     "status": f"Retranslating {len(_declined)} segment(s) with the NMT model..."})
                     try:
-                        _fb_id = ft_config.get("translation_model", "facebook/nllb-200-distilled-600M")
+                        # Empty means no fallback weights are configured — the same
+                        # choice the live path offers. Checked rather than left to
+                        # fail, because "" reaches load_translation_model as the
+                        # models directory and raises something unreadable.
+                        _fb_id = (ft_config.get("translation_model") or "").strip()
+                        if not _fb_id:
+                            raise ValueError("no NMT fallback model configured")
                         _fb_model, _fb_tok = load_translation_model(ft_use_gpu, model_id=_fb_id)
                         for i in _declined:
                             _src = (segments[i].get("text") or "").strip()
@@ -9695,6 +9708,20 @@ def process_file_transcription(file_path, output_format, session_id, filename, l
                         cleanup_translation_model(_fb_model, _fb_tok)
                     except Exception as e:
                         print(f"[FILE-TRANSLATE] NMT fallback failed: {e}")
+            elif not (ft_config.get("translation_model") or "").strip():
+                # No NMT model chosen: transcribe and leave it untranslated, the same
+                # answer the live caption path gives (get_live_translation_model returns
+                # None and the caption stays in the source language). Without this the
+                # empty id reached load_translation_model, where "" joined to MODELS_DIR
+                # is the models *directory* — so it tried to load that folder as a model
+                # and failed the whole upload with an opaque transformers error. A fresh
+                # install ships no model, so this is the default path, not an edge case.
+                print("[FILE-TRANSLATE] no translation model configured; "
+                      "the file is transcribed but not translated")
+                socketio.emit("file_progress", {
+                    "session_id": session_id, "percent": 65,
+                    "status": "No translation model selected — skipping translation"})
+                translated_segments = []
             else:
                 # Local path: unload transcription model to free VRAM, load NLLB locally
                 socketio.emit(
