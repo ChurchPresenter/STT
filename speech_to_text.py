@@ -4531,6 +4531,41 @@ def _compute_display_version():
 SERVER_DISPLAY_VERSION = _compute_display_version()
 
 
+def _os_version_string():
+    """The specific OS release for the live-map ping ("15.5", "Ubuntu 24.04.1 LTS").
+
+    Reading it is the IO half of stt.livemap.os_version_label: platform's own accessors
+    plus, on Linux, /etc/os-release — the kernel version says nothing useful about a
+    distro, so PRETTY_NAME is preferred and the kernel is only the fallback.
+    """
+    import platform as _platform
+    distro = ""
+    try:
+        with open("/etc/os-release", encoding="utf-8") as f:
+            for line in f:
+                if line.startswith("PRETTY_NAME="):
+                    distro = line.partition("=")[2].strip().strip('"')
+                    break
+    except OSError:
+        pass  # not Linux, or an image without it — the kernel fallback covers it
+    return _livemap.os_version_label(
+        sys.platform,
+        mac_ver=_platform.mac_ver()[0],
+        win_ver=_platform.win32_ver()[1],
+        distro=distro,
+        kernel=_platform.release())
+
+
+# Static for the life of the process, and both ping events carry them.
+try:
+    import platform as _platform_mod
+    SERVER_OS_VERSION = _os_version_string()
+    SERVER_ARCH = _livemap.arch_label(_platform_mod.machine())
+except Exception:
+    SERVER_OS_VERSION = ""
+    SERVER_ARCH = ""
+
+
 def _send_livemap_ping(event, **fields):
     """Send one anonymous live-map ping. Returns whether the collector was reached.
 
@@ -4541,7 +4576,7 @@ def _send_livemap_ping(event, **fields):
 
     The URL and the shape of the two events live in stt/livemap.py; what stays here is
     the part that cannot be unit-tested without a network: the config read, the install
-    id, and the request itself.
+    id, the hardware probe, and the request itself.
     """
     try:
         url = _livemap.build_ping_url(
@@ -4550,6 +4585,12 @@ def _send_livemap_ping(event, **fields):
             os_name=_livemap.os_name_for_platform(sys.platform),
             version=_livemap.numeric_version(SERVER_DISPLAY_VERSION, SERVER_VERSION),
             commit=SERVER_COMMIT,
+            os_version=SERVER_OS_VERSION,
+            arch=SERVER_ARCH,
+            # Cached after the first probe; on a CPU-only box this is blank, which is
+            # itself the answer to half the "why is it slow" questions.
+            gpu=_livemap.gpu_label(_probe_hardware().get("gpu_name") or ""),
+            **_livemap.install_fields_from_config(config),
             **fields)
         if url is None:
             return False  # blank endpoint: the operator has opted out
@@ -4645,8 +4686,12 @@ def _get_total_ram_bytes():
         return 0
 
 
-def _probe_vram_bytes():
-    """Total VRAM of CUDA device 0 in bytes; None when unknown.
+def _probe_gpu():
+    """``(name, vram_bytes)`` for CUDA device 0; either half is None when unknown.
+
+    Name and VRAM come from the same source in one shot: the requirements check needs
+    the size, the live-map ping needs the model, and asking nvidia-smi twice would pay
+    the subprocess twice for one answer.
 
     Never triggers the heavy torch import itself: uses torch only when it is
     already in sys.modules, otherwise falls back to nvidia-smi (stdlib-only,
@@ -4656,17 +4701,32 @@ def _probe_vram_bytes():
         if "torch" in sys.modules:
             import torch
             if torch.cuda.is_available():
-                return int(torch.cuda.get_device_properties(0).total_memory)
-            return None  # torch is loaded and says no CUDA — trust it
+                props = torch.cuda.get_device_properties(0)
+                return getattr(props, "name", None), int(props.total_memory)
+            return None, None  # torch is loaded and says no CUDA — trust it
     except Exception:
         pass
     try:
         import subprocess
-        r = subprocess.run(["nvidia-smi", "--query-gpu=memory.total", "--format=csv,noheader,nounits"],
+        r = subprocess.run(["nvidia-smi", "--query-gpu=name,memory.total", "--format=csv,noheader,nounits"],
                            capture_output=True, text=True, timeout=5,
                            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
         if r.returncode == 0 and r.stdout.strip():
-            return int(float(r.stdout.strip().splitlines()[0])) * 1024**2
+            name, _, total = r.stdout.strip().splitlines()[0].partition(",")
+            return name.strip() or None, int(float(total)) * 1024**2
+    except Exception:
+        pass
+    return None, None
+
+
+def _probe_apple_gpu_name():
+    """The Apple Silicon chip ("Apple M2 Pro"), or None. The GPU is part of the SoC."""
+    try:
+        import subprocess
+        r = subprocess.run(["sysctl", "-n", "machdep.cpu.brand_string"],
+                           capture_output=True, text=True, timeout=5)
+        if r.returncode == 0:
+            return r.stdout.strip() or None
     except Exception:
         pass
     return None
@@ -4691,19 +4751,23 @@ def _probe_hardware():
                 apple_silicon = sys.platform == "darwin" and _platform.machine() == "arm64"
             except Exception:
                 apple_silicon = False
-            vram = _probe_vram_bytes()
+            gpu_name, vram = _probe_gpu()
             hw = {
                 "ram_bytes": _get_total_ram_bytes(),
                 "cpu_cores": os.cpu_count() or 0,
                 "vram_bytes": vram,
                 "has_cuda": vram is not None,
                 "apple_silicon": apple_silicon,
+                # Reported to the live map, not used for the requirements check. On a
+                # Mac the accelerator is the SoC, so the chip name is the GPU name.
+                "gpu_name": gpu_name or (_probe_apple_gpu_name() if apple_silicon else None),
             }
             _HW_PROBE_CACHE = hw
         elif hw["vram_bytes"] is None and "torch" in sys.modules:
-            vram = _probe_vram_bytes()
+            gpu_name, vram = _probe_gpu()
             hw["vram_bytes"] = vram
             hw["has_cuda"] = vram is not None
+            hw["gpu_name"] = gpu_name or hw.get("gpu_name")
     try:
         import shutil
         hw["disk_free_bytes"] = shutil.disk_usage(APP_DIR).free  # cheap; keep current

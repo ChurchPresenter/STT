@@ -675,7 +675,7 @@
   },
   "analytics": {
     "endpoint": "https://stt.churchpresenter.org/api/ping",
-    "_endpoint_comment": "Live-map ping URL, hit twice: once when the server starts (event=app_start) and once when a transcription starts (event=transcription_start). The two are separate signals — an install left running all week is invisible to a ping that only fires on Start. Change only if self-hosting the collector; leave empty to disable both.",
+    "_endpoint_comment": "Live-map ping URL, hit twice: once when the server starts (event=app_start) and once when a transcription starts (event=transcription_start). The two are separate signals — an install left running all week is invisible to a ping that only fires on Start. Each ping reports the OS and its release, CPU architecture, GPU model, app version and commit, and the names of the configured transcription and translation models; a transcription ping adds the languages. It never sends an endpoint URL, an API key, or any filesystem path. Change only if self-hosting the collector; leave empty to disable both.",
     "install_id": "",
     "_install_id_comment": "Anonymous per-install UUID, generated automatically on first ping. Used only to dedupe the map so one machine doesn't spam it. No IP is stored; location is derived server-side and fuzzed."
   },

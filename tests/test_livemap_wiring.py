@@ -31,8 +31,13 @@ class _Recorder:
         return object()
 
 
-def _ns(config, requests_stub, *, saves=None, ids=("generated-id",)):
-    """_send_livemap_ping and _get_install_id over a controlled config."""
+def _ns(config, requests_stub, *, saves=None, ids=("generated-id",), gpu="Test GPU"):
+    """_send_livemap_ping and _get_install_id over a controlled config.
+
+    The machine description (OS release, arch, GPU) is stubbed rather than probed: the
+    real values come from platform and nvidia-smi, and a test that asserted on them
+    would assert on whichever machine happened to run it.
+    """
     remaining = list(ids)
 
     def _save_config(cfg):
@@ -50,7 +55,10 @@ def _ns(config, requests_stub, *, saves=None, ids=("generated-id",)):
          "sys": type("S", (), {"platform": "darwin"}),
          "SERVER_DISPLAY_VERSION": "26.1.22-gc588d29",
          "SERVER_VERSION": "26.1.22",
-         "SERVER_COMMIT": "c588d29"})
+         "SERVER_COMMIT": "c588d29",
+         "SERVER_OS_VERSION": "15.5",
+         "SERVER_ARCH": "arm64",
+         "_probe_hardware": lambda: {"gpu_name": gpu}})
     # The function imports requests lazily inside its body, so the stub is installed
     # under the name the import binds.
     import sys as _real_sys
@@ -111,6 +119,33 @@ class TestPingSent:
         ns["_send_livemap_ping"](_livemap.EVENT_TRANSCRIPTION_START)
         events = [c["url"].rsplit("event=", 1)[1] for c in req.calls]
         assert events == ["app_start", "transcription_start"]
+
+    def test_both_events_describe_the_machine_and_its_models(self):
+        # An install left running all week never reaches a transcription start, so
+        # app_start has to carry the description too or the support case has nothing.
+        req = _Recorder()
+        config = {"analytics": {"endpoint": "https://c/api/ping", "install_id": "abc"},
+                  "model": {"type": "whisper", "whisper": {"model": "large-v3"}},
+                  "live_translation": {"enabled": True, "translation_method": "nllb",
+                                       "translation_model": "facebook/nllb-200"}}
+        ns = _ns(config, req, gpu="NVIDIA GeForce RTX 4060")
+        ns["_send_livemap_ping"](_livemap.EVENT_APP_START)
+        ns["_send_livemap_ping"](_livemap.EVENT_TRANSCRIPTION_START)
+        for call in req.calls:
+            url = call["url"]
+            assert "os_version=15.5" in url and "arch=arm64" in url
+            assert "gpu=NVIDIA%20GeForce%20RTX%204060" in url
+            assert "stt_model=large-v3" in url
+            assert "mt_model=nllb%3Afacebook%2Fnllb-200" in url
+
+    def test_an_unprobeable_machine_still_pings(self):
+        # Every probe fails open: a box where nvidia-smi is absent and platform tells
+        # us nothing must still register as an install.
+        req = _Recorder()
+        ns = _ns({"analytics": {"endpoint": "https://c/api/ping", "install_id": "abc"}},
+                 req, gpu=None)
+        assert ns["_send_livemap_ping"](_livemap.EVENT_APP_START) is True
+        assert "gpu=" not in req.calls[0]["url"]
 
 
 class TestFailureIsSwallowed:
