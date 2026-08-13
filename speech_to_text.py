@@ -17992,6 +17992,39 @@ def _export_and_retire_session(session_db_name):
 
 
 
+def _kill_stray_ffmpeg(source, pid=None):
+    """Kill an ffmpeg this audio source may have left behind. Best effort.
+
+    Scoped to our own process — never a system-wide "taskkill /IM ffmpeg.exe", which
+    would also kill an unrelated job such as a concurrent file transcription.
+
+    ``pid`` must be captured *before* ``source.stop()``: stop() clears the handle, so
+    reading it afterwards finds None and the Windows branch has nothing to kill. The
+    stray this exists for is rare but permanent — a capture stream that stalls is
+    respawned, and a respawn racing teardown could leave an ffmpeg nobody holds,
+    appending to its .ts file until the machine is rebooted.
+    """
+    import subprocess as sp
+    if pid is None:
+        proc = getattr(source, "process", None)
+        pid = getattr(proc, "pid", None) if proc else None
+    try:
+        if platform.startswith("win"):
+            if pid:
+                sp.run(["taskkill", "/F", "/T", "/PID", str(pid)],
+                       capture_output=True, timeout=2)
+                print(f"[STOP] OK: Killed ffmpeg PID {pid}")
+            else:
+                print("[STOP] No ffmpeg PID tracked; skipping kill to avoid taking down "
+                      "unrelated ffmpeg")
+        elif getattr(source, "device_name", None):
+            sp.run(["pkill", "-9", "-f", f"ffmpeg.*{re.escape(source.device_name)}"],
+                   capture_output=True, timeout=2)
+            print(f"[STOP] OK: Sent kill for ffmpeg using {source.device_name}")
+    except Exception as e:
+        print(f"[STOP] kill fallback failed: {e}")
+
+
 def thread1_function(ts, cq, cfq, cal_state, cal_data, cal_step1, asq):
     """Main transcription process with start/stop support"""
     install_crash_diagnostics("worker")
@@ -18081,31 +18114,15 @@ def thread1_function(ts, cq, cfq, cal_state, cal_data, cal_step1, asq):
                         if source:
                             try:
                                 print("[STOP] Stopping audio source to unblock main loop...")
+                                # Captured before stop(), which clears the handle —
+                                # read afterwards it is always None and the Windows
+                                # kill below has nothing to work with.
+                                _proc = getattr(source, "process", None)
+                                _pid = getattr(_proc, "pid", None) if _proc else None
                                 if hasattr(source, "stop") and callable(source.stop):
                                     source.stop()
                                     print("[STOP] OK: Audio source stopped")
-                                # Fallback: kill only THIS source's lingering ffmpeg.
-                                # Scope the kill to our own process — never a
-                                # system-wide "taskkill /IM ffmpeg.exe", which
-                                # would also kill unrelated ffmpeg jobs (e.g. a
-                                # concurrent file transcription).
-                                import subprocess as sp
-                                our_proc = getattr(source, "process", None)
-                                our_pid = getattr(our_proc, "pid", None) if our_proc else None
-                                try:
-                                    if platform.startswith('win'):
-                                        if our_pid:
-                                            sp.run(["taskkill", "/F", "/T", "/PID", str(our_pid)],
-                                                   capture_output=True, timeout=2)
-                                            print(f"[STOP] OK: Killed ffmpeg PID {our_pid}")
-                                        else:
-                                            print("[STOP] No ffmpeg PID tracked; skipping kill to avoid taking down unrelated ffmpeg")
-                                    elif getattr(source, "device_name", None):
-                                        sp.run(["pkill", "-9", "-f", f"ffmpeg.*{re.escape(source.device_name)}"],
-                                               capture_output=True, timeout=2)
-                                        print(f"[STOP] OK: Sent kill for ffmpeg using {source.device_name}")
-                                except Exception as pkill_err:
-                                    print(f"[STOP] kill fallback failed: {pkill_err}")
+                                _kill_stray_ffmpeg(source, _pid)
                             except Exception as e:
                                 print(f"[STOP] WARNING: Error stopping audio source: {e}")
 
@@ -18559,10 +18576,20 @@ def thread1_function(ts, cq, cfq, cal_state, cal_data, cal_step1, asq):
                             transcription_state["error"] = error_msg
                             transcription_state["message"] = "Model loading failed"
 
-                        # Cleanup audio source if it was initialized
+                        # Cleanup audio source if it was initialized. This is the path
+                        # a fresh install takes with audio.autostart on and no model
+                        # downloaded — capture starts, the load fails, and anything
+                        # left holding the microphone would keep writing its capture
+                        # file for the rest of the machine's uptime.
                         if source:
+                            _proc = getattr(source, "process", None)
+                            _pid = getattr(_proc, "pid", None) if _proc else None
                             try:
                                 source.stop()
+                            except Exception:
+                                pass
+                            try:
+                                _kill_stray_ffmpeg(source, _pid)
                             except Exception:
                                 pass
 

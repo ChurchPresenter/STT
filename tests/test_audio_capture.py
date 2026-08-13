@@ -187,3 +187,90 @@ class TestCreateCompatibleAudioSource:
         assert src.SAMPLE_WIDTH == 2
         assert src.data_queue is not None
         assert src.data_queue.empty()
+
+
+class _FakeProcess:
+    """A subprocess.Popen stand-in that records how it was ended."""
+
+    _next_pid = 4000
+
+    def __init__(self):
+        type(self)._next_pid += 1
+        self.pid = type(self)._next_pid
+        self.terminated = False
+        self.killed = False
+
+    def terminate(self):
+        self.terminated = True
+
+    def kill(self):
+        self.killed = True
+
+    def wait(self, timeout=None):
+        return 0
+
+    def poll(self):
+        return None
+
+
+class TestStopIsInterlockedWithRespawn:
+    """A stalled stream is respawned; a respawn during teardown left an orphan.
+
+    The capture loop restarts ffmpeg after ~10s without PCM — very reachable on a box
+    where a multi-GB model download is starving the stream. stop() terminates the
+    process it can see and then clears the handle, so a Popen landing in between wrote
+    into a field about to be nulled: nothing held the new ffmpeg, and it kept appending
+    to its .ts capture file long after transcription reported "stopped". Both sides
+    wait up to 2s on a terminate, so the window is seconds wide.
+    """
+
+    def capture(self):
+        cap = FFmpegAudioCapture(device_name="test-device")
+        cap.running = True
+        cap.process = _FakeProcess()
+        return cap
+
+    def test_stop_terminates_the_running_process_and_clears_it(self):
+        cap = self.capture()
+        proc = cap.process
+        cap.stop()
+        assert proc.terminated is True
+        assert cap.process is None
+        assert cap.running is False
+
+    def test_stop_kills_a_process_that_appears_during_teardown(self):
+        # Simulates the race directly: the capture thread wins the assignment after
+        # stop() has already terminated the one it knew about.
+        cap = self.capture()
+        cap.stop()
+        assert cap.process is None
+
+        stray = _FakeProcess()
+        cap.process = stray  # what the racing respawn used to do
+        cap.stop()
+        assert stray.killed or stray.terminated, "the orphan must not be left running"
+        assert cap.process is None
+
+    def test_the_lock_exists_and_is_held_while_swapping(self):
+        # The guard is the lock plus the running flag; a respawn that ignores either
+        # reintroduces the orphan.
+        cap = self.capture()
+        assert hasattr(cap, "_process_lock")
+        acquired = cap._process_lock.acquire(blocking=False)
+        assert acquired, "the lock must not be held outside a swap"
+        cap._process_lock.release()
+
+    def test_running_is_cleared_before_the_process_is_touched(self):
+        # _restart_ffmpeg checks self.running, so it has to be false by the time
+        # stop() starts terminating anything.
+        cap = self.capture()
+        order = []
+
+        class _Recorder(_FakeProcess):
+            def terminate(inner):
+                order.append(("terminate", cap.running))
+                super().terminate()
+
+        cap.process = _Recorder()
+        cap.stop()
+        assert order == [("terminate", False)]

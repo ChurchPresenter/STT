@@ -89,6 +89,12 @@ class FFmpegAudioCapture:
         self.process = None
         self.thread = None
         self.running = False
+        # Serialises every change of self.process between the capture thread and
+        # stop(). Without it a stalled-stream respawn landing during teardown wrote
+        # its handle into self.process just as stop() nulled it — leaving an ffmpeg
+        # nobody held, still writing its .ts file long after the session ended. Seen
+        # on a Windows box where a model download starved the capture stream.
+        self._process_lock = threading.Lock()
         self.data_queue = None  # Queue for compatibility with speech_recognition interface
         # Uppercase attributes for compatibility with speech_recognition interface
         self.SAMPLE_RATE = sample_rate
@@ -353,8 +359,19 @@ class FFmpegAudioCapture:
                 os.set_blocking(self.process.stdout.fileno(), False)  # type: ignore[attr-defined]
 
             def _restart_ffmpeg():
-                """Kill and restart ffmpeg, returns new buffer (empty bytes)"""
+                """Kill and restart ffmpeg, returns new buffer (empty bytes).
+
+                Does nothing once stop() has been called. A respawn racing teardown
+                is how a session left an orphan behind: stop() terminates the process
+                it can see and sets self.process to None, and a Popen landing in
+                between wrote a handle into a field that was about to be cleared —
+                after which nothing held the new ffmpeg and it kept appending to its
+                .ts file indefinitely. Both sides wait up to 2s on a terminate, so
+                the window is seconds wide, not microseconds.
+                """
                 nonlocal cmd, pipe_queue, pipe_eof, reader_thread
+                if not self.running:
+                    return b''
                 old_backup_file = self.backup_file
                 print(f"[DEBUG-TS-RESTART] Old backup file: {old_backup_file}", flush=True)
                 if old_backup_file and os.path.exists(old_backup_file):
@@ -367,25 +384,36 @@ class FFmpegAudioCapture:
                 cmd = self._get_ffmpeg_command()
                 print(f"[DEBUG-TS-SPLIT] *** BACKUP FILE SPLIT DUE TO TIMEOUT *** Old: {old_backup_file} -> New: {self.backup_file}", flush=True)
                 print(f"[FFMPEG] Restarting: {' '.join(cmd)}", flush=True)
-                self.process = subprocess.Popen(
-                    cmd,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    bufsize=self.chunk_size * 2,
-                    creationflags=_CREATE_NO_WINDOW,
-                )
-                print(f"[DEBUG-TS-RESTART] New FFmpeg PID: {self.process.pid}", flush=True)
+                with self._process_lock:
+                    # Re-checked under the lock: stop() may have run while the old
+                    # process was being terminated above, and spawning here would
+                    # then create exactly the orphan this guard exists to prevent.
+                    if not self.running:
+                        print("[DEBUG-TS-RESTART] Stopping — not respawning ffmpeg", flush=True)
+                        return b''
+                    proc = subprocess.Popen(
+                        cmd,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        bufsize=self.chunk_size * 2,
+                        creationflags=_CREATE_NO_WINDOW,
+                    )
+                    self.process = proc
+                # Everything below reads the local handle, not self.process: stop()
+                # may null the field the moment the lock is released, and the reader
+                # this sets up still has to be attached to the process just spawned.
+                print(f"[DEBUG-TS-RESTART] New FFmpeg PID: {proc.pid}", flush=True)
                 if _IS_WINDOWS:
                     pipe_queue = Queue()
                     pipe_eof = threading.Event()
                     reader_thread = threading.Thread(
                         target=_pipe_reader,
-                        args=(self.process.stdout, pipe_queue, pipe_eof),
+                        args=(proc.stdout, pipe_queue, pipe_eof),
                         daemon=True,
                     )
                     reader_thread.start()
                 else:
-                    os.set_blocking(self.process.stdout.fileno(), False)  # type: ignore[attr-defined]
+                    os.set_blocking(proc.stdout.fileno(), False)  # type: ignore[attr-defined]
                 return b''
 
             while self.running:
@@ -552,22 +580,26 @@ class FFmpegAudioCapture:
             else:
                 print(f"[DEBUG-TS-STOP] WARNING: Backup file missing: {self.backup_file}", flush=True)
 
+        # Cleared before anything is terminated, and read by _restart_ffmpeg under
+        # the same lock, so the capture thread cannot decide to respawn after this.
         self.running = False
 
         # Terminate ffmpeg process first (before joining thread)
-        if self.process:
-            pid = self.process.pid
+        with self._process_lock:
+            process, self.process = self.process, None
+        if process:
+            pid = process.pid
             print(f"[DEBUG-TS-STOP] Terminating ffmpeg process PID={pid}", flush=True)
             try:
-                self.process.terminate()
+                process.terminate()
                 try:
-                    self.process.wait(timeout=2)
+                    process.wait(timeout=2)
                     print("[DEBUG-TS-STOP] ffmpeg process terminated gracefully", flush=True)
                 except subprocess.TimeoutExpired:
                     print("[DEBUG-TS-STOP] ffmpeg not responding, sending SIGKILL", flush=True)
-                    self.process.kill()
+                    process.kill()
                     try:
-                        self.process.wait(timeout=2)
+                        process.wait(timeout=2)
                         print("[DEBUG-TS-STOP] ffmpeg process killed", flush=True)
                     except subprocess.TimeoutExpired:
                         # Last resort: use os.kill with SIGKILL
@@ -580,14 +612,27 @@ class FFmpegAudioCapture:
                             print(f"[DEBUG-TS-STOP] os.kill failed: {e}", flush=True)
             except Exception as e:
                 print(f"[DEBUG-TS-STOP] Error terminating ffmpeg: {e}", flush=True)
-            finally:
-                self.process = None
 
         # Now join the capture thread
         if self.thread:
             self.thread.join(timeout=3)
             if self.thread.is_alive():
                 print("[DEBUG-TS-STOP] WARNING: Capture thread still alive after join timeout", flush=True)
+
+        # Backstop: if the thread was mid-respawn when stop() ran, or did not finish
+        # within the join, a process may have appeared after the terminate above.
+        # Nothing else will ever hold it, so it is killed here rather than left to
+        # keep writing its .ts file for the rest of the machine's uptime.
+        with self._process_lock:
+            stray, self.process = self.process, None
+        if stray:
+            print(f"[DEBUG-TS-STOP] Killing ffmpeg spawned during teardown PID={stray.pid}",
+                  flush=True)
+            try:
+                stray.kill()
+                stray.wait(timeout=2)
+            except Exception as e:
+                print(f"[DEBUG-TS-STOP] Could not kill respawned ffmpeg: {e}", flush=True)
 
         print("[DEBUG-TS-STOP] Audio capture stopped", flush=True)
         if self._ts_file_count > 1:
