@@ -14,7 +14,8 @@ logger = logging.getLogger(__name__)
 
 # SMB/CIFS direct access (no mounting required)
 try:
-    from smbclient import register_session, open_file, mkdir, remove as smb_remove
+    from smbclient import (register_session, open_file, mkdir, remove as smb_remove,
+                           stat as smb_stat)
     from smbclient.path import exists as smb_exists
     SMB_AVAILABLE = True
 except ImportError:
@@ -272,6 +273,41 @@ def test_destination_accessible(dest_path, username='', password='', domain=''):
         logger.error(f"Destination not accessible: {e}")
         return False
 
+# Returned in the error slot of a successful call to say "nothing was transferred".
+# A sentinel rather than a third return value, so every existing caller that only
+# looks at the success flag keeps working.
+SKIPPED_ALREADY_PRESENT = 'skipped:already-present'
+
+
+def _destination_matches(source_file, dest_file, username='', password='', domain=''):
+    """Whether ``dest_file`` already holds a file of the same size as the source.
+
+    Any doubt answers False — a re-copy costs bandwidth, a wrong skip loses a
+    recording, and only one of those is recoverable. So an unreadable destination, a
+    missing SMB library, or a stat that raises all mean "copy it".
+    """
+    try:
+        source_size = os.path.getsize(source_file)
+    except OSError:
+        return False
+
+    if is_smb_path(dest_file):
+        if not SMB_AVAILABLE:
+            return False
+        try:
+            normalized = dest_file.replace('\\', '/')
+            if not smb_exists(normalized):
+                return False
+            return smb_stat(normalized).st_size == source_size
+        except Exception:
+            return False
+
+    try:
+        return os.path.isfile(dest_file) and os.path.getsize(dest_file) == source_size
+    except OSError:
+        return False
+
+
 def move_file_with_structure(source_file, dest_base, working_dir, preserve_structure=True, delete_source=True, username='', password='', domain=''):
     """
     Move a file to destination, optionally preserving directory structure
@@ -298,6 +334,19 @@ def move_file_with_structure(source_file, dest_base, working_dir, preserve_struc
             else:
                 # For local paths, use os.path.join
                 dest_file = os.path.join(dest_base, filename)
+
+        # In copy mode, skip what is already there at the same size.
+        #
+        # find_files_to_move globs a pattern rather than tracking what is new, and
+        # deletion is what normally keeps that honest — so with delete_source off,
+        # every run re-sent the entire accumulated history and each service took
+        # longer than the last. Size is enough to tell a delivered file from a new
+        # one here (these are finished recordings, never rewritten in place) and it
+        # needs no state file, which also makes an interrupted run cheaply resumable.
+        if not delete_source and _destination_matches(source_file, dest_file,
+                                                      username, password, domain):
+            logger.info(f"Already present, skipping: {dest_file}")
+            return True, SKIPPED_ALREADY_PRESENT
 
         # Handle SMB vs local paths
         if is_smb_path(dest_base):
@@ -489,6 +538,9 @@ def execute_file_move(config_getter, working_dir=None):
         patterns = mover_config.get('source_patterns', [])
         delete_source = mover_config.get('delete_source', True)
         preserve_structure = mover_config.get('preserve_structure', True)
+        # Default false: turning this on changes where files land, and an existing
+        # archive's layout must not shift under it because the app updated.
+        strip_source_base = mover_config.get('strip_source_base', False)
 
         # Source patterns are relative to the data directory, which the caller
         # knows and this module must not guess. It used to reach into
@@ -504,18 +556,21 @@ def execute_file_move(config_getter, working_dir=None):
             print(f"[EXECUTE] No working_dir passed; guessed {working_dir}", flush=True)
         base_dirs = get_base_directories_from_patterns(patterns, working_dir)
 
-        # Test destination accessibility
+        # Reachability is a warning, not a verdict. The probe writes at the top of
+        # dest_path, but every file lands in a subdirectory of it — and a NAS that
+        # grants write inside a folder while denying it at the share root is a common
+        # layout, not a misconfiguration. Aborting there moved nothing at all, and
+        # with delete_source on, sessions simply accumulated locally. The per-file
+        # copies below report their own failures, so let them.
         print("[EXECUTE] Testing destination accessibility...", flush=True)
-        if not test_destination_accessible(dest_path, username, password, domain):
-            return {
-                'success': False,
-                'moved': 0,
-                'failed': 0,
-                'errors': [f'Destination not accessible: {dest_path}'],
-                'message': f'Destination not accessible: {dest_path}'
-            }
-
-        print("[EXECUTE] Destination accessible", flush=True)
+        if test_destination_accessible(dest_path, username, password, domain):
+            print("[EXECUTE] Destination accessible", flush=True)
+        else:
+            warning = (f'Destination root not writable: {dest_path} — continuing, since '
+                       f'files are written to subdirectories of it')
+            print(f"[EXECUTE] {warning}", flush=True)
+            logger.warning(warning)
+            errors.append(warning)
 
         # Find files to move
         files_to_move = find_files_to_move(patterns, working_dir)
@@ -524,17 +579,27 @@ def execute_file_move(config_getter, working_dir=None):
         # Move files
         moved_count = 0
         failed_count = 0
+        skipped_count = 0
 
         for file_path in files_to_move:
             if not os.path.exists(file_path):
                 continue
 
             print(f"[EXECUTE] Processing: {file_path}", flush=True)
+            # With strip_source_base the path is taken relative to the pattern's own
+            # base directory, so a destination named after that directory does not
+            # end up containing a second copy of it.
+            file_base = (get_base_directory_for_file(file_path, base_dirs) or working_dir
+                         ) if strip_source_base else working_dir
             success, error = move_file_with_structure(
-                file_path, dest_path, working_dir,
+                file_path, dest_path, file_base,
                 preserve_structure, delete_source,
                 username, password, domain
             )
+
+            if error == SKIPPED_ALREADY_PRESENT:
+                skipped_count += 1
+                continue
 
             if success:
                 moved_count += 1
@@ -548,12 +613,15 @@ def execute_file_move(config_getter, working_dir=None):
                 failed_count += 1
                 errors.append(f"{file_path}: {error}")
 
-        message = f"Moved {moved_count} files" + (f", {failed_count} failed" if failed_count > 0 else "")
+        message = (f"Moved {moved_count} files"
+                   + (f", {skipped_count} already present" if skipped_count > 0 else "")
+                   + (f", {failed_count} failed" if failed_count > 0 else ""))
         print(f"[EXECUTE] Complete: {message}", flush=True)
 
         return {
             'success': True,
             'moved': moved_count,
+            'skipped': skipped_count,
             'failed': failed_count,
             'errors': errors,
             'message': message,

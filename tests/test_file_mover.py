@@ -261,3 +261,124 @@ class TestWorkingDirIsPassedIn:
         result = execute_file_move(lambda: mover_config(str(dest), ["backup/*.db"]))
 
         assert result["moved"] == 1
+
+
+class TestCopyModeSkipsWhatIsAlreadyThere:
+    """With delete_source off, a run must send only what is new.
+
+    find_files_to_move globs a pattern rather than tracking what changed, and deleting
+    the source is what normally keeps that honest. In copy mode nothing was deleted and
+    nothing was checked, so every stop re-uploaded the entire accumulated history and
+    each service took longer than the last.
+    """
+
+    def test_the_second_run_sends_nothing(self, app_dir):
+        (app_dir / "backup").mkdir()
+        (app_dir / "backup" / "a.db").write_text("data")
+        dest = app_dir / "dest"
+        cfg = lambda: mover_config(str(dest), ["backup/**/*.db"], delete_source=False)  # noqa: E731
+
+        first = execute_file_move(cfg)
+        assert first["moved"] == 1
+        assert first.get("skipped", 0) == 0
+
+        second = execute_file_move(cfg)
+        assert second["moved"] == 0
+        assert second["skipped"] == 1
+        assert second["failed"] == 0
+        assert (dest / "backup" / "a.db").read_text() == "data"
+
+    def test_a_changed_file_is_sent_again(self, app_dir):
+        # Size is the test, so a file that grew is not mistaken for one delivered.
+        (app_dir / "backup").mkdir()
+        source = app_dir / "backup" / "a.db"
+        source.write_text("data")
+        dest = app_dir / "dest"
+        cfg = lambda: mover_config(str(dest), ["backup/**/*.db"], delete_source=False)  # noqa: E731
+
+        execute_file_move(cfg)
+        source.write_text("data and then some more")
+        result = execute_file_move(cfg)
+
+        assert result["moved"] == 1
+        assert result.get("skipped", 0) == 0
+        assert (dest / "backup" / "a.db").read_text() == "data and then some more"
+
+    def test_move_mode_is_unaffected(self, app_dir):
+        # With delete_source on, the source is gone after the first run, so the skip
+        # logic must not enter into it at all.
+        (app_dir / "backup").mkdir()
+        (app_dir / "backup" / "a.db").write_text("data")
+        dest = app_dir / "dest"
+        result = execute_file_move(lambda: mover_config(str(dest), ["backup/**/*.db"]))
+        assert result["moved"] == 1
+        assert result.get("skipped", 0) == 0
+        assert not (app_dir / "backup" / "a.db").exists()
+
+    def test_a_partial_delivery_is_resent(self, app_dir):
+        # An interrupted copy leaves a short file; matching only on name would strand
+        # it there forever.
+        (app_dir / "backup").mkdir()
+        (app_dir / "backup" / "a.db").write_text("the whole thing")
+        dest = app_dir / "dest"
+        (dest / "backup").mkdir(parents=True)
+        (dest / "backup" / "a.db").write_text("partial")
+
+        result = execute_file_move(
+            lambda: mover_config(str(dest), ["backup/**/*.db"], delete_source=False))
+        assert result["moved"] == 1
+        assert (dest / "backup" / "a.db").read_text() == "the whole thing"
+
+
+class TestStripSourceBase:
+    """Everything swept lives under one base directory, which doubled at the far end."""
+
+    def test_off_by_default_the_base_directory_is_kept(self, app_dir):
+        # Today's layout, pinned: an update must not move an existing archive.
+        (app_dir / "_AUTOMATIC_BACKUP" / "2026" / "08").mkdir(parents=True)
+        (app_dir / "_AUTOMATIC_BACKUP" / "2026" / "08" / "a.db").write_text("x")
+        dest = app_dir / "_AUTOMATIC_BACKUP_REMOTE"
+        execute_file_move(lambda: mover_config(str(dest), ["_AUTOMATIC_BACKUP/**/*.db"]))
+        assert (dest / "_AUTOMATIC_BACKUP" / "2026" / "08" / "a.db").exists()
+
+    def test_on_the_year_month_tree_lands_directly(self, app_dir):
+        # What the report wanted: point at an existing _AUTOMATIC_BACKUP on the share
+        # without receiving _AUTOMATIC_BACKUP/_AUTOMATIC_BACKUP/2026/08.
+        (app_dir / "_AUTOMATIC_BACKUP" / "2026" / "08").mkdir(parents=True)
+        (app_dir / "_AUTOMATIC_BACKUP" / "2026" / "08" / "a.db").write_text("x")
+        dest = app_dir / "archive"
+        result = execute_file_move(lambda: mover_config(
+            str(dest), ["_AUTOMATIC_BACKUP/**/*.db"], strip_source_base=True))
+        assert result["moved"] == 1
+        assert (dest / "2026" / "08" / "a.db").exists()
+        assert not (dest / "_AUTOMATIC_BACKUP").exists()
+
+    def test_it_still_preserves_the_tree_unlike_flattening(self, app_dir):
+        # preserve_structure: false was the only existing escape and it loses the
+        # year/month tree — this must not become another way to do that.
+        (app_dir / "_AUTOMATIC_BACKUP" / "2026" / "08").mkdir(parents=True)
+        (app_dir / "_AUTOMATIC_BACKUP" / "2026" / "08" / "a.db").write_text("x")
+        dest = app_dir / "archive"
+        execute_file_move(lambda: mover_config(
+            str(dest), ["_AUTOMATIC_BACKUP/**/*.db"], strip_source_base=True))
+        assert not (dest / "a.db").exists(), "the date tree must survive"
+
+
+class TestUnwritableDestinationRootIsNotFatal:
+    def test_files_are_still_attempted(self, app_dir, monkeypatch):
+        # A NAS granting write inside a folder but not at the share root is a normal
+        # permission layout. Aborting there moved nothing at all, and with
+        # delete_source on, sessions just piled up locally.
+        import stt.file_mover as fm
+        monkeypatch.setattr(fm, "test_destination_accessible", lambda *a, **k: False)
+        (app_dir / "backup").mkdir()
+        (app_dir / "backup" / "a.db").write_text("data")
+        dest = app_dir / "dest"
+
+        result = execute_file_move(lambda: mover_config(str(dest), ["backup/**/*.db"]))
+
+        assert result["success"] is True
+        assert result["moved"] == 1
+        assert (dest / "backup" / "a.db").exists()
+        assert any("root not writable" in e for e in result["errors"]), \
+            "the operator still has to be told the probe failed"

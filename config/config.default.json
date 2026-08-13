@@ -301,9 +301,11 @@
       ],
       "_source_patterns_comment": "File patterns to move (glob patterns relative to working directory)",
       "delete_source": true,
-      "_delete_source_comment": "Delete source file after successful move (false = copy instead)",
+      "_delete_source_comment": "Delete source file after successful move (false = copy instead). In copy mode a file already present at the destination with the same size is skipped, so a run only sends what is new — without that, every run re-sent the whole accumulated history, since the patterns match what exists rather than what changed.",
       "preserve_structure": true,
-      "_preserve_structure_comment": "Preserve directory structure when moving files"
+      "_preserve_structure_comment": "Preserve directory structure when moving files",
+      "strip_source_base": false,
+      "_strip_source_base_comment": "Take each file's path relative to the pattern's own base directory instead of the data dir. Everything swept lives under _AUTOMATIC_BACKUP, so with this off a destination folder of that name receives _AUTOMATIC_BACKUP/_AUTOMATIC_BACKUP/<year>/<month>. Turn it on to land sessions directly in an existing archive folder. Off by default: it changes where files go, and an established archive's layout must not shift because the app updated."
     }
   },
   "url_builder_defaults": {
