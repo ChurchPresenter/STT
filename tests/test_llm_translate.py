@@ -32,6 +32,7 @@ from stt.llm_translate import (
     validate_translation,
     PROMPT_STYLE_CHAT,
     PROMPT_STYLE_TRANSLATEGEMMA,
+    REJECT_WRONG_SCRIPT,
     build_translategemma_messages,
     build_translategemma_prompt,
     build_translategemma_user,
@@ -1127,3 +1128,55 @@ class TestScanSkipsCompanionGgufs:
         (repo / "translategemma-12b-it.mmproj-f16.gguf").write_bytes(b"x" * 3)
         found = scan_gguf_models(str(tmp_path))
         assert [f["name"] for f in found[0]["files"]] == ["translategemma-12b-it.Q4_K_M.gguf"]
+
+
+class TestCyrillicTargetScript:
+    """Captions translated *into* Russian had no script screen until 2026-08-12.
+
+    _WRONG_SCRIPT_FOR_TARGET covers Latin-script targets only, each looking for
+    Cyrillic leaking through. The deployed direction is en->ru, where the same failure
+    — the model handing the source back untranslated — produced fluent, correctly
+    sized, number-clean English that passed every remaining rule and would have
+    reached a Russian-reading congregation verbatim.
+    """
+
+    SRC_EN = "Grace and peace to all of you this morning."
+    GOOD_RU = "Благодать и мир всем вам в это утро."
+
+    def test_a_russian_caption_is_accepted(self):
+        assert validate_translation(self.GOOD_RU, self.SRC_EN, "ru") == self.GOOD_RU
+
+    def test_the_untranslated_source_is_rejected(self):
+        text, reason = check_translation(self.SRC_EN, self.SRC_EN, "ru")
+        assert text is None
+        assert reason == REJECT_WRONG_SCRIPT
+
+    @pytest.mark.parametrize("lang", ["uk", "be", "bg", "mk"])
+    def test_the_other_cyrillic_targets_are_screened_too(self, lang):
+        assert validate_translation(self.SRC_EN, self.SRC_EN, lang) is None
+
+    def test_latin_inside_a_russian_caption_is_allowed(self):
+        # A name left untransliterated, an acronym, a title: rejecting on one Latin
+        # character would throw away good captions, which is why this is a share and
+        # not the mirror of the Cyrillic test.
+        caption = "Брат Джон работает в организации UNICEF в этом году."
+        assert validate_translation(caption, self.SRC_EN, "ru") == caption
+
+    def test_a_caption_with_no_letters_is_not_judged(self):
+        # "3:16" is a perfectly good translation of "3:16"; there is no script to read.
+        assert validate_translation("3:16", "3:16", "ru") == "3:16"
+
+    def test_a_bi_script_language_is_not_screened(self):
+        # Serbian is written in Latin as well as Cyrillic, so a correct Latin-script
+        # translation must not be rejected as an untranslated echo.
+        latin_serbian = "Blagodat i mir svima vama jutros."
+        assert validate_translation(latin_serbian, self.SRC_EN, "sr") == latin_serbian
+
+    def test_the_threshold_sits_where_no_real_caption_is(self):
+        # Measured over the 1210 Russian captions in the two archived services: the
+        # Cyrillic share of letters is 1.000 at p1 and only one caption falls below
+        # 0.6. A caption that is half Latin is not one of them.
+        mostly_russian = "Мы прочитаем это в книге Acts сегодня вечером."
+        assert validate_translation(mostly_russian, self.SRC_EN, "ru") == mostly_russian
+        half_english = "Grace and peace to you, братья."
+        assert validate_translation(half_english, self.SRC_EN, "ru") is None

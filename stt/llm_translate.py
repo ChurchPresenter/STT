@@ -46,6 +46,45 @@ _WRONG_SCRIPT_FOR_TARGET = {
     "pl": _CYRILLIC,
 }
 
+_LATIN = re.compile(r"[A-Za-z]")
+
+# Targets written in Cyrillic, where the screen above has to run the other way.
+#
+# It cannot simply be mirrored. A single Cyrillic character in an English caption means
+# the source leaked through, so that test rejects on one; a Russian caption may contain
+# Latin quite legitimately — a name left untransliterated, an acronym, a book title —
+# so rejecting on one character would throw away good captions. What is not legitimate
+# is a caption that is *mostly* Latin: that is the documented failure where the model
+# hands the source back untranslated, which scores 0.0 here.
+#
+# Measured over the 1210 Russian captions in the two archived services: the Cyrillic
+# share of letters is 1.000 at p1, and exactly one caption of 1210 falls below 0.6. So
+# the threshold sits in a gap with no real captions in it — 0.08% at any value between
+# 0.3 and 0.6 — and 0.5 is the middle of that gap.
+#
+# Deliberately excludes the bi-script languages. Serbian, Kazakh and Mongolian are
+# written in Latin as well as Cyrillic, so a correct Latin-script translation into one
+# of them would be rejected as an untranslated echo. Only languages that are Cyrillic
+# in practice are listed.
+_CYRILLIC_TARGETS = frozenset({"ru", "uk", "be", "bg", "mk"})
+_MIN_TARGET_SCRIPT_SHARE = 0.5
+
+
+def wrong_script_share(text: str, expected: "re.Pattern[str]", foreign: "re.Pattern[str]",
+                       *, min_share: float = _MIN_TARGET_SCRIPT_SHARE) -> bool:
+    """Whether too little of ``text`` is in the expected script.
+
+    Counts letters only, and a text with none of either — digits, punctuation, a bare
+    scripture reference — is never rejected: there is nothing to judge the script of,
+    and a caption reading "3:16" is a perfectly good translation of one.
+    """
+    hits = len(expected.findall(text or ""))
+    misses = len(foreign.findall(text or ""))
+    total = hits + misses
+    if not total:
+        return False
+    return (hits / total) < min_share
+
 # Openers a model uses when it starts reasoning or narrating instead of translating.
 _REASONING_OPENERS = (
     "okay, let's", "okay, so", "ok, let's", "let's tackle", "let me tackle",
@@ -861,9 +900,17 @@ def check_translation(raw: Optional[str], source: str, target_lang: str, *,
     if low.startswith(_REASONING_OPENERS):
         return None, REJECT_REASONING
 
-    wrong_script = _WRONG_SCRIPT_FOR_TARGET.get((target_lang or "").lower())
+    lang = (target_lang or "").lower()
+    wrong_script = _WRONG_SCRIPT_FOR_TARGET.get(lang)
     if wrong_script is not None and wrong_script.search(text):
         # The model returned (some of) the source language instead of translating.
+        return None, REJECT_WRONG_SCRIPT
+    if lang in _CYRILLIC_TARGETS and wrong_script_share(text, _CYRILLIC, _LATIN):
+        # Same failure, opposite direction. This one had no screen at all until
+        # 2026-08-12: the table above covers Latin-script targets only, so a session
+        # captioning *into* Russian — the deployed direction — would have shown the
+        # English source verbatim to a Russian-reading congregation, having passed
+        # every other rule (fluent, right length, numbers intact).
         return None, REJECT_WRONG_SCRIPT
 
     # A caption is one utterance. Blank-line-separated output means the model produced

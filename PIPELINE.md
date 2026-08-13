@@ -431,6 +431,7 @@ process only reads the result.
 | It refuses — *"I can't assist…"*, *"As an AI…"* | `refusal` | A refusal is not a translation |
 | It narrates — *"Okay, let's…"*, *"Here's the translation:"* | `reasoning` | Reasoning models ignore instructions to stop |
 | Cyrillic survives into a Latin-script target | `wrong_script` | The source leaked through untranslated |
+| Under half the letters are Cyrillic in a `ru`/`uk`/`be`/`bg`/`mk` target | `wrong_script` | The same failure captioning *into* Cyrillic, which had no screen at all before 2026-08-12. Not the mirror of the rule above: one Latin character in a Russian caption is a name or an acronym, so the rule is a share. Measured over 1210 real Russian captions the Cyrillic share is 1.000 at p1, and the only caption it rejects is one that really is English. Bi-script targets (`sr`, `kk`, `mn`) are excluded — a correct Latin-script translation into one of them is not an echo |
 | The output is multi-paragraph | `paragraphs` | A caption is one utterance; a document is a recitation |
 | Three or more lines of ≤2 words | `list` | A counted-out verse range arrives on single newlines and slips past the paragraph check |
 | A figure the speaker gave has vanished, or a crowd of figures appears that the source never had | `numbers` | The two scripture failure modes move numbers in opposite directions: a reference answered with a remembered passage loses them, a range counted out invents them |
