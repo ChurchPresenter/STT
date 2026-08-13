@@ -156,3 +156,61 @@ class TestInstallId:
         assert set(seen) == {"first-id"}
         assert config["analytics"]["install_id"] == "first-id"
         assert len(saves) == 1
+
+
+class TestEveryStartPathPings:
+    """Which paths that begin a session tell the map about it.
+
+    Four places put {"command": "start"} on the control queue, and for a long time
+    only the /api/transcription/start route pinged. An install running with
+    audio.autostart therefore reported itself alive at every boot and never once
+    reported a service — inverted for exactly the unattended installs that caption
+    every service they are used for.
+
+    Asserted against the source because the call sites live in a Flask route, a
+    restart route and the __main__ block, none of which can be imported. The unit of
+    meaning is "this start path pings", and that is what a future edit would drop.
+    """
+
+    import pathlib
+    SOURCE = (pathlib.Path(__file__).resolve().parent.parent / "speech_to_text.py").read_text(
+        encoding="utf-8")
+
+    def _block_after(self, marker, lines=25):
+        """The lines following a start command, where the ping belongs.
+
+        Wide enough to span the state updates and the comment block the route
+        carries between the queue put and its ping, and still tight enough that the
+        calibration case cannot pass by picking up an unrelated call site.
+        """
+        assert marker in self.SOURCE, f"anchor moved: {marker!r}"
+        return self.SOURCE.split(marker, 1)[1].split("\n", lines)[0:lines]
+
+    def test_the_helper_exists_and_sends_the_transcription_event(self):
+        assert "def _ping_transcription_started():" in self.SOURCE
+        body = self.SOURCE.split("def _ping_transcription_started():", 1)[1][:800]
+        assert "EVENT_TRANSCRIPTION_START" in body
+        assert "daemon=True" in body, "a ping must never hold up a start"
+
+    def test_the_start_route_pings(self):
+        block = self._block_after('        # Send start command through queue\n'
+                                  '        control_queue.put({"command": "start"})')
+        assert any("_ping_transcription_started()" in line for line in block)
+
+    def test_autostart_pings(self):
+        block = self._block_after('            print("[AUTOSTART] audio.autostart enabled; '
+                                  'starting transcription")')
+        assert any("_ping_transcription_started()" in line for line in block)
+
+    def test_restart_pings(self):
+        block = self._block_after('            # CRITICAL: Update global reference for '
+                                  'signal handler\n'
+                                  '            globals()["thread1"] = transcription_process')
+        assert any("_ping_transcription_started()" in line for line in block)
+
+    def test_calibration_does_not_ping(self):
+        # Calibration starts a real session, but to set levels. The map counts
+        # services, so this one is excluded on purpose.
+        block = self._block_after('            print("[CALIBRATION] Auto-starting '
+                                  'transcription for calibration...", flush=True)')
+        assert not any("_ping_transcription_started()" in line for line in block)

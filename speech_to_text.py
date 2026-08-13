@@ -4561,6 +4561,23 @@ def _send_livemap_ping(event, **fields):
         return False
 
 
+def _ping_transcription_started():
+    """Tell the live map a session has begun, from whichever path began it.
+
+    Four places put {"command": "start"} on the control queue, and for a long time
+    only the /api/transcription/start route pinged. An install running with
+    audio.autostart therefore reported itself alive at every boot and never once
+    reported a service — precisely inverted for the unattended installs that caption
+    every service they are used for. Calibration is deliberately excluded: it starts a
+    real session, but to set levels, and the map counts services.
+    """
+    threading.Thread(
+        target=_send_livemap_ping,
+        args=(_livemap.EVENT_TRANSCRIPTION_START,),
+        kwargs=_livemap.ping_fields_from_config(config),
+        daemon=True, name="livemap-transcription-start").start()
+
+
 def _livemap_app_start_worker():
     """The app-start ping, with one retry for a box that boots faster than its network.
 
@@ -9892,6 +9909,9 @@ def restart_transcription():
             globals()["thread1"] = transcription_process
 
             control_queue.put({"command": "start"})
+            # A restart begins a session like any other start, so the map hears
+            # about it — a model change mid-event must not make the service vanish.
+            _ping_transcription_started()
 
             return jsonify(
                 {
@@ -11720,11 +11740,7 @@ def start_transcription():
         # On a daemon thread including the install-id lookup: that call persists a
         # freshly generated id, and a config write does not belong on the request
         # thread of a Start the operator is waiting on.
-        threading.Thread(
-            target=_send_livemap_ping,
-            args=(_livemap.EVENT_TRANSCRIPTION_START,),
-            kwargs=_livemap.ping_fields_from_config(config),
-            daemon=True, name="livemap-transcription-start").start()
+        _ping_transcription_started()
 
         # Warm up the translation model so the first translated segment doesn't
         # pay the load cost. Remote setups preload on Machine B; otherwise, for a
@@ -20819,6 +20835,9 @@ if __name__ == "__main__":
             print("[AUTOSTART] audio.autostart enabled; starting transcription")
             control_queue.put({"command": "start"})
             transcription_state["status"] = "starting"
+            # An unattended install captions every service it is used for; without
+            # this it only ever reported that it was running.
+            _ping_transcription_started()
     except Exception as e:
         print(f"[AUTOSTART] Failed to auto-start transcription: {e}")
 
