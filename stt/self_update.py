@@ -19,11 +19,13 @@ restored. Pass ``allow_reset=False`` for the strict, never-move-HEAD-sideways be
 import hashlib
 import logging
 import os
+import re
 import shutil
 import subprocess
 import sys
+import tempfile
 from datetime import datetime, timedelta
-from typing import Tuple
+from typing import Sequence, Tuple
 
 log = logging.getLogger(__name__)
 
@@ -129,11 +131,42 @@ def find_uv(repo_dir: str) -> str:
     return ""
 
 
+# Packages an unattended update must never touch. Their wheels are chosen at install
+# time from a CUDA-specific index, and requirements.txt pins the same version that
+# plain PyPI satisfies — so an index-less sync happily "satisfies" the pin by replacing
+# a working CUDA build. On Windows the PyPI wheel is CPU-only, so the box keeps
+# transcribing, at a fraction of the speed, with no error anywhere. The installer owns
+# this stack; see stt/cuda_index.py for how the index is picked.
+FROZEN_PACKAGES = ("torch", "torchaudio")
+
+
+def requirements_without(text: str, names: Sequence[str]) -> str:
+    """``requirements.txt`` content with the named packages removed.
+
+    Matches on the requirement's own name, so a comment mentioning torch survives and
+    ``torchaudio`` is not removed by a rule for ``torch``. Extras and environment
+    markers are handled by cutting at the first delimiter.
+    """
+    excluded = {n.strip().lower() for n in names}
+    kept = []
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped and not stripped.startswith("#"):
+            name = re.split(r"[\s\[<>=!~;]", stripped, maxsplit=1)[0].strip().lower()
+            if name in excluded:
+                continue
+        kept.append(line)
+    return "\n".join(kept) + "\n"
+
+
 def _sync_deps(repo_dir: str) -> bool:
     """Best-effort dependency sync; returns True on success.
 
     The venv is uv-managed and has no pip (see AGENTS.md), so use ``uv pip``.
     Failures are logged and swallowed — a dep mismatch should not wedge startup.
+
+    Runs against a filtered copy of requirements.txt: see FROZEN_PACKAGES for why an
+    update is not allowed to reinstall the CUDA stack.
     """
     req = os.path.join(repo_dir, "requirements.txt")
     if not os.path.isfile(req):
@@ -148,8 +181,20 @@ def _sync_deps(repo_dir: str) -> bool:
                     "the service's PATH.")
         return False
     try:
+        with open(req, encoding="utf-8") as f:
+            filtered = requirements_without(f.read(), FROZEN_PACKAGES)
+        # A temp file rather than a rewritten requirements.txt: the checkout is a git
+        # working tree, and a dirty one is what makes the next auto-update skip itself.
+        with tempfile.NamedTemporaryFile("w", suffix="-requirements.txt", delete=False,
+                                         encoding="utf-8") as tmp:
+            tmp.write(filtered)
+            req_path = tmp.name
+    except OSError as e:
+        log.warning("[self-update] could not prepare requirements: %s", e)
+        return False
+    try:
         r = subprocess.run(
-            [uv, "pip", "install", "-r", req],
+            [uv, "pip", "install", "-r", req_path],
             cwd=repo_dir,
             capture_output=True,
             text=True,
@@ -160,11 +205,17 @@ def _sync_deps(repo_dir: str) -> bool:
         if r.returncode != 0:
             log.warning("[self-update] dependency sync failed: %s", (r.stderr or r.stdout).strip())
             return False
-        log.info("[self-update] dependencies synced with requirements.txt")
+        log.info("[self-update] dependencies synced with requirements.txt "
+                 "(%s left to the installer)", ", ".join(FROZEN_PACKAGES))
         return True
     except Exception as e:  # noqa: BLE001 - never let dep sync crash the caller
         log.warning("[self-update] dependency sync error: %s", e)
         return False
+    finally:
+        try:
+            os.unlink(req_path)
+        except OSError:
+            pass
 
 
 def _sync_deps_if_needed(repo_dir: str) -> None:

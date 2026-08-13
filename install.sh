@@ -224,6 +224,30 @@ detect_gpu() {
     fi
 }
 
+# Pick the torch wheel index this GPU can actually run.
+#
+# cu128 dropped the pre-Volta architectures, so on a Pascal card (GTX 10-series,
+# sm_61) a cu128 install reports cuda.is_available() True and then fails every kernel
+# launch with "no kernel image is available for execution on the device". The index is
+# therefore chosen by compute capability, not by the presence of nvidia-smi.
+#
+# Mirrors stt/cuda_index.py, which carries the tests; keep the two in step. Prints
+# nothing when the capability cannot be read, so the caller installs the default wheel
+# rather than guessing: a CPU build is slow and obvious, a CUDA build with no kernels
+# for the card looks perfect until the first service.
+torch_index_url() {
+    local caps lowest
+    caps=$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader 2>/dev/null) || return 0
+    # Lowest capability wins: the wheels have to run on every card in the box.
+    lowest=$(printf '%s\n' "$caps" | grep -E '^[0-9]+\.[0-9]+$' | sort -g | head -1)
+    [ -z "$lowest" ] && return 0
+    if [ "$(printf '%s\n7.0\n' "$lowest" | sort -g | head -1)" = "7.0" ]; then
+        echo "https://download.pytorch.org/whl/cu128"
+    else
+        echo "https://download.pytorch.org/whl/cu126"
+    fi
+}
+
 # Function to install Python packages
 install_python_deps() {
     print_status "Installing Python dependencies from requirements.txt..."
@@ -236,8 +260,14 @@ install_python_deps() {
     else
         # Linux: install CUDA PyTorch if NVIDIA GPU present, otherwise CPU
         if detect_gpu; then
-            print_status "Installing GPU-enabled packages (CUDA)..."
-            uv pip install -r requirements.txt --extra-index-url https://download.pytorch.org/whl/cu128
+            index_url=$(torch_index_url)
+            if [ -n "$index_url" ]; then
+                print_status "Installing GPU-enabled packages ($index_url)..."
+                uv pip install -r requirements.txt --extra-index-url "$index_url"
+            else
+                print_status "Installing default packages..."
+                uv pip install -r requirements.txt
+            fi
         else
             print_status "Installing CPU-only packages..."
             uv pip install -r requirements.txt

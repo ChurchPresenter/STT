@@ -176,29 +176,57 @@ function Detect-Gpu {
     }
 }
 
+# ─── Pick the torch wheel index this GPU can actually run ───────────
+# cu128 dropped the pre-Volta architectures. On a Pascal card (GTX 10-series, sm_61)
+# a cu128 install still reports cuda.is_available() True and then fails every kernel
+# launch with "no kernel image is available for execution on the device" — so the
+# index is chosen by compute capability, not by the presence of nvidia-smi.
+# Mirrors stt/cuda_index.py, which carries the tests; keep the two in step.
+function Get-TorchIndexUrl {
+    $cap = & nvidia-smi --query-gpu=compute_cap --format=csv,noheader 2>$null
+    $lowest = $null
+    foreach ($line in @($cap)) {
+        $value = 0.0
+        if ([double]::TryParse(("" + $line).Trim(), [ref]$value)) {
+            if ($null -eq $lowest -or $value -lt $lowest) { $lowest = $value }
+        }
+    }
+    if ($null -eq $lowest) {
+        # Unreadable capability: install the default wheel rather than guess. A CPU
+        # build is slow and obvious; a CUDA build with no kernels for the card looks
+        # perfect until the first service.
+        Print-Warning "Could not read GPU compute capability — installing default wheels"
+        return $null
+    }
+    if ($lowest -ge 7.0) { return "https://download.pytorch.org/whl/cu128" }
+    Print-Status "GPU compute capability $lowest is pre-Volta — using the cu126 wheels"
+    return "https://download.pytorch.org/whl/cu126"
+}
+
 # ─── Install Python packages ────────────────────────────────────────
 function Install-PythonDeps {
     Print-Status "Installing Python dependencies from requirements.txt..."
 
     $reqFile = Join-Path $INSTALL_DIR "requirements.txt"
     $hasGpu  = Detect-Gpu
+    $indexUrl = if ($hasGpu) { Get-TorchIndexUrl } else { $null }
 
     if (Test-Command "uv") {
-        if ($hasGpu) {
-            Print-Status "Installing GPU-enabled packages (CUDA)..."
-            & uv pip install --python $PYTHON_BIN -r $reqFile --extra-index-url https://download.pytorch.org/whl/cu128
+        if ($indexUrl) {
+            Print-Status "Installing GPU-enabled packages ($indexUrl)..."
+            & uv pip install --python $PYTHON_BIN -r $reqFile --extra-index-url $indexUrl
         } else {
-            Print-Status "Installing CPU-only packages..."
+            Print-Status "Installing default packages..."
             & uv pip install --python $PYTHON_BIN -r $reqFile
         }
     } else {
         # Fallback to pip
         & $PYTHON_BIN -m pip install --upgrade pip
-        if ($hasGpu) {
-            Print-Status "Installing GPU-enabled packages (CUDA)..."
-            & $PYTHON_BIN -m pip install -r $reqFile --extra-index-url https://download.pytorch.org/whl/cu128
+        if ($indexUrl) {
+            Print-Status "Installing GPU-enabled packages ($indexUrl)..."
+            & $PYTHON_BIN -m pip install -r $reqFile --extra-index-url $indexUrl
         } else {
-            Print-Status "Installing CPU-only packages..."
+            Print-Status "Installing default packages..."
             & $PYTHON_BIN -m pip install -r $reqFile
         }
     }

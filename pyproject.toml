@@ -50,6 +50,7 @@ module = [
     "stt.model_memory",
     "stt.session_meta",
     "stt.http_params",
+    "stt.cuda_index",
     "stt.livemap",
     "stt.llm_translate",
     "stt.service_phase",

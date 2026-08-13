@@ -522,3 +522,68 @@ class TestSecondsUntilHour:
         assert big == 11 * 3600
         low = self_update.seconds_until_hour(self._dt(2026, 7, 24, 12, 0, 0), -5)   # -> 00:00 tomorrow
         assert low == 12 * 3600
+
+
+class TestRequirementsWithout:
+    """An unattended update must not touch the CUDA stack.
+
+    requirements.txt pins torch==2.8.0, and plain PyPI satisfies that pin — so
+    `uv pip install -r requirements.txt` with no index "satisfies" it by replacing the
+    CUDA build the installer chose. On Windows the PyPI wheel is CPU-only, so a box
+    that was transcribing on a GPU quietly carries on at a fraction of the speed with
+    no error anywhere. The installer owns those wheels; the updater leaves them alone.
+    """
+
+    REQ = (
+        "# PyTorch - the installers add the CUDA wheel index\n"
+        "torch==2.8.0\n"
+        "torchaudio==2.8.0\n"
+        "flask>=3.0\n"
+        "faster-whisper==1.0.3\n"
+    )
+
+    def test_the_frozen_packages_are_removed(self):
+        out = self_update.requirements_without(self.REQ, self_update.FROZEN_PACKAGES)
+        assert "torch==2.8.0" not in out
+        assert "torchaudio==2.8.0" not in out
+
+    def test_everything_else_survives(self):
+        out = self_update.requirements_without(self.REQ, self_update.FROZEN_PACKAGES)
+        assert "flask>=3.0" in out
+        assert "faster-whisper==1.0.3" in out
+
+    def test_a_comment_mentioning_torch_survives(self):
+        # Matching on the requirement name, not on the substring: the comment
+        # explaining why the index exists is worth keeping in the filtered copy.
+        out = self_update.requirements_without(self.REQ, self_update.FROZEN_PACKAGES)
+        assert "# PyTorch - the installers add the CUDA wheel index" in out
+
+    def test_a_prefix_match_does_not_take_a_different_package(self):
+        # "torch" must not remove "torchvision" unless it is named too.
+        out = self_update.requirements_without("torch==2.8.0\ntorchvision==0.23.0\n",
+                                               ("torch",))
+        assert "torchvision==0.23.0" in out
+        assert "torch==2.8.0" not in out
+
+    @pytest.mark.parametrize("line", [
+        "torch[opt]==2.8.0", "torch >= 2.8", "torch; sys_platform == 'linux'",
+        "TORCH==2.8.0",
+    ])
+    def test_extras_markers_and_case_are_handled(self, line):
+        out = self_update.requirements_without(line + "\nflask\n",
+                                               self_update.FROZEN_PACKAGES)
+        assert "flask" in out
+        assert "torch" not in out.lower().replace("flask", "")
+
+    def test_an_empty_exclusion_list_changes_nothing(self):
+        assert self_update.requirements_without(self.REQ, ()).strip() == self.REQ.strip()
+
+    def test_the_real_requirements_file_still_has_something_to_install(self):
+        # If the filter ever ate the whole file, the sync would silently install
+        # nothing and report success.
+        import pathlib
+        text = (pathlib.Path(__file__).resolve().parent.parent / "requirements.txt").read_text()
+        out = self_update.requirements_without(text, self_update.FROZEN_PACKAGES)
+        kept = [ln for ln in out.splitlines() if ln.strip() and not ln.strip().startswith("#")]
+        assert len(kept) > 5
+        assert not any(ln.lower().startswith(("torch==", "torchaudio==")) for ln in kept)

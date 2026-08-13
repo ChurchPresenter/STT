@@ -944,6 +944,44 @@ class Provisioner:
     def _has_nvidia(self):
         return _which("nvidia-smi") is not None
 
+    def _compute_capability(self):
+        """The lowest CUDA compute capability present, as nvidia-smi prints it.
+
+        None when there is no card, no driver, or a driver too old to answer — which
+        stt.cuda_index treats as "do not choose a CUDA index" rather than guessing.
+        """
+        if not self._has_nvidia():
+            return None
+        try:
+            out = subprocess.run(
+                ["nvidia-smi", "--query-gpu=compute_cap", "--format=csv,noheader"],
+                capture_output=True, text=True, timeout=30)
+        except Exception:
+            return None
+        if out.returncode != 0:
+            return None
+        caps = []
+        for line in (out.stdout or "").splitlines():
+            try:
+                caps.append(float(line.strip()))
+            except ValueError:
+                continue  # a header, "N/A" on an old driver, an error line
+        # Lowest wins: the wheels have to run on every card in the box.
+        return min(caps) if caps else None
+
+    def _torch_index_url(self):
+        """The torch wheel index this machine's GPU needs, or None for plain PyPI.
+
+        Mirrors stt/cuda_index.py — see the note at the call site for why it is not
+        imported. None on an unreadable capability, because guessing cu128 on a card
+        that has no kernels for it is precisely the failure this replaced.
+        """
+        cap = self._compute_capability()
+        if cap is None:
+            return None
+        return ("https://download.pytorch.org/whl/cu128" if cap >= 7.0
+                else "https://download.pytorch.org/whl/cu126")
+
     def _is_mac_arm(self):
         return sys.platform == "darwin" and platform.machine() == "arm64"
 
@@ -1368,8 +1406,21 @@ class Provisioner:
         cmd = [self._uv, "pip", "install", "--python", py, "-r", req]
         gpu = self._has_nvidia()
         if gpu and sys.platform.startswith(("linux", "win")):
-            cmd += ["--extra-index-url", "https://download.pytorch.org/whl/cu128"]
-            self.log("  NVIDIA GPU detected — installing CUDA wheels")
+            # Chosen by compute capability, not by the presence of nvidia-smi: cu128
+            # carries no sm_61 kernels, so on a Pascal card it installs cleanly,
+            # reports cuda.is_available() True, and then fails every kernel launch.
+            #
+            # Duplicated from stt/cuda_index.py rather than imported: this file is a
+            # standalone bootstrapper, frozen with stdlib only, and it runs before the
+            # repo it would import from has been cloned. That module is the source of
+            # truth and carries the tests; keep the threshold here in step with it.
+            index_url = self._torch_index_url()
+            if index_url:
+                cmd += ["--extra-index-url", index_url]
+                self.log(f"  NVIDIA GPU detected — installing CUDA wheels from {index_url}")
+            else:
+                self.log("  NVIDIA GPU detected but its compute capability could not be "
+                         "read — installing default wheels")
         elif self._is_mac_arm():
             self.log("  Apple Silicon — installing MPS/CPU wheels")
         else:
