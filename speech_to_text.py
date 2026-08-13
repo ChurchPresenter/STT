@@ -367,6 +367,9 @@ def _config_snapshot():
 # Config/validation/version helpers live in stt/config_utils.py (importable,
 # unit-tested); names are re-imported here so call sites stay unchanged.
 from stt import config_utils as _config_utils
+# What the live-map pings say and when there is anything to say (stt/livemap.py);
+# the HTTP call and the thread stay here.
+from stt import livemap as _livemap
 from stt import request_origin
 from stt.session_reset import SessionTracker
 from stt import tunnel as tunnel_mod
@@ -403,16 +406,21 @@ def save_config(config_to_save):
         return False
 
 
+# Serialises first-time id generation. The app-start and transcription-start pings can
+# both fire within a second of each other at boot when audio.autostart is on, and two
+# threads racing here would generate two ids and persist whichever wrote last — leaving
+# the map counting one machine as two installs.
+_install_id_lock = threading.Lock()
+
+
 def _get_install_id():
     """Stable anonymous UUID for the live-map ping; generated once and persisted."""
-    analytics = config.get("analytics", {})
-    iid = (analytics.get("install_id") or "").strip()
-    if not iid:
-        iid = str(uuid.uuid4())
-        analytics["install_id"] = iid
-        config["analytics"] = analytics
-        save_config(config)
-    return iid
+    with _install_id_lock:
+        analytics = config.setdefault("analytics", {})
+        iid, changed = _livemap.ensure_install_id(analytics, lambda: str(uuid.uuid4()))
+        if changed:
+            save_config(config)
+        return iid
 
 
 # Word highlighting uses a separate config file
@@ -4521,6 +4529,52 @@ def _compute_display_version():
 
 
 SERVER_DISPLAY_VERSION = _compute_display_version()
+
+
+def _send_livemap_ping(event, **fields):
+    """Send one anonymous live-map ping. Returns whether the collector was reached.
+
+    Call this on a daemon thread, never inline: it makes a network request, and neither
+    a server boot nor a transcription start may wait on a collector that is slow, down,
+    or unreachable because the box has no route out at all. Every failure is one printed
+    line — the ping is the least important thing this process does.
+
+    The URL and the shape of the two events live in stt/livemap.py; what stays here is
+    the part that cannot be unit-tested without a network: the config read, the install
+    id, and the request itself.
+    """
+    try:
+        url = _livemap.build_ping_url(
+            (config.get("analytics", {}) or {}).get("endpoint"),
+            event=event,
+            os_name=_livemap.os_name_for_platform(sys.platform),
+            version=_livemap.numeric_version(SERVER_DISPLAY_VERSION, SERVER_VERSION),
+            commit=SERVER_COMMIT,
+            **fields)
+        if url is None:
+            return False  # blank endpoint: the operator has opted out
+        import requests as _req
+        _req.get(url, headers={"X-Install-Id": _get_install_id()}, timeout=10)
+        return True
+    except Exception as e:
+        print(f"[LIVEMAP] Ping failed ({event}): {e}")
+        return False
+
+
+def _livemap_app_start_worker():
+    """The app-start ping, with one retry for a box that boots faster than its network.
+
+    .62 starts under systemd at boot, where DNS is routinely not up yet when this
+    thread runs. A single attempt would fail there nearly every time and the app-start
+    signal would be missing from exactly the installs that run unattended, so a failure
+    is retried once a minute later. One retry, not a schedule: if the network is still
+    down after a minute the machine has a real problem, and the next restart pings.
+    """
+    if _send_livemap_ping(_livemap.EVENT_APP_START):
+        return
+    # Event rather than sleep: a shutdown during the wait should not be held up by it.
+    threading.Event().wait(60)
+    _send_livemap_ping(_livemap.EVENT_APP_START)
 
 
 # --- System requirements (informational warning shown in the web UI header) ---
@@ -11632,38 +11686,18 @@ def start_transcription():
 
         # Anonymous live-map ping so ChurchPresenter can see where STT is used.
         # Location is derived (and fuzzed) server-side from the connection; we send
-        # only version + os + a stable per-install id used to dedupe the map.
-        install_id = _get_install_id()
-
-        def _notify_livemap():
-            try:
-                ep = (config.get("analytics", {}).get("endpoint") or "").strip()
-                if not ep:
-                    return
-                # Numeric part of the display version only (e.g. '26.1.22' from
-                # '26.1.22-gc588d29') — the map server rejects anything beyond
-                # dotted numerics, and the commit hash is sent separately below.
-                # A self-update re-execs the process, so this is always current.
-                version = (SERVER_DISPLAY_VERSION or "").split("-", 1)[0] or SERVER_VERSION or "unknown"
-                os_name = {"darwin": "macos", "win32": "windows", "linux": "linux"}.get(sys.platform, "linux")
-                _lt = config.get("live_translation", {})
-                _remote = _lt.get("remote", {})
-                offloaded = bool(_remote.get("enabled") and _remote.get("endpoint"))
-                # Languages in use at transcription start ('auto' when auto-detected).
-                transcribe_lang = (config.get("audio", {}).get("language") or "auto").strip() or "auto"
-                translate_lang = ((_lt.get("target_language") or "").strip() or "unknown") if _lt.get("enabled") else "none"
-                url = (f"{ep}?os={os_name}&version={version}"
-                       f"&transcribe_lang={transcribe_lang}&translate_lang={translate_lang}")
-                if SERVER_COMMIT:
-                    url += f"&commit={SERVER_COMMIT}"
-                if offloaded:
-                    url += "&offloaded=1"
-                import requests as _req
-                _req.get(url, headers={"X-Install-Id": install_id}, timeout=10)
-            except Exception as e:
-                print(f"[START] Live-map ping failed: {e}")
-        import threading
-        threading.Thread(target=_notify_livemap, daemon=True).start()
+        # only version + os + the languages in play + a stable per-install id used to
+        # dedupe the map. The app-start ping (thread2_function) reports that this
+        # install is running; this one reports that it is captioning a service.
+        #
+        # On a daemon thread including the install-id lookup: that call persists a
+        # freshly generated id, and a config write does not belong on the request
+        # thread of a Start the operator is waiting on.
+        threading.Thread(
+            target=_send_livemap_ping,
+            args=(_livemap.EVENT_TRANSCRIPTION_START,),
+            kwargs=_livemap.ping_fields_from_config(config),
+            daemon=True, name="livemap-transcription-start").start()
 
         # Warm up the translation model so the first translated segment doesn't
         # pay the load cost. Remote setups preload on Machine B; otherwise, for a
@@ -20492,6 +20526,14 @@ def thread2_function():
 
         # Close a public tunnel once the service it was opened for has ended
         threading.Thread(target=_tunnel_auto_stop_watcher, daemon=True, name="tunnel-auto-stop").start()
+
+        # Tell the live map this install is running, as distinct from the ping at
+        # transcription start that says it is captioning a service. Safe here and
+        # nowhere earlier: thread2_function runs only from __main__, which takes the
+        # single-instance lock first, so a duplicate launch exits without pinging —
+        # and the transcription worker re-imports this module but never reaches here.
+        threading.Thread(target=_livemap_app_start_worker, daemon=True,
+                         name="livemap-app-start").start()
 
         # Use socketio.run() instead of app.run() for proper Socket.IO support.
         # Retry transient bind failures: a just-restarted process can race a
