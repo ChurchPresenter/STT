@@ -318,12 +318,16 @@ function Show-FinalInstructions {
     Write-Host ""
     Write-Host "Quick Start:"
     Write-Host "  1. Run: start_server.bat"
-    Write-Host "  2. Open browser: http://localhost:80"
-    Write-Host "  3. Go to /model-manager to download models"
+    Write-Host "  2. Open browser: http://localhost:8080"
+    Write-Host "  3. Go to /model-manager to download and select a model"
     Write-Host "  4. Go to /live-settings to configure audio"
     Write-Host ""
     Write-Host "Configuration:"
-    Write-Host "  - Main config: $INSTALL_DIR\config\config.json"
+    # The server seeds and reads its own copy under the data dir. Naming the bundled
+    # template here sent operators to edit a file nothing reads: settings looked
+    # ignored, with no warning, until the startup log line gave the real path away.
+    Write-Host "  - Main config: $env:USERPROFILE\.stt\config\config.json"
+    Write-Host "    (created on first run; set STT_DATA_DIR to put the data dir elsewhere)"
     Write-Host ""
     Write-Host "Manual start (from this directory):"
     Write-Host "  .venv\Scripts\python.exe speech_to_text.py"

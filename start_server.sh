@@ -37,7 +37,10 @@ else
 fi
 
 # Read port from config.json
-PORT=$("$PYTHON_BIN" -c "import json; print(json.load(open('config/config.json')).get('web_server',{}).get('port',8080))" 2>/dev/null || echo 8080)
+# The live config lives in the data dir (STT_DATA_DIR, else ~/.stt), not in the
+# checkout — config/ here holds only the shipped template, so reading it always threw
+# and always fell back to 8080 regardless of the port the server is bound to.
+PORT=$("$PYTHON_BIN" -c "import os,json; d=os.environ.get('STT_DATA_DIR') or os.path.join(os.path.expanduser('~'),'.stt'); print(json.load(open(os.path.join(d,'config','config.json'))).get('web_server',{}).get('port',8080))" 2>/dev/null || echo 8080)
 
 # Check if already running
 if pgrep -f "speech_to_text\.py" > /dev/null 2>&1; then

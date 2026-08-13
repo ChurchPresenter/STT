@@ -28,11 +28,16 @@ if exist ".venv\Scripts\python.exe" (
 )
 
 echo Starting Speech-to-Text server...
-start "" "%PYTHON_BIN%" speech_to_text.py
+REM The window gets a real title so stop_server.bat's WINDOWTITLE fallback can find
+REM it. With start "" the title becomes the exe path and that fallback matched nothing.
+start "STT Server" "%PYTHON_BIN%" speech_to_text.py
 echo [OK] Server starting...
 
+REM Read the port from the live config, which lives in the data dir (STT_DATA_DIR, or
+REM ~/.stt) — not in the checkout. config/ here holds only the shipped template, so the
+REM old lookup always threw and always printed 8080, whatever the server was bound to.
 set "PORT="
-for /f "delims=" %%p in ('"%PYTHON_BIN%" -c "import json;print(json.load(open('config/config.json')).get('web_server',{}).get('port',8080))" 2^>nul') do set "PORT=%%p"
+for /f "delims=" %%p in ('"%PYTHON_BIN%" -c "import os,json;d=os.environ.get('STT_DATA_DIR') or os.path.join(os.path.expanduser('~'),'.stt');print(json.load(open(os.path.join(d,'config','config.json'))).get('web_server',{}).get('port',8080))" 2^>nul') do set "PORT=%%p"
 if not defined PORT set "PORT=8080"
 
 echo Open your browser to http://localhost:%PORT%
