@@ -4838,6 +4838,13 @@ if SYSTEM_REQUIREMENTS_WARNINGS:
 app_logger = logging.getLogger(__name__)  # Use your module name here
 socket_io_logger = logging.getLogger("socketio")
 
+# Polled endpoints that log an unchanging value would otherwise ship the same
+# record every minute forever (Sentry Logs are unsampled). Gate them on the
+# value actually changing.
+from stt.log_gate import ChangeGate  # noqa: E402
+
+_poll_log_gate = ChangeGate()
+
 # Set log levels as needed
 app_logger.setLevel(logging.DEBUG)
 socket_io_logger.setLevel(logging.WARNING)
@@ -12560,7 +12567,14 @@ def get_audio_devices():
         try:
             markers = audio_config.get("deprioritize_device_markers", [])
             devices = list_audio_devices(deprioritize_markers=markers)
-            app_logger.info(f"Listed {len(devices)} devices using ffmpeg")
+            # Something polls this endpoint once a minute; only the count
+            # changing is news, so the steady state goes to DEBUG.
+            _log_devices = (
+                app_logger.info
+                if _poll_log_gate.changed("ffmpeg_devices", len(devices))
+                else app_logger.debug
+            )
+            _log_devices(f"Listed {len(devices)} devices using ffmpeg")
 
             # Normalize device format for UI compatibility
             normalized_devices = []

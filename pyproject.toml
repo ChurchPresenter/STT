@@ -66,6 +66,7 @@ module = [
     "stt.tunnel",
     "stt.request_origin",
     "stt.session_reset",
+    "stt.log_gate",
 ]
 disallow_untyped_defs = true
 
