@@ -76,6 +76,28 @@ def git_describe(repo_dir: str) -> str:
         return ""
 
 
+def is_dev_checkout(repo_dir: str) -> bool:
+    """Whether repo_dir has uncommitted work — the live map's 'this is a dev box' test.
+
+    Being a git checkout is deliberately *not* the test: production installs
+    self-update over git (see :func:`git_self_update`), so nearly every box has a
+    .git. What separates a machine someone is working on is a dirty tree, which
+    is the same condition that makes auto-update skip itself.
+
+    Fails closed for the same reasons the two functions above do: no git, no
+    checkout, or any error reports False, so a frozen build or a stripped
+    container is counted as a real install rather than silently hidden from the
+    map by an errored probe.
+    """
+    try:
+        if not shutil.which("git") or not os.path.isdir(os.path.join(repo_dir, ".git")):
+            return False
+        r = _git(repo_dir, "status", "--porcelain")
+        return bool(r.stdout.strip()) if r.returncode == 0 else False
+    except Exception:
+        return False
+
+
 def _requirements_hash(repo_dir: str) -> str:
     """sha256 of requirements.txt, or '' if it doesn't exist / can't be read."""
     req = os.path.join(repo_dir, "requirements.txt")

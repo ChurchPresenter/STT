@@ -4537,6 +4537,17 @@ except Exception:
     SERVER_DESCRIBE = ""
 
 
+# Whether this checkout has uncommitted work, i.e. someone is developing on it.
+# Sent as src=dev so the live map can hide maintainer machines from a map that is
+# meant to show real installs; until this existed STT sent no src at all and every
+# dev box counted as a church.
+try:
+    from stt.self_update import is_dev_checkout as _is_dev_checkout
+    SERVER_IS_DEV = _is_dev_checkout(BUNDLE_DIR)
+except Exception:
+    SERVER_IS_DEV = False
+
+
 def _compute_display_version():
     """Single monotonic version string for scripts and the UI (see stt/config_utils.py)."""
     return _config_utils.compute_display_version(SERVER_DESCRIBE, SERVER_COMMIT, SERVER_VERSION)
@@ -4632,6 +4643,7 @@ def _send_livemap_ping(event, **fields):
             # Cached after the first probe; on a CPU-only box this is blank, which is
             # itself the answer to half the "why is it slow" questions.
             gpu=_livemap.gpu_label(_probe_hardware().get("gpu_name") or ""),
+            src="dev" if SERVER_IS_DEV else "",
             **_livemap.install_fields_from_config(config, remote_model=_remote_model,
                                                   remote_method=_remote_method),
             **fields)

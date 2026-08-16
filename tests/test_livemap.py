@@ -131,6 +131,18 @@ class TestBuildPingUrl:
         assert "transcribe_lang=ru%26offloaded%3D1" in url
         assert url.count("offloaded=1") == 0, "an injected parameter must not survive"
 
+    def test_src_is_omitted_for_a_normal_install(self):
+        # An omitted src is what the collector reads as a real install, and it is
+        # what every STT ping sent before dev builds were distinguishable at all.
+        url = build_ping_url(ENDPOINT, event=EVENT_APP_START,
+                             os_name="linux", version="26.1.22")
+        assert "src=" not in url
+
+    def test_src_dev_marks_a_maintainer_machine(self):
+        url = build_ping_url(ENDPOINT, event=EVENT_APP_START,
+                             os_name="linux", version="26.1.22", src="dev")
+        assert "src=dev" in url
+
     def test_the_event_is_always_last(self):
         # So a collector reading the older shape sees the historical prefix intact.
         for event in (EVENT_APP_START, EVENT_TRANSCRIPTION_START):

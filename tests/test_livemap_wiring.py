@@ -32,14 +32,15 @@ class _Recorder:
 
 
 def _ns(config, requests_stub, *, saves=None, ids=("generated-id",), gpu="Test GPU",
-        remote=None, probes=None):
+        remote=None, probes=None, is_dev=False):
     """_send_livemap_ping and _get_install_id over a controlled config.
 
     The machine description (OS release, arch, GPU) is stubbed rather than probed: the
     real values come from platform and nvidia-smi, and a test that asserted on them
     would assert on whichever machine happened to run it. ``remote`` stands in for the
     paired machine's provenance, and ``probes`` (a list) records each time the peer
-    would have been asked.
+    would have been asked. ``is_dev`` stands in for the dirty-worktree probe, which
+    would otherwise answer for whichever checkout is running the suite.
     """
     remaining = list(ids)
 
@@ -67,6 +68,7 @@ def _ns(config, requests_stub, *, saves=None, ids=("generated-id",), gpu="Test G
          "SERVER_COMMIT": "c588d29",
          "SERVER_OS_VERSION": "15.5",
          "SERVER_ARCH": "arm64",
+         "SERVER_IS_DEV": is_dev,
          "_probe_hardware": lambda: {"gpu_name": gpu},
          "_remote_effective": {},
          "_fetch_remote_provenance": _fetch_remote_provenance})
@@ -130,6 +132,22 @@ class TestPingSent:
         ns["_send_livemap_ping"](_livemap.EVENT_TRANSCRIPTION_START)
         events = [c["url"].rsplit("event=", 1)[1] for c in req.calls]
         assert events == ["app_start", "transcription_start"]
+
+    def test_a_clean_checkout_pings_as_a_real_install(self):
+        # No src at all is the historical shape, and what the collector reads as
+        # a real install — a production box self-updates over git, so simply
+        # being a checkout must not mark it as a maintainer's machine.
+        req = _Recorder()
+        ns = _ns({"analytics": {"endpoint": "https://c/api/ping", "install_id": "abc"}}, req)
+        ns["_send_livemap_ping"](_livemap.EVENT_APP_START)
+        assert "src=" not in req.calls[0]["url"]
+
+    def test_a_dirty_checkout_pings_as_dev(self):
+        req = _Recorder()
+        ns = _ns({"analytics": {"endpoint": "https://c/api/ping", "install_id": "abc"}}, req,
+                 is_dev=True)
+        ns["_send_livemap_ping"](_livemap.EVENT_APP_START)
+        assert "src=dev" in req.calls[0]["url"]
 
     def test_both_events_describe_the_machine_and_its_models(self):
         # An install left running all week never reaches a transcription start, so

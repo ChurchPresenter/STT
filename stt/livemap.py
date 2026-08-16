@@ -211,7 +211,7 @@ def numeric_version(display_version: Optional[str],
 def build_ping_url(endpoint: Optional[str], *, event: str, os_name: str, version: str,
                    transcribe_lang: str = "", translate_lang: str = "",
                    commit: str = "", os_version: str = "", arch: str = "", gpu: str = "",
-                   stt_model: str = "", mt_model: str = "",
+                   stt_model: str = "", mt_model: str = "", src: str = "",
                    offloaded: bool = False) -> Optional[str]:
     """The URL for one ping, or None when pinging is switched off.
 
@@ -231,6 +231,11 @@ def build_ping_url(endpoint: Optional[str], *, event: str, os_name: str, version
     they were previously interpolated raw, and a language code or version containing a
     space or an ampersand produced a malformed URL — which now matters far more, since
     an OS release, a GPU name and a model id all routinely contain spaces and slashes.
+
+    ``src`` is the collector's build channel: "dev" marks a maintainer's own machine so
+    the map can leave it out of a count of real installs. It is omitted when blank, and
+    the collector treats anything other than "dev" as a normal install, so an omitted
+    value and an unrecognised one mean the same thing.
     """
     base = (endpoint or "").strip()
     if not base:
@@ -243,7 +248,7 @@ def build_ping_url(endpoint: Optional[str], *, event: str, os_name: str, version
     if commit:
         params.append(("commit", commit))
     for name, value in (("os_version", os_version), ("arch", arch), ("gpu", gpu),
-                        ("stt_model", stt_model), ("mt_model", mt_model)):
+                        ("stt_model", stt_model), ("mt_model", mt_model), ("src", src)):
         if value:
             params.append((name, value))
     if offloaded:

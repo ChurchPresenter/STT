@@ -322,6 +322,36 @@ def test_git_describe_empty_for_non_git_dir(tmp_path):
     assert self_update.git_describe(str(plain)) == ""
 
 
+# --- is_dev_checkout ----------------------------------------------------------
+
+
+def test_is_dev_checkout_false_for_a_clean_tree(repos):
+    # A production install self-updates over git, so a clean checkout is a real
+    # install and must not be filtered off the live map as a dev box.
+    _, _, clone = repos
+    assert self_update.is_dev_checkout(str(clone)) is False
+
+
+def test_is_dev_checkout_true_for_modified_tracked_file(repos):
+    _, _, clone = repos
+    next(clone.glob("*")).write_text("local edit\n", encoding="utf-8")
+    assert self_update.is_dev_checkout(str(clone)) is True
+
+
+def test_is_dev_checkout_true_for_untracked_file(repos):
+    # --porcelain lists untracked too, and it is the same condition that makes
+    # auto-update refuse the tree.
+    _, _, clone = repos
+    (clone / "scratch.txt").write_text("wip\n", encoding="utf-8")
+    assert self_update.is_dev_checkout(str(clone)) is True
+
+
+def test_is_dev_checkout_false_for_non_git_dir(tmp_path):
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    assert self_update.is_dev_checkout(str(plain)) is False
+
+
 # --- _sync_deps: the real uv invocation (subprocess stubbed) -----------------
 
 
