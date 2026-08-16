@@ -270,6 +270,31 @@ def resolve_prompt_style(configured: Optional[str], *names: Optional[str]) -> st
     return PROMPT_STYLE_CHAT
 
 
+# What a caption does when the LLM declines it — a timeout, a transport error, or a
+# reply that fails validation. Same vocabulary as remote.fallback deliberately: "skip"
+# shows the original text there too, and an operator who has met one of these should not
+# have to learn a second word for it.
+#
+# "nmt" hands the caption to the NLLB/MADLAD model, which means those weights load on the
+# first declined caption and stay resident for the session — several GB to serve roughly
+# one caption in a hundred. "skip" shows the source text untranslated and never loads
+# them, which on a memory-bound box is the room a larger and better LLM needs.
+FALLBACK_NMT = "nmt"
+FALLBACK_SKIP = "skip"
+FALLBACKS = (FALLBACK_NMT, FALLBACK_SKIP)
+
+
+def resolve_fallback(configured: Optional[str]) -> str:
+    """The fallback behaviour to use: always "nmt" or "skip", never anything else.
+
+    Defaults to "nmt" for an unrecognised value, because that is the reading under which
+    a declined caption still gets translated. "skip" is a deliberate choice about what
+    stays in memory and must be spelled correctly to take effect.
+    """
+    fallback = (configured or FALLBACK_NMT).strip().lower()
+    return fallback if fallback in FALLBACKS else FALLBACK_NMT
+
+
 def uses_system_prompt(style: str) -> bool:
     """Whether this style carries a system prompt at all.
 

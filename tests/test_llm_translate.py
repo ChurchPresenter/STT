@@ -30,8 +30,11 @@ from stt.llm_translate import (
     uses_local_llm,
     numbers_survived,
     validate_translation,
+    FALLBACK_NMT,
+    FALLBACK_SKIP,
     PROMPT_STYLE_CHAT,
     PROMPT_STYLE_TRANSLATEGEMMA,
+    resolve_fallback,
     REJECT_WRONG_SCRIPT,
     build_translategemma_messages,
     build_translategemma_prompt,
@@ -1008,6 +1011,31 @@ class TestResolvePromptStyle:
     def test_only_the_chat_style_has_a_system_prompt(self):
         assert uses_system_prompt(PROMPT_STYLE_CHAT) is True
         assert uses_system_prompt(PROMPT_STYLE_TRANSLATEGEMMA) is False
+
+
+class TestResolveFallback:
+    """What a declined caption does, as a closed set.
+
+    The value decides whether several GB of NMT weights are ever loaded, and it is
+    now settable from two pages, so an unrecognised string must land somewhere
+    predictable rather than being compared raw at the call site.
+    """
+
+    def test_the_two_settings_resolve_to_themselves(self):
+        assert resolve_fallback("nmt") == FALLBACK_NMT
+        assert resolve_fallback("skip") == FALLBACK_SKIP
+
+    @pytest.mark.parametrize("configured", ["SKIP", " skip ", "Skip"])
+    def test_case_and_whitespace_do_not_lose_the_choice(self, configured):
+        # Hand-edited config.json is the only way this value existed until now.
+        assert resolve_fallback(configured) == FALLBACK_SKIP
+
+    @pytest.mark.parametrize("configured", [None, "", "   ", "nonsense", "local", "none"])
+    def test_anything_unrecognised_still_translates_the_caption(self, configured):
+        # "nmt" is the safe default of the two: the caption comes back translated.
+        # "local" is remote.fallback's word and is deliberately not an alias here —
+        # the two settings share a vocabulary, not a value space.
+        assert resolve_fallback(configured) == FALLBACK_NMT
 
 
 class TestTranslategemmaLangCode:

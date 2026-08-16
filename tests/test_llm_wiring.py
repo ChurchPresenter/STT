@@ -273,8 +273,14 @@ class TestLlmFallbackSelector:
     """
 
     def ns(self, cfg):
+        # Wired to the real stt.llm_translate resolver, not a stand-in: the point of
+        # the wrapper is that the caption path and the settings route resolve the
+        # value identically, and a stub here would let the two drift apart unseen.
+        from stt import llm_translate as L
         return extract_definitions("speech_to_text.py", ["_llm_fallback_is_skip"],
-                                   {"config": cfg})
+                                   {"config": cfg,
+                                    "_llm_resolve_fallback": L.resolve_fallback,
+                                    "_LLM_FALLBACK_SKIP": L.FALLBACK_SKIP})
 
     def test_default_keeps_the_nmt_fallback(self):
         # Absent config must not silently stop translating a declined caption.

@@ -937,6 +937,10 @@ from stt.llm_translate import (
     is_model_gguf as _is_model_gguf,
     PROMPT_STYLES as _LLM_PROMPT_STYLES,
     resolve_prompt_style as _llm_prompt_style,
+    # What a declined caption does: translate it with the NMT model, or show the
+    # source and keep those weights out of memory entirely.
+    FALLBACK_SKIP as _LLM_FALLBACK_SKIP,
+    resolve_fallback as _llm_resolve_fallback,
     uses_system_prompt as _llm_uses_system_prompt,
 )
 # Service-phase detection lives in stt/service_phase.py (importable, unit-tested);
@@ -7326,6 +7330,13 @@ def save_translation_settings():
         if "prompt_style" in _sent:
             _style = str(_sent.get("prompt_style") or "auto").strip().lower()
             _llm["prompt_style"] = _style if _style in _LLM_PROMPT_STYLES else "auto"
+        # Fallback behaviour is a closed set too, and it decides whether several GB of
+        # NMT weights are ever loaded — an unrecognised value must resolve to "nmt", the
+        # reading under which a declined caption still gets translated.
+        if "fallback" in _sent:
+            _llm["fallback"] = _llm_resolve_fallback(_sent.get("fallback"))
+        if "retry_on_reject" in _sent:
+            _llm["retry_on_reject"] = bool(_sent.get("retry_on_reject"))
         # n_gpu_layers is "auto" or an int, so it is kept as a string-or-number
         # rather than coerced — resolve_gpu_layers() interprets it at load time.
         if "n_gpu_layers" in _sent:
@@ -16690,12 +16701,12 @@ def _llm_retry_enabled(llm_cfg):
 def _llm_fallback_is_skip():
     """Whether a declined caption shows the source instead of loading the NMT model.
 
-    Same vocabulary as remote.fallback, deliberately: "skip" shows the original text
-    there too, and an operator who has met one of these should not have to learn a
-    second word for it.
+    Thin wrapper over stt.llm_translate.resolve_fallback so the caption path and the
+    settings route resolve the value the same way — the vocabulary and its default live
+    in one place, next to the prompt styles.
     """
     llm_cfg = config.get("live_translation", {}).get("llm") or {}
-    return (llm_cfg.get("fallback") or "nmt").strip().lower() == "skip"
+    return _llm_resolve_fallback(llm_cfg.get("fallback")) == _LLM_FALLBACK_SKIP
 
 
 def _warm_local_llm(target_lang=None):

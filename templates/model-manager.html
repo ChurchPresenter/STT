@@ -548,6 +548,29 @@
                             </select>
                             <small id="config_translation_model_hint">Select from downloaded NLLB &amp; MADLAD models</small>
                         </div>
+
+                        <!-- Sits under the model it governs: on an LLM session the control
+                             above chooses the fallback model, and these two say when it is
+                             used at all. Hidden on every other engine, where nothing
+                             declines a caption. Wording matches the Translations page. -->
+                        <div id="config_llm_fallback_group" style="display:none;">
+                            <div class="form-group">
+                                <label for="config_llm_fallback">If the LLM declines a caption</label>
+                                <select id="config_llm_fallback">
+                                    <option value="nmt">Use the fallback model (NLLB/MADLAD)</option>
+                                    <option value="skip">Show the original text — no fallback weights in memory</option>
+                                </select>
+                                <small>The fallback model loads on the first declined caption and stays resident for the session — several GB to serve roughly one caption in a hundred. "Show the original text" never loads it, which on a memory-bound machine is the room a larger LLM needs. Choosing <strong>None</strong> above has the same practical effect.</small>
+                            </div>
+                            <div class="form-group">
+                                <label style="display: flex; align-items: center; gap: 8px; cursor: pointer;">
+                                    <input type="checkbox" id="config_llm_retry_on_reject" style="width:auto;">
+                                    Retry once when a caption fails validation
+                                </label>
+                                <small>Asks the model again with the broken rule named, before falling back. Costs a second call only on the captions that are rejected; never after a timeout, and not available under the TranslateGemma prompt format.</small>
+                            </div>
+                        </div>
+
                         <div class="form-group">
                             <label style="display: flex; align-items: center; gap: 8px; cursor: pointer;">
                                 <input type="checkbox" id="config_translation_use_gpu" style="width:auto;">
@@ -2077,6 +2100,10 @@
                     document.getElementById('config_llm_provider').value = llmCfg.provider || 'endpoint';
                     document.getElementById('config_llm_endpoint_text').textContent = llmCfg.endpoint || 'not set';
                     document.getElementById('config_llm_endpoint_model').textContent = llmCfg.model || 'not set';
+                    // Unrecognised (or absent) resolves to 'nmt', matching resolve_fallback()
+                    // server-side; retry defaults to on, so only an explicit false unticks it.
+                    document.getElementById('config_llm_fallback').value = llmCfg.fallback === 'skip' ? 'skip' : 'nmt';
+                    document.getElementById('config_llm_retry_on_reject').checked = llmCfg.retry_on_reject !== false;
                     onConfigLlmProviderChange();
                     loadConfigGgufModels(llmCfg.gguf_repo || '', llmCfg.gguf_file || '');
                     document.getElementById('config_translation_method').value = s.translation_method || 'nllb';
@@ -2150,8 +2177,11 @@
                     : 'Not used — Whisper reuses the transcription model.';
             }
 
-            // The LLM's own model selection, shown only on an LLM session.
+            // The LLM's own model selection, shown only on an LLM session — as is
+            // the pair of controls saying when the fallback model is used at all.
             document.getElementById('config_llm_group').style.display =
+                method === 'llm' ? '' : 'none';
+            document.getElementById('config_llm_fallback_group').style.display =
                 method === 'llm' ? '' : 'none';
 
             // Nothing left to say for an LLM session: the model is chosen right
@@ -2189,11 +2219,16 @@
             // the next save from this panel.
             payload.translation_model = model || '';
             if (method === 'llm') {
-                // Only the model selection. The server merges the llm block, so
-                // the prompt, token budget, timeouts and API key set on the
-                // Translation Settings page survive a save from here.
+                // The model selection plus the fallback behaviour shown alongside it.
+                // The server merges the llm block, so the prompt, token budget,
+                // timeouts and API key set on the Translation Settings page survive
+                // a save from here.
                 const provider = document.getElementById('config_llm_provider').value;
-                payload.llm = { provider };
+                payload.llm = {
+                    provider,
+                    fallback: document.getElementById('config_llm_fallback').value,
+                    retry_on_reject: document.getElementById('config_llm_retry_on_reject').checked
+                };
                 if (provider === 'local') {
                     payload.llm.gguf_repo = document.getElementById('config_llm_gguf_repo').value;
                     payload.llm.gguf_file = document.getElementById('config_llm_gguf_file').value;

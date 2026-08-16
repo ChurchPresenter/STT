@@ -394,6 +394,37 @@
                         </small>
                     </div>
 
+                    <!-- What happens to the ~1% of captions the LLM declines — a timeout,
+                         a transport error, or a reply that fails validation. This decides
+                         whether several GB of NMT weights are ever loaded, and until now it
+                         could only be set by hand-editing config.json. -->
+                    <div class="form-group">
+                        <label for="llm_fallback">If the LLM declines a caption</label>
+                        <select id="llm_fallback">
+                            <option value="nmt">Use the fallback model (NLLB/MADLAD)</option>
+                            <option value="skip">Show the original text — no fallback weights in memory</option>
+                        </select>
+                        <small style="color: var(--text-secondary); font-size: 0.75em;">
+                            The fallback model loads on the first declined caption and stays resident
+                            for the session — several GB to serve roughly one caption in a hundred.
+                            "Show the original text" never loads it, which on a memory-bound machine
+                            is the room a larger and better LLM needs. Choosing <strong>None</strong>
+                            in the Fallback model dropdown below has the same practical effect.
+                        </small>
+                    </div>
+
+                    <div class="checkbox-group">
+                        <input type="checkbox" id="llm_retry_on_reject" checked>
+                        <label for="llm_retry_on_reject">Retry once when a caption fails validation</label>
+                    </div>
+                    <small style="color: var(--text-secondary); font-size: 0.75em; margin-left: 22px; display: block; margin-top: -5px; margin-bottom: 10px;">
+                        Asks the model again with the broken rule named, before falling back. The LLM
+                        usually had the caption nearly right and broke one rule, and the fallback model
+                        is not the better answer for it. Costs a second call only on the captions that
+                        are rejected; never attempted after a timeout, and not available under the
+                        TranslateGemma prompt format.
+                    </small>
+
                     <button onclick="testLlmConnection()" class="btn-save" id="llm_test_btn">Test Translation</button>
                     <div id="llm_test_result" style="display:none; margin-top: 8px; padding: 8px 12px; border-radius: var(--radius-sm); font-size: 0.8em;"></div>
 
@@ -1787,7 +1818,9 @@
                 n_ctx: parseInt(document.getElementById('llm_n_ctx').value, 10),
                 system_prompt: document.getElementById('llm_system_prompt').value,
                 max_tokens: parseInt(document.getElementById('llm_max_tokens').value, 10),
-                timeout_ms: parseInt(document.getElementById('llm_timeout_ms').value, 10)
+                timeout_ms: parseInt(document.getElementById('llm_timeout_ms').value, 10),
+                fallback: document.getElementById('llm_fallback').value,
+                retry_on_reject: document.getElementById('llm_retry_on_reject').checked
             };
         }
 
@@ -1801,6 +1834,11 @@
             document.getElementById('llm_api_key').value = llm.api_key || '';
             document.getElementById('llm_n_gpu_layers').value = (llm.n_gpu_layers === undefined || llm.n_gpu_layers === '') ? 'auto' : llm.n_gpu_layers;
             document.getElementById('llm_system_prompt').value = llm.system_prompt || '';
+            // Unrecognised (or absent) resolves to 'nmt', matching resolve_fallback()
+            // server-side — the reading under which a declined caption still translates.
+            document.getElementById('llm_fallback').value = llm.fallback === 'skip' ? 'skip' : 'nmt';
+            // Absent means on: the default is true, so only an explicit false unticks it.
+            document.getElementById('llm_retry_on_reject').checked = llm.retry_on_reject !== false;
             const setRange = (id, labelId, value, fallback) => {
                 const v = (value === undefined || value === null || value === '') ? fallback : value;
                 document.getElementById(id).value = v;
