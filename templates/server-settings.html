@@ -394,13 +394,10 @@
                     </div>
                 </div>
 
-                <!-- API Endpoints Card -->
+                <!-- Monitoring & Logs Card -->
                 <div class="settings-card" style="border-color: var(--info);">
-                    <h4>🔌 API Endpoints</h4>
-                    <div class="description" style="margin-bottom: 12px;">
-                        All available API endpoints for integration and automation.
-                    </div>
-                    <div style="display: flex; gap: 10px; margin-bottom: 12px; flex-wrap: wrap;">
+                    <h4>📊 Monitoring &amp; Logs</h4>
+                    <div style="display: flex; gap: 10px; flex-wrap: wrap;">
                         <a href="/health" style="flex: 1; min-width: 180px; display: flex; align-items: center; gap: 10px; text-decoration: none; padding: 10px 12px; background: var(--info-bg); border: 1px solid var(--info); border-radius: var(--radius-sm);">
                             <span style="font-size: 1.2em;">📊</span>
                             <span style="flex: 1;">
@@ -426,52 +423,59 @@
                             <span style="color: var(--info); font-size: 1.1em;">→</span>
                         </a>
                     </div>
-                    <!-- Cloudflare Tunnel -->
-                    <div id="tunnel-block" style="margin-bottom: 14px; padding: 12px; background: var(--bg-secondary); border: 1px solid var(--border); border-radius: var(--radius-sm);">
-                        <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 8px; flex-wrap: wrap;">
-                            <span style="font-size: 1.1em;">☁️</span>
-                            <strong style="color: var(--text-primary);">Cloudflare Tunnel</strong>
-                            <span id="tunnel-status-badge" style="background: var(--bg-elevated); color: var(--text-secondary); border-radius: var(--radius-sm); padding: 1px 8px; font-size: 0.78em;">Stopped</span>
-                            <span id="tunnel-autostop" style="font-size: 0.78em; color: var(--text-secondary); font-variant-numeric: tabular-nums;"></span>
-                        </div>
-                        <div style="font-size: 0.82em; color: var(--text-secondary); margin-bottom: 10px;">
-                            Gives this server a public URL on demand.
-                            <span id="tunnel-mode-hint">It closes itself <span id="tunnel-delay-label">60</span>s after transcription ends.</span>
-                        </div>
-                        <div class="checkbox-group" style="margin-bottom: 10px;">
-                            <input type="checkbox" id="tunnel_auto_stop_enabled" onchange="saveTunnelAutoStop()" checked>
-                            <label for="tunnel_auto_stop_enabled">Close automatically after transcription ends</label>
-                        </div>
-                        <div style="display: flex; gap: 8px; margin-bottom: 10px; flex-wrap: wrap;">
-                            <button type="button" id="tunnel-start-btn" onclick="startTunnel()" class="btn-save" style="background: var(--success); flex: 0 0 auto; width: auto; margin: 0; padding: 6px 14px;">▶️ Start</button>
-                            <button type="button" id="tunnel-stop-btn" onclick="stopTunnel()" class="btn-save" style="background: var(--danger); flex: 0 0 auto; width: auto; margin: 0; padding: 6px 14px;" disabled>⏹ Stop</button>
-                            <button type="button" id="tunnel-copy-btn" onclick="copyTunnelUrl(this)" class="btn-save" style="background: var(--accent); flex: 0 0 auto; width: auto; margin: 0; padding: 6px 14px;" disabled>📋 Copy URL</button>
-                        </div>
-                        <div id="tunnel-url-row" style="display: none; align-items: center; gap: 8px; margin-bottom: 10px;">
-                            <a id="tunnel-url" href="#" target="_blank" rel="noopener noreferrer" style="color: var(--accent); word-break: break-all; font-family: monospace; font-size: 0.88em;"></a>
-                        </div>
-                        <!-- Share links per saved view. The bare URL lands on whichever
-                             profile is active, which is rarely the one you mean to share. -->
-                        <div id="tunnel-profiles" style="display: none; margin-bottom: 10px;">
-                            <div style="font-size: 0.8em; color: var(--text-secondary); margin-bottom: 6px;">Share a specific view:</div>
-                            <div id="tunnel-profiles-list" style="display: flex; flex-direction: column; gap: 6px;"></div>
-                        </div>
-                        <div id="tunnel-error" style="display: none; color: var(--danger); font-size: 0.82em; margin-bottom: 10px; word-break: break-word;"></div>
-                        <div id="tunnel-startup-warning" style="display: none; color: var(--warning); font-size: 0.8em; margin-bottom: 10px; word-break: break-word;"></div>
-                        <div class="warning-box">
-                            ⚠️ <strong>Anyone with this link can read the live transcript.</strong> The caption display is
-                            open on purpose so you can share it. Settings, recordings and anything that changes state need
-                            the server password — the same one you log in with here. Tunnel traffic shows in
-                            <a href="/logs?origin=tunnel" style="color: inherit; text-decoration: underline;">the logs</a>
-                            as <code>tunnel</code>, with the visitor's real IP.
-                        </div>
-                        <div id="tunnel-noauth-warning" class="danger-box" style="display: none;">
-                            🔒 <strong>Password login is disabled.</strong> Nobody can authenticate over the tunnel, so it
-                            will serve only the caption display — every settings page and API returns 403. Enable
-                            <em>Password Authentication</em> to use the tunnel for anything else.
-                        </div>
-                    </div>
+                </div>
 
+                <!-- Cloudflare Tunnel Card -->
+                <div class="settings-card" id="tunnel-block" style="border-color: var(--info);">
+                    <h4 style="flex-wrap: wrap;">
+                        <span>☁️ Cloudflare Tunnel</span>
+                        <span id="tunnel-status-badge" style="background: var(--bg-elevated); color: var(--text-secondary); border-radius: var(--radius-sm); padding: 1px 8px; font-size: 0.78em; font-weight: 400;">Stopped</span>
+                        <span id="tunnel-autostop" style="font-size: 0.78em; font-weight: 400; color: var(--text-secondary); font-variant-numeric: tabular-nums;"></span>
+                    </h4>
+                    <div style="font-size: 0.82em; color: var(--text-secondary); margin-bottom: 10px;">
+                        Gives this server a public URL on demand.
+                        <span id="tunnel-mode-hint">It closes itself <span id="tunnel-delay-label">60</span>s after transcription ends.</span>
+                    </div>
+                    <div class="checkbox-group" style="margin-bottom: 10px;">
+                        <input type="checkbox" id="tunnel_auto_stop_enabled" onchange="saveTunnelAutoStop()" checked>
+                        <label for="tunnel_auto_stop_enabled">Close automatically after transcription ends</label>
+                    </div>
+                    <div style="display: flex; gap: 8px; margin-bottom: 10px; flex-wrap: wrap;">
+                        <button type="button" id="tunnel-start-btn" onclick="startTunnel()" class="btn-save" style="background: var(--success); flex: 0 0 auto; width: auto; margin: 0; padding: 6px 14px;">▶️ Start</button>
+                        <button type="button" id="tunnel-stop-btn" onclick="stopTunnel()" class="btn-save" style="background: var(--danger); flex: 0 0 auto; width: auto; margin: 0; padding: 6px 14px;" disabled>⏹ Stop</button>
+                        <button type="button" id="tunnel-copy-btn" onclick="copyTunnelUrl(this)" class="btn-save" style="background: var(--accent); flex: 0 0 auto; width: auto; margin: 0; padding: 6px 14px;" disabled>📋 Copy URL</button>
+                    </div>
+                    <div id="tunnel-url-row" style="display: none; align-items: center; gap: 8px; margin-bottom: 10px;">
+                        <a id="tunnel-url" href="#" target="_blank" rel="noopener noreferrer" style="color: var(--accent); word-break: break-all; font-family: monospace; font-size: 0.88em;"></a>
+                    </div>
+                    <!-- Share links per saved view. The bare URL lands on whichever
+                         profile is active, which is rarely the one you mean to share. -->
+                    <div id="tunnel-profiles" style="display: none; margin-bottom: 10px;">
+                        <div style="font-size: 0.8em; color: var(--text-secondary); margin-bottom: 6px;">Share a specific view:</div>
+                        <div id="tunnel-profiles-list" style="display: flex; flex-direction: column; gap: 6px;"></div>
+                    </div>
+                    <div id="tunnel-error" style="display: none; color: var(--danger); font-size: 0.82em; margin-bottom: 10px; word-break: break-word;"></div>
+                    <div id="tunnel-startup-warning" style="display: none; color: var(--warning); font-size: 0.8em; margin-bottom: 10px; word-break: break-word;"></div>
+                    <div class="warning-box">
+                        ⚠️ <strong>Anyone with this link can read the live transcript.</strong> The caption display is
+                        open on purpose so you can share it. Settings, recordings and anything that changes state need
+                        the server password — the same one you log in with here. Tunnel traffic shows in
+                        <a href="/logs?origin=tunnel" style="color: inherit; text-decoration: underline;">the logs</a>
+                        as <code>tunnel</code>, with the visitor's real IP.
+                    </div>
+                    <div id="tunnel-noauth-warning" class="danger-box" style="display: none;">
+                        🔒 <strong>Password login is disabled.</strong> Nobody can authenticate over the tunnel, so it
+                        will serve only the caption display — every settings page and API returns 403. Enable
+                        <em>Password Authentication</em> to use the tunnel for anything else.
+                    </div>
+                </div>
+
+                <!-- API Endpoints Card -->
+                <div class="settings-card" style="border-color: var(--info);">
+                    <h4>🔌 API Endpoints</h4>
+                    <div class="description" style="margin-bottom: 12px;">
+                        All available API endpoints for integration and automation.
+                    </div>
                     <div style="margin-bottom: 10px; font-size: 0.82em; color: var(--text-secondary);">
                         <span style="background: rgba(245,158,11,0.15); color: var(--warning); border-radius: var(--radius-sm); padding: 1px 6px; font-size: 0.85em; margin-right: 6px;">🔒 Auth</span> requires a whitelisted IP, password login, or a <code>?key=</code> access token &nbsp;·&nbsp;
                         <span style="background: var(--bg-secondary); color: var(--text-secondary); border-radius: var(--radius-sm); padding: 1px 6px; font-size: 0.85em; margin-right: 6px;">Open</span> accessible from any IP
