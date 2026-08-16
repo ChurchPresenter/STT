@@ -111,6 +111,9 @@ class RequestLog:
         )
         self._migrate_locked()
         self._conn.execute("CREATE INDEX IF NOT EXISTS idx_access_log_id ON access_log(id)")
+        # The viewer's date filter and the health page's stats() both bound on ts, and
+        # the viewer re-runs its query every few seconds while it is open.
+        self._conn.execute("CREATE INDEX IF NOT EXISTS idx_access_log_ts ON access_log(ts)")
         self._conn.commit()
 
     def _migrate_locked(self) -> None:
@@ -176,6 +179,26 @@ class RequestLog:
             (self.max_rows,),
         )
 
+    @staticmethod
+    def _window_clauses(
+        clauses: List[str],
+        params: List[Any],
+        since: Optional[float],
+        until: Optional[float],
+    ) -> None:
+        """Append the ``[since, until)`` time bounds, in epoch seconds, in place.
+
+        Half-open on purpose: the log viewer lets an operator step through
+        adjacent windows, and a closed upper bound would show the row on the
+        boundary in both of them.
+        """
+        if since is not None:
+            clauses.append("ts >= ?")
+            params.append(float(since))
+        if until is not None:
+            clauses.append("ts < ?")
+            params.append(float(until))
+
     def query(
         self,
         *,
@@ -185,6 +208,8 @@ class RequestLog:
         origin: Optional[str] = None,
         search: Optional[str] = None,
         exclude_paths: Optional[List[str]] = None,
+        since: Optional[float] = None,
+        until: Optional[float] = None,
         limit: int = 200,
     ) -> List[Dict[str, Any]]:
         """Return the most recent matching rows, newest first, as dicts.
@@ -192,7 +217,9 @@ class RequestLog:
         ``source``/``kind``/``ip``/``origin`` are exact-match filters; ``search`` is a
         case-insensitive substring match against path, IP, and detail;
         ``exclude_paths`` drops rows whose path exactly equals any of the given
-        paths (used to hide high-frequency dashboard polling from the view).
+        paths (used to hide high-frequency dashboard polling from the view);
+        ``since``/``until`` are epoch seconds bounding the half-open window
+        ``[since, until)``.
         """
         clauses: List[str] = []
         params: List[Any] = []
@@ -216,6 +243,7 @@ class RequestLog:
             placeholders = ", ".join("?" for _ in exclude_paths)
             clauses.append(f"(path IS NULL OR path NOT IN ({placeholders}))")
             params.extend(exclude_paths)
+        self._window_clauses(clauses, params, since, until)
         where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
         sql = f"SELECT {', '.join(FIELDS)} FROM access_log{where} ORDER BY id DESC LIMIT ?"
         params.append(max(1, int(limit)))
@@ -228,6 +256,8 @@ class RequestLog:
         self,
         *,
         exclude_paths: Optional[List[str]] = None,
+        since: Optional[float] = None,
+        until: Optional[float] = None,
         limit: int = 200,
     ) -> List[Dict[str, Any]]:
         """Every distinct client IP in the log, busiest first.
@@ -235,7 +265,10 @@ class RequestLog:
         Each entry is ``{"ip", "count", "last_ts"}``. ``exclude_paths`` drops
         the same polling noise :meth:`query` hides, so an address that only ever
         polled the dashboard doesn't show up as a client when the viewer is
-        hiding polling. Rows with no IP (some socket events) are skipped.
+        hiding polling. ``since``/``until`` bound the same half-open window
+        :meth:`query` takes, so the counts describe what the viewer is showing
+        rather than all of history. Rows with no IP (some socket events) are
+        skipped.
         """
         clauses = ["ip IS NOT NULL", "ip != ''"]
         params: List[Any] = []
@@ -243,6 +276,7 @@ class RequestLog:
             placeholders = ", ".join("?" for _ in exclude_paths)
             clauses.append(f"(path IS NULL OR path NOT IN ({placeholders}))")
             params.extend(exclude_paths)
+        self._window_clauses(clauses, params, since, until)
         sql = (
             "SELECT ip, COUNT(*) AS n, MAX(ts) AS last_ts FROM access_log "
             f"WHERE {' AND '.join(clauses)} "
@@ -253,10 +287,18 @@ class RequestLog:
             rows = self._conn.execute(sql, params).fetchall()
         return [{"ip": row[0], "count": int(row[1]), "last_ts": float(row[2])} for row in rows]
 
-    def count(self) -> int:
-        """Total number of rows currently retained."""
+    def count(self, *, since: Optional[float] = None, until: Optional[float] = None) -> int:
+        """Number of rows currently retained, optionally within ``[since, until)``.
+
+        With neither bound this is the total, which is what the viewer's
+        "showing N of M" line reports when no date filter is active.
+        """
+        clauses: List[str] = []
+        params: List[Any] = []
+        self._window_clauses(clauses, params, since, until)
+        where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
         with self._lock:
-            cursor = self._conn.execute("SELECT COUNT(*) FROM access_log")
+            cursor = self._conn.execute(f"SELECT COUNT(*) FROM access_log{where}", params)
             return int(cursor.fetchone()[0])
 
     def stats(self, window_seconds: float, *, now: Optional[float] = None) -> Dict[str, Any]:

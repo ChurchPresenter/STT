@@ -293,6 +293,59 @@ def test_distinct_ips_respects_limit(log):
     assert len(log.distinct_ips(limit=4)) == 4
 
 
+class TestTimeWindow:
+    """The log viewer's date filter — a half-open [since, until) window on ts."""
+
+    @staticmethod
+    def _seed(log):
+        for i in range(6):
+            log.log(source=SOURCE_WEB, kind=KIND_HTTP, path=f"/{i}", ts=float(i) * 100)
+
+    def test_since_keeps_only_rows_at_or_after_the_bound(self, log):
+        self._seed(log)
+        assert [r["path"] for r in log.query(since=300.0)] == ["/5", "/4", "/3"]
+
+    def test_until_is_exclusive_so_adjacent_windows_do_not_overlap(self, log):
+        self._seed(log)
+        earlier = {r["path"] for r in log.query(until=300.0)}
+        later = {r["path"] for r in log.query(since=300.0)}
+        assert earlier == {"/0", "/1", "/2"}
+        assert not earlier & later
+        assert earlier | later == {f"/{i}" for i in range(6)}
+
+    def test_both_bounds_select_the_window_newest_first(self, log):
+        self._seed(log)
+        assert [r["path"] for r in log.query(since=100.0, until=400.0)] == ["/3", "/2", "/1"]
+
+    def test_window_composes_with_the_other_filters(self, log):
+        log.log(source=SOURCE_API, kind=KIND_HTTP, path="/api/config", ts=50.0)
+        log.log(source=SOURCE_API, kind=KIND_HTTP, path="/api/config", ts=250.0)
+        log.log(source=SOURCE_WEB, kind=KIND_HTTP, path="/", ts=250.0)
+        rows = log.query(source=SOURCE_API, since=100.0)
+        assert [(r["path"], r["ts"]) for r in rows] == [("/api/config", 250.0)]
+
+    def test_no_bounds_returns_everything(self, log):
+        self._seed(log)
+        assert len(log.query()) == 6
+
+    def test_distinct_ips_counts_only_in_window_traffic(self, log):
+        # An address that was only ever seen before the window is not a client
+        # of it, and one seen on both sides counts only its in-window rows.
+        log.log(source=SOURCE_WEB, kind=KIND_HTTP, path="/", ip="10.0.0.9", ts=10.0)
+        log.log(source=SOURCE_WEB, kind=KIND_HTTP, path="/", ip="10.0.0.1", ts=10.0)
+        log.log(source=SOURCE_WEB, kind=KIND_HTTP, path="/", ip="10.0.0.1", ts=500.0)
+        rows = log.distinct_ips(since=100.0)
+        assert [r["ip"] for r in rows] == ["10.0.0.1"]
+        assert rows[0]["count"] == 1
+
+    def test_count_matches_the_window_and_is_unchanged_without_bounds(self, log):
+        self._seed(log)
+        assert log.count() == 6
+        assert log.count(since=300.0) == 3
+        assert log.count(until=300.0) == 3
+        assert log.count(since=100.0, until=400.0) == 3
+
+
 class TestOriginColumn:
     def test_origin_is_stored_and_returned(self, tmp_path):
         log = RequestLog(str(tmp_path / "a.db"))

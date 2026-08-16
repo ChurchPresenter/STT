@@ -18,7 +18,8 @@
             gap: 10px;
         }
         .logs-toolbar select,
-        .logs-toolbar input[type="text"] {
+        .logs-toolbar input[type="text"],
+        .logs-toolbar input[type="datetime-local"] {
             padding: 7px 10px;
             background: var(--bg-input);
             border: 1px solid var(--border);
@@ -27,6 +28,8 @@
             font-size: 0.85em;
         }
         .logs-toolbar input[type="text"] { flex: 1; min-width: 160px; }
+        .logs-toolbar.custom-range { display: none; margin-top: -6px; }
+        .logs-toolbar.custom-range.visible { display: flex; }
         .logs-toolbar label {
             display: inline-flex;
             align-items: center;
@@ -130,6 +133,15 @@
             <option value="lan">Local network</option>
             <option value="tunnel">Cloudflare tunnel</option>
         </select>
+        <select id="filter-range">
+            <option value="">Any time</option>
+            <option value="3600">Last hour</option>
+            <option value="today">Today</option>
+            <option value="86400">Last 24 hours</option>
+            <option value="604800">Last 7 days</option>
+            <option value="2592000">Last 30 days</option>
+            <option value="custom">Custom range…</option>
+        </select>
         <select id="filter-limit">
             <option value="200">200 rows</option>
             <option value="500">500 rows</option>
@@ -143,6 +155,11 @@
     <button class="logs-btn" id="refresh-btn">Refresh</button>
     <button class="logs-btn danger" id="clear-btn">Clear</button>
     <span class="logs-meta" id="logs-meta"></span>
+</div>
+
+<div class="logs-toolbar custom-range" id="custom-range">
+    <label>From <input type="datetime-local" id="range-from"></label>
+    <label>To <input type="datetime-local" id="range-to"></label>
 </div>
 
 <div class="logs-table-wrap">
@@ -163,7 +180,7 @@
             </tr>
         </thead>
         <tbody id="logs-body">
-            <tr><td colspan="10" class="logs-empty">Loading…</td></tr>
+            <tr><td colspan="11" class="logs-empty">Loading…</td></tr>
         </tbody>
     </table>
 </div>
@@ -218,12 +235,36 @@
         </tr>`;
     }
 
+    // The selected time window as epoch seconds, recomputed on every refresh so
+    // a rolling preset keeps rolling while auto-refresh is on. datetime-local
+    // parses in the browser's own zone, which is the zone the Time column is
+    // rendered in, so what the operator types matches what they read.
+    function applyRange(params) {
+        const range = $("filter-range").value;
+        if (!range) return;
+        if (range === "custom") {
+            const from = $("range-from").value;
+            const to = $("range-to").value;
+            if (from) params.set("since", new Date(from).getTime() / 1000);
+            if (to) params.set("until", new Date(to).getTime() / 1000);
+            return;
+        }
+        if (range === "today") {
+            const midnight = new Date();
+            midnight.setHours(0, 0, 0, 0);
+            params.set("since", midnight.getTime() / 1000);
+            return;
+        }
+        params.set("since", Date.now() / 1000 - Number(range));
+    }
+
     // Repopulate the IP filter, keeping whatever the operator has selected —
     // even if that address has aged out of the log, so the view doesn't
     // silently jump back to "All IPs" mid-investigation.
     async function loadIps() {
         const params = new URLSearchParams();
         if ($("hide-polling").checked) params.set("hide_polling", "1");
+        applyRange(params);
         let rows = [];
         try {
             const res = await pollFetch("/api/logs/ips?" + params.toString());
@@ -261,17 +302,18 @@
         if (origin) params.set("origin", origin);
         if (search) params.set("search", search);
         if ($("hide-polling").checked) params.set("hide_polling", "1");
+        applyRange(params);
         params.set("limit", limit);
         try {
             const res = await pollFetch("/api/logs?" + params.toString());
             const data = await res.json();
             const body = $("logs-body");
             if (!data.success) {
-                body.innerHTML = `<tr><td colspan="10" class="logs-empty">${esc(data.error || "Error")}</td></tr>`;
+                body.innerHTML = `<tr><td colspan="11" class="logs-empty">${esc(data.error || "Error")}</td></tr>`;
                 return;
             }
             if (!data.entries.length) {
-                body.innerHTML = `<tr><td colspan="10" class="logs-empty">No matching log entries.</td></tr>`;
+                body.innerHTML = `<tr><td colspan="11" class="logs-empty">No matching log entries.</td></tr>`;
             } else {
                 body.innerHTML = data.entries.map(row).join("");
             }
@@ -280,7 +322,7 @@
                 `showing ${data.entries.length} of ${data.total} total${enabled}`;
         } catch (err) {
             $("logs-body").innerHTML =
-                `<tr><td colspan="10" class="logs-empty">Failed to load logs.</td></tr>`;
+                `<tr><td colspan="11" class="logs-empty">Failed to load logs.</td></tr>`;
         }
     }
 
@@ -317,8 +359,16 @@
     ["filter-source", "filter-kind", "filter-ip", "filter-origin", "filter-limit"].forEach(
         (id) => $(id).addEventListener("change", load));
     // Hiding polling changes which addresses count as clients, so the IP list
-    // is rebuilt with it.
+    // is rebuilt with it. Narrowing the time window does the same.
     $("hide-polling").addEventListener("change", refresh);
+    $("filter-range").addEventListener("change", () => {
+        const custom = $("filter-range").value === "custom";
+        $("custom-range").classList.toggle("visible", custom);
+        // An empty custom range is "any time", which is a useful thing to see
+        // while the operator is still filling the two boxes in.
+        refresh();
+    });
+    ["range-from", "range-to"].forEach((id) => $(id).addEventListener("change", refresh));
     let searchTimer = null;
     $("filter-search").addEventListener("input", () => {
         if (searchTimer) clearTimeout(searchTimer);

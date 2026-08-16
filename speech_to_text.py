@@ -5758,12 +5758,30 @@ POLLING_LOG_PATHS = [
 ]
 
 
+def _log_window_args():
+    """Parse ?since=/?until= (epoch seconds) off the current request.
+
+    Returns ``(since, until)``, either of which is None when the argument is
+    absent or unparseable — a malformed bound widens the view rather than
+    failing the request, matching how ?limit= is handled.
+    """
+    bounds = []
+    for name in ("since", "until"):
+        raw = request.args.get(name)
+        try:
+            bounds.append(float(raw) if raw not in (None, "") else None)
+        except (TypeError, ValueError):
+            bounds.append(None)
+    return bounds[0], bounds[1]
+
+
 @app.route("/api/logs", methods=["GET"])
 def api_logs():
     """Return recent access-log entries (newest first), with optional filters:
     ?source=web|api|socket, ?kind=http|connection|action, ?ip=<exact address>,
     ?origin=local|lan|tunnel, ?search=<substr>, ?hide_polling=1 (drop
-    high-frequency dashboard polling), ?limit=<n>. Each entry carries the
+    high-frequency dashboard polling), ?since=/?until= (epoch seconds bounding
+    the half-open window [since, until)), ?limit=<n>. Each entry carries the
     reverse-DNS ``hostname`` for its IP when one is already cached (see
     /api/logs/ips)."""
     if not check_ip_whitelist():
@@ -5775,6 +5793,7 @@ def api_logs():
     except (TypeError, ValueError):
         limit = 200
     limit = max(1, min(limit, 2000))
+    since, until = _log_window_args()
     try:
         hide_polling = request.args.get("hide_polling") in ("1", "true", "yes")
         entries = request_logger.query(
@@ -5784,6 +5803,8 @@ def api_logs():
             origin=(request.args.get("origin") or None),
             search=(request.args.get("search") or None),
             exclude_paths=POLLING_LOG_PATHS if hide_polling else None,
+            since=since,
+            until=until,
             limit=limit,
         )
         # Reverse-DNS only for addresses on our own network. Resolving a tunnel
@@ -5798,7 +5819,7 @@ def api_logs():
         return jsonify({
             "success": True,
             "entries": entries,
-            "total": request_logger.count(),
+            "total": request_logger.count(since=since, until=until),
             "enabled": _access_log_enabled(),
         })
     except Exception as e:
@@ -5813,15 +5834,19 @@ def api_logs_ips():
     ``{ip, count, last_ts, hostname}`` — the hostname is the cached reverse-DNS
     name, or null while the (background) lookup is still running or when the
     address has no PTR record. ?hide_polling=1 excludes the same dashboard
-    polling paths the entry list hides."""
+    polling paths the entry list hides, and ?since=/?until= bound the same
+    window, so the counts describe what the viewer is showing."""
     if not check_ip_whitelist():
         return jsonify({"success": False, "error": "Access Denied"}), 403
     if request_logger is None:
         return jsonify({"success": True, "ips": []})
+    since, until = _log_window_args()
     try:
         hide_polling = request.args.get("hide_polling") in ("1", "true", "yes")
         rows = request_logger.distinct_ips(
             exclude_paths=POLLING_LOG_PATHS if hide_polling else None,
+            since=since,
+            until=until,
             limit=500,
         )
         names = hostname_cache.get_many([row["ip"] for row in rows])
