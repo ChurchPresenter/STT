@@ -145,6 +145,65 @@ class _FakeZip:
         self.dest = dest
 
 
+class TestSpawnFailures:
+    """A command that cannot be spawned at all.
+
+    Reported from a Windows install: CreateProcess on the system powershell.exe
+    returned [WinError 5] Access is denied (AppLocker/AV policy), and the
+    PermissionError escaped _run — so setup died on step 2/8 even though
+    _step_uv has a pure-Python fallback right below the PowerShell call.
+    """
+
+    def provisioner(self, monkeypatch, error):
+        p = watchdog.Provisioner.__new__(watchdog.Provisioner)
+        p._uv = None
+        p.logs = []
+        p.log = lambda msg: p.logs.append(str(msg))
+
+        def boom(*a, **kw):
+            raise error
+
+        monkeypatch.setattr(watchdog.subprocess, "Popen", boom)
+        monkeypatch.setattr(watchdog, "_which", lambda name: None)
+        return p
+
+    @pytest.mark.parametrize("error", [
+        PermissionError(13, "Access is denied"),
+        FileNotFoundError(2, "No such file"),
+        OSError(8, "Exec format error"),
+    ])
+    def test_an_unspawnable_command_is_a_failure_not_a_crash(self, monkeypatch, error):
+        p = self.provisioner(monkeypatch, error)
+        assert p._run(["powershell", "-Command", "x"], check=False) == 1
+
+    def test_it_is_reported_as_a_provision_error_when_checked(self, monkeypatch):
+        p = self.provisioner(monkeypatch, PermissionError(13, "Access is denied"))
+        with pytest.raises(watchdog.ProvisionError, match="could not be started"):
+            p._run(["powershell", "-Command", "x"])
+
+    def test_a_missing_command_still_says_not_found(self, monkeypatch):
+        p = self.provisioner(monkeypatch, FileNotFoundError(2, "No such file"))
+        with pytest.raises(watchdog.ProvisionError, match="not found"):
+            p._run(["git", "status"])
+
+    def test_a_blocked_powershell_still_reaches_the_zip_fallback(self, monkeypatch):
+        """The whole point: policy blocking PowerShell must not end the install."""
+        p = self.provisioner(monkeypatch, PermissionError(13, "Access is denied"))
+        p.downloaded = []
+        p._download_file = lambda url, dest: p.downloaded.append(url)
+        monkeypatch.setattr(watchdog, "IS_WINDOWS", True)
+        monkeypatch.setattr(watchdog.zipfile, "ZipFile", _FakeZip)
+        monkeypatch.setattr(watchdog.os, "remove", lambda path: None)
+
+        found = [None, None, "C:/uv.exe", "C:/uv.exe"]
+        monkeypatch.setattr(watchdog, "_which",
+                            lambda name: found.pop(0) if len(found) > 1 else found[0])
+
+        p._step_uv()
+        assert any(".zip" in url for url in p.downloaded)
+        assert p._uv == "C:/uv.exe"
+
+
 def test_provision_error_is_an_exception():
     """Callers catch it by type to distinguish setup failure from a crash."""
     assert issubclass(watchdog.ProvisionError, Exception)

@@ -918,9 +918,16 @@ class Provisioner:
                 text=True, encoding="utf-8", errors="replace", bufsize=1, env=env,
                 creationflags=_CREATE_NO_WINDOW,
             )
-        except FileNotFoundError as e:
+        except OSError as e:
+            # FileNotFoundError means the tool is absent; PermissionError
+            # ([WinError 5] Access is denied) means AppLocker/AV/EDR refused to
+            # spawn it — seen in the field on powershell.exe under
+            # C:\Program Files\STT. Both are a failed command, not a crash: a
+            # check=False caller still gets to try its fallback.
+            reason = "not found" if isinstance(e, FileNotFoundError) else "could not be started"
             if check:
-                raise ProvisionError(f"{cmd[0]} not found: {e}") from e
+                raise ProvisionError(f"{cmd[0]} {reason}: {e}") from e
+            self.log(f"  [WARN] {cmd[0]} {reason}: {e}")
             return 1
         tail = []
         assert proc.stdout is not None  # stdout=PIPE above
