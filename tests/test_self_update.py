@@ -334,7 +334,9 @@ def test_is_dev_checkout_false_for_a_clean_tree(repos):
 
 def test_is_dev_checkout_true_for_modified_tracked_file(repos):
     _, _, clone = repos
-    next(clone.glob("*")).write_text("local edit\n", encoding="utf-8")
+    # The one tracked file the fixture commits — glob("*") also yields .git,
+    # whose order is filesystem-dependent (it came first on the CI runners).
+    (clone / "file.txt").write_text("local edit\n", encoding="utf-8")
     assert self_update.is_dev_checkout(str(clone)) is True
 
 
