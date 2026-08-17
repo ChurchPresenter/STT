@@ -725,7 +725,14 @@ def _git_usable():
     """True when a real git is on PATH. On macOS without the Command Line
     Tools, /usr/bin/git is an xcode-select shim that pops Apple's GUI install
     dialog and exits 1 on first use — treat that shim as no git so provisioning
-    falls back to the archive download instead of failing."""
+    falls back to the archive download instead of failing.
+
+    Windows gets the same treatment for a different shim: an App Execution
+    Alias under %LOCALAPPDATA%\\Microsoft\\WindowsApps answers PATH lookups
+    with a 0-byte reparse point, and spawning it raises OSError [WinError 1920]
+    when no Store app backs it. Being on PATH proves nothing there, so run git
+    and see. Deliberately uncached — _step_git re-checks after installing git
+    and has to observe the change."""
     git = _which("git")
     if not git:
         return False
@@ -733,6 +740,12 @@ def _git_usable():
         try:
             return subprocess.run(["xcode-select", "-p"], capture_output=True).returncode == 0
         except OSError:
+            return False
+    if IS_WINDOWS:
+        try:
+            return subprocess.run([git, "--version"], capture_output=True, timeout=30,
+                                  creationflags=_CREATE_NO_WINDOW).returncode == 0
+        except (OSError, subprocess.SubprocessError):
             return False
     return True
 
