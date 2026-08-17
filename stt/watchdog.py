@@ -1278,9 +1278,18 @@ class Provisioner:
             if os.path.isdir(SOURCE_DIR) and os.listdir(SOURCE_DIR):
                 # Non-git leftovers — clear so clone can proceed (DATA is separate).
                 shutil.rmtree(SOURCE_DIR, ignore_errors=True)
-            self._run(["git", "clone", "--depth", "1", GITHUB_REPO_URL, SOURCE_DIR],
-                      desc=f"git clone {GITHUB_REPO_URL}")
-            self._pin_latest_release()
+            try:
+                self._run(["git", "clone", "--depth", "1", GITHUB_REPO_URL, SOURCE_DIR],
+                          desc=f"git clone {GITHUB_REPO_URL}")
+                self._pin_latest_release()
+            except ProvisionError as e:
+                # git passed _git_usable() and still could not clone — a proxy
+                # blocking the git protocol, a filtered github.com, a partial
+                # install. The archive path already exists for the git-less
+                # case and needs only HTTPS, so use it rather than ending setup.
+                self.log(f"  [WARN] git clone failed ({e}); falling back to the source archive")
+                shutil.rmtree(SOURCE_DIR, ignore_errors=True)  # partial clone
+                self._fetch_source_zipball()
         else:
             self._fetch_source_zipball()
         if not os.path.isfile(STT_SCRIPT):
@@ -1300,8 +1309,16 @@ class Provisioner:
         self._run(["git", "-C", SOURCE_DIR, "fetch", "--depth", "1", "--force",
                    "origin", "+refs/tags/*:refs/tags/*"],
                   desc="git fetch --tags", check=False)
-        r = subprocess.run([_which("git") or "git", "-C", SOURCE_DIR, "tag", "--list"],
-                           capture_output=True, text=True, creationflags=_CREATE_NO_WINDOW)
+        try:
+            r = subprocess.run([_which("git") or "git", "-C", SOURCE_DIR, "tag", "--list"],
+                               capture_output=True, text=True, timeout=120,
+                               creationflags=_CREATE_NO_WINDOW)
+        except (OSError, subprocess.SubprocessError) as e:
+            # This one call bypasses _run, so a git that cannot be spawned here
+            # would escape as a bare OSError and crash setup. Staying on the
+            # default branch is the same answer as "no tags" below.
+            self.log(f"  [WARN] could not list tags ({e}) — staying on default branch")
+            return
         tags = [t.strip() for t in r.stdout.splitlines() if t.strip()] if r.returncode == 0 else []
         if not tags:
             self.log("  no release tags — staying on default branch")

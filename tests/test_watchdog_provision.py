@@ -217,6 +217,64 @@ def test_the_module_exposes_what_these_tests_patch():
     assert isinstance(watchdog.UV_PYTHON_VERSION, str)
 
 
+class TestSourceFallsBackToTheArchive:
+    """git passed the usability probe and still could not clone.
+
+    A proxy that blocks the git protocol, a filtered github.com, a half-installed
+    git: the archive path already exists for the git-less case and needs only
+    HTTPS, so setup must use it instead of ending on step 6/8.
+    """
+
+    def source(self, monkeypatch, tmp_path, *, clone_code):
+        p = make_provisioner(monkeypatch, which="/usr/bin/git",
+                             run_codes={("git",): clone_code})
+        src = tmp_path / "app"
+        monkeypatch.setattr(watchdog, "SOURCE_DIR", str(src))
+        monkeypatch.setattr(watchdog, "STT_SCRIPT", str(src / "speech_to_text.py"))
+        monkeypatch.setattr(watchdog, "_git_usable", lambda: True)
+        monkeypatch.setattr(p, "_pin_latest_release", lambda: None)
+
+        # A clone that "succeeds" leaves a checkout behind; _step_source wipes
+        # non-git leftovers before cloning, so the file has to appear here.
+        recorded_run = p._run
+
+        def run_with_clone_effect(cmd, **kw):
+            code = recorded_run(cmd, **kw)
+            if "clone" in cmd:
+                src.mkdir(parents=True, exist_ok=True)
+                (src / "speech_to_text.py").write_text("# app\n", encoding="utf-8")
+            return code
+
+        p._run = run_with_clone_effect
+
+        def fake_zipball():
+            p.zipball = True
+            src.mkdir(parents=True, exist_ok=True)
+            (src / "speech_to_text.py").write_text("# app\n", encoding="utf-8")
+
+        p.zipball = False
+        monkeypatch.setattr(p, "_fetch_source_zipball", fake_zipball)
+        return p
+
+    def test_a_failed_clone_fetches_the_archive(self, monkeypatch, tmp_path):
+        p = self.source(monkeypatch, tmp_path, clone_code=128)
+        p._step_source()
+        assert p.zipball is True
+        assert any("falling back to the source archive" in m for m in p.logs)
+
+    def test_a_successful_clone_does_not(self, monkeypatch, tmp_path):
+        p = self.source(monkeypatch, tmp_path, clone_code=0)
+        p._step_source()
+        assert p.zipball is False, "the archive is a fallback, not a second download"
+
+    def test_an_archive_that_produces_nothing_still_fails(self, monkeypatch, tmp_path):
+        """The fallback must not turn a broken install into a silent success."""
+        p = self.source(monkeypatch, tmp_path, clone_code=128)
+        monkeypatch.setattr(p, "_fetch_source_zipball", lambda: None)
+        with pytest.raises(watchdog.ProvisionError, match=r"speech_to_text\.py"):
+            p._step_source()
+
+
 class TestPinLatestRelease:
     """Which release tag a fresh install checks out.
 
@@ -269,6 +327,18 @@ class TestPinLatestRelease:
         p, resets, _ = self.pin(monkeypatch, [], on_branch=())
         assert resets == []
         assert any("no release tags" in m for m in p.logs)
+
+    def test_a_git_that_cannot_be_spawned_stays_on_the_branch(self, monkeypatch):
+        """This call bypasses _run, so an OSError here used to crash setup."""
+        p = make_provisioner(monkeypatch, which="/usr/bin/git")
+
+        def raise_oserror(cmd, **kw):
+            raise OSError(22, "The file cannot be accessed by the system")
+
+        monkeypatch.setattr(watchdog.subprocess, "run", raise_oserror)
+        p._pin_latest_release()
+        assert [c for c in p.runs if "reset" in c] == []
+        assert any("staying on default branch" in m for m in p.logs)
 
     def test_a_shallow_clone_trusts_the_tag(self, monkeypatch):
         # Fails open: a shallow clone has no history to walk, and refusing every
