@@ -943,15 +943,41 @@ class Provisioner:
             self.log(f"  [WARN] {cmd[0]} {reason}: {e}")
             return 1
         tail = []
-        assert proc.stdout is not None  # stdout=PIPE above
-        for line in proc.stdout:
-            line = line.rstrip()
-            if line and not _is_progress_noise(line):
-                self.log("    " + line)
-                tail.append(line)
-                if len(tail) > 5:
-                    tail.pop(0)
-        code = proc.wait(timeout=timeout)
+        # The read loop below blocks on the pipe, so proc.wait(timeout=...)
+        # alone never fires for a command that hangs without closing stdout
+        # (an installer waiting on a prompt nobody can answer). Kill it from a
+        # timer instead, which ends the read loop and lands on the normal
+        # nonzero-exit path with a message that says what happened.
+        timed_out = threading.Event()
+
+        def _kill_hung():
+            timed_out.set()
+            try:
+                proc.kill()
+            except OSError:
+                pass  # already gone
+
+        timer = threading.Timer(timeout, _kill_hung)
+        timer.daemon = True
+        timer.start()
+        try:
+            assert proc.stdout is not None  # stdout=PIPE above
+            for line in proc.stdout:
+                line = line.rstrip()
+                if line and not _is_progress_noise(line):
+                    self.log("    " + line)
+                    tail.append(line)
+                    if len(tail) > 5:
+                        tail.pop(0)
+            code = proc.wait()
+        finally:
+            timer.cancel()
+        if timed_out.is_set():
+            msg = f"timed out after {timeout}s: {' '.join(str(c) for c in cmd)}"
+            if check:
+                raise ProvisionError(msg)
+            self.log(f"  [WARN] {msg}")
+            return 1
         if check and code != 0:
             # Include the last output lines so remote crash reports carry the
             # actual error, not just the exit code.

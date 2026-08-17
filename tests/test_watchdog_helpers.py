@@ -2,6 +2,9 @@
 log rotation, and the one-time config layout migration."""
 
 import os
+import threading
+
+import pytest
 
 from stt import watchdog
 
@@ -537,6 +540,60 @@ class TestRunResolvesAugmentedPath:
         p = watchdog.Provisioner(log=lambda m: None)
         p._run(["nonexistent-tool"], check=False)
         assert seen["cmd"][0] == "nonexistent-tool"
+
+
+class TestRunTimeout:
+    """A provisioning command that hangs must end the step, not the installer.
+
+    The read loop blocks on the child's pipe, so a command that never closes
+    stdout (an installer waiting on a prompt nobody can answer) would sit there
+    for the whole timeout budget — up to 7200s for dependency installs — and
+    then escape as a TimeoutExpired crash rather than a "Setup failed" line.
+    """
+
+    class FakeProc:
+        """Blocks in the read loop until something kills it."""
+
+        def __init__(self):
+            self.killed = threading.Event()
+            self.stdout = self
+
+        def __iter__(self):
+            return self
+
+        def __next__(self):
+            # Released by kill(); the bound only keeps a regression from
+            # hanging the suite forever.
+            self.killed.wait(30)
+            raise StopIteration
+
+        def kill(self):
+            self.killed.set()
+
+        def wait(self, timeout=None):
+            return -9
+
+    def _hang(self, monkeypatch):
+        proc = self.FakeProc()
+        monkeypatch.setattr(watchdog.subprocess, "Popen", lambda cmd, **kw: proc)
+        monkeypatch.setattr(watchdog, "_which", lambda name: None)
+        return proc
+
+    def test_a_hung_command_is_killed_and_reported(self, monkeypatch):
+        proc = self._hang(monkeypatch)
+        p = watchdog.Provisioner(log=lambda m: None)
+        with pytest.raises(watchdog.ProvisionError, match="timed out"):
+            p._run(["winget", "install", "--id", "Git.Git"], timeout=0.01)
+        assert proc.killed.is_set(), "the child must not be left running"
+
+    def test_an_unchecked_hung_command_returns_failure(self, monkeypatch):
+        """check=False callers own their fallback — give them the failure code."""
+        self._hang(monkeypatch)
+        logs = []
+        p = watchdog.Provisioner(log=logs.append)
+        assert p._run(["winget", "install", "--id", "Gyan.FFmpeg"],
+                      timeout=0.01, check=False) == 1
+        assert any("timed out" in m for m in logs)
 
 
 class TestRequirementsNeedGit:
