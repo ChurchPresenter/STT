@@ -204,6 +204,57 @@ class TestSpawnFailures:
         assert p._uv == "C:/uv.exe"
 
 
+class TestBrokenWingetAlias:
+    r"""winget resolves on PATH and cannot be spawned.
+
+    Reported twice from one Windows install: %LOCALAPPDATA%\Microsoft\WindowsApps
+    holds a 0-byte App Execution Alias that answers the PATH lookup, and
+    CreateProcess on it raises OSError [WinError 1920] when no Store app backs
+    it. The alias cannot be told apart from a working one by inspection (both
+    are 0-byte reparse points), so the spawn is the probe — and each step has to
+    survive it and take its portable fallback.
+    """
+
+    ALIAS_ERROR = OSError(22, "The file cannot be accessed by the system")
+
+    def provisioner(self, monkeypatch, *, present):
+        """`present` decides what _which answers; winget is always resolvable."""
+        p = watchdog.Provisioner.__new__(watchdog.Provisioner)
+        p.logs = []
+        p.log = lambda msg: p.logs.append(str(msg))
+
+        def boom(*a, **kw):
+            raise self.ALIAS_ERROR
+
+        monkeypatch.setattr(watchdog.subprocess, "Popen", boom)
+        monkeypatch.setattr(watchdog, "IS_WINDOWS", True)
+        monkeypatch.setattr(watchdog, "_which", lambda name: present.get(name))
+        return p
+
+    def test_git_falls_back_to_mingit(self, monkeypatch):
+        alias = r"C:\Users\User\AppData\Local\Microsoft\WindowsApps\winget.EXE"
+        p = self.provisioner(monkeypatch, present={"winget": alias})
+        monkeypatch.setattr(watchdog, "_git_usable", lambda: False)
+        p.mingit = False
+        monkeypatch.setattr(p, "_install_mingit", lambda: setattr(p, "mingit", True))
+
+        p._step_git()
+
+        assert p.mingit is True, "the portable git is the whole point of the fallback"
+        assert any("could not be started" in m for m in p.logs)
+
+    def test_ffmpeg_falls_back_to_the_static_build(self, monkeypatch):
+        alias = r"C:\Users\User\AppData\Local\Microsoft\WindowsApps\winget.EXE"
+        p = self.provisioner(monkeypatch, present={"winget": alias})
+        p.static = False
+        monkeypatch.setattr(p, "_install_static_ffmpeg", lambda: setattr(p, "static", True))
+
+        p._step_ffmpeg()
+
+        assert p.static is True
+        assert any("could not be started" in m for m in p.logs)
+
+
 def test_provision_error_is_an_exception():
     """Callers catch it by type to distinguish setup failure from a crash."""
     assert issubclass(watchdog.ProvisionError, Exception)
