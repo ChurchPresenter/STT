@@ -300,6 +300,52 @@ def test_failed_sync_leaves_no_marker_so_it_retries(tmp_path, monkeypatch):
     assert not (tmp_path / ".venv" / ".requirements-synced").exists()
 
 
+@pytest.mark.skipif(os.geteuid() == 0 if hasattr(os, "geteuid") else False,
+                    reason="root ignores file permissions")
+def test_unwritable_marker_is_replaced(tmp_path, synced_calls):
+    """A marker left behind by a sudo-run install must not wedge the sync.
+
+    Real case: .venv/.requirements-synced owned by root while the service runs as
+    a normal user, so opening it for writing raised EACCES and every update check
+    re-ran the full dependency install. Read-only mode stands in for foreign
+    ownership: both make open(..., "w") fail while a rename into the directory
+    still succeeds.
+    """
+    (tmp_path / "requirements.txt").write_text("flask\n")
+    (tmp_path / ".venv").mkdir()
+    marker = tmp_path / ".venv" / ".requirements-synced"
+    marker.write_text("stalehash\n")
+    marker.chmod(0o444)
+
+    self_update._sync_deps_if_needed(str(tmp_path))
+
+    assert len(synced_calls) == 1
+    assert marker.read_text(encoding="utf-8").strip() == self_update._requirements_hash(str(tmp_path))
+
+    self_update._sync_deps_if_needed(str(tmp_path))
+    assert len(synced_calls) == 1  # healed: no second sync
+
+
+@pytest.mark.skipif(os.geteuid() == 0 if hasattr(os, "geteuid") else False,
+                    reason="root ignores directory permissions")
+def test_marker_write_failure_is_logged_not_raised(tmp_path, synced_calls, caplog):
+    """An unwritable .venv degrades to a warning, never an exception."""
+    (tmp_path / "requirements.txt").write_text("flask\n")
+    venv = tmp_path / ".venv"
+    venv.mkdir()
+    venv.chmod(0o500)  # readable/traversable, but nothing can be created in it
+    try:
+        with caplog.at_level(logging.WARNING, logger=self_update.log.name):
+            self_update._sync_deps_if_needed(str(tmp_path))
+    finally:
+        venv.chmod(0o700)
+
+    assert len(synced_calls) == 1
+    assert "could not write sync marker" in caplog.text
+    assert not (venv / ".requirements-synced").exists()
+    assert list(venv.iterdir()) == []  # no temp file left behind
+
+
 # --- git_describe ------------------------------------------------------------
 
 

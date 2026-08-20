@@ -114,6 +114,32 @@ def _sync_marker_path(repo_dir: str) -> str:
     return os.path.join(repo_dir, ".venv", ".requirements-synced")
 
 
+def _write_marker(marker: str, text: str) -> None:
+    """Write *text* to *marker* via a temp file in the same directory + os.replace.
+
+    A plain ``open(marker, "w")`` fails with EACCES when the existing marker is
+    owned by another user — which is exactly what an install or update once run
+    under sudo leaves behind. A rename is governed by the *directory's*
+    permissions, not the target file's, so this heals that box instead of
+    re-running the full dependency sync on every update check forever.
+
+    Also makes the write atomic: a crash mid-write can no longer leave a
+    truncated hash that silently forces a resync.
+    """
+    fd, tmp = tempfile.mkstemp(prefix=".requirements-synced.", dir=os.path.dirname(marker))
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(text)
+        os.chmod(tmp, 0o644)  # mkstemp is 0600; the marker is not a secret
+        os.replace(tmp, marker)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
 def find_uv(repo_dir: str) -> str:
     """Absolute path to the ``uv`` executable, or '' if it cannot be found.
 
@@ -261,10 +287,10 @@ def _sync_deps_if_needed(repo_dir: str) -> None:
         pass  # no marker yet -> treat as out of sync
     if _sync_deps(repo_dir) and os.path.isdir(os.path.dirname(marker)):
         try:
-            with open(marker, "w", encoding="utf-8") as f:
-                f.write(current + "\n")
+            _write_marker(marker, current + "\n")
         except OSError as e:
-            log.warning("[self-update] could not write sync marker: %s", e)
+            log.warning("[self-update] could not write sync marker: %s "
+                        "— every update check will re-run the dependency sync", e)
 
 
 def _reset_to_upstream(repo_dir: str, before_sha: str) -> Tuple[bool, str]:

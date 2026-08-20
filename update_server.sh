@@ -71,8 +71,16 @@ sync_deps() {
 
     echo "[UPDATE] requirements.txt changed — syncing dependencies..."
     if "$uv_bin" pip install --python "$SCRIPT_DIR/.venv/bin/python3" -r "$req"; then
-        echo "$sha" > "$marker" 2>/dev/null || true
-        echo -e "${GREEN}[UPDATE]${NC} Dependencies synced."
+        # Temp file + mv, not a direct redirect: a marker left behind by a
+        # sudo-run install is owned by root and `>` fails with EACCES, which
+        # would re-sync every deps on every update forever. mv only needs the
+        # directory to be writable. Matches stt/self_update.py:_write_marker.
+        if echo "$sha" > "$marker.tmp.$$" 2>/dev/null && mv -f "$marker.tmp.$$" "$marker" 2>/dev/null; then
+            echo -e "${GREEN}[UPDATE]${NC} Dependencies synced."
+        else
+            rm -f "$marker.tmp.$$" 2>/dev/null || true
+            echo -e "${YELLOW}[UPDATE]${NC} Dependencies synced, but the sync marker could not be written ($marker); the next update will sync again."
+        fi
     else
         echo -e "${YELLOW}[UPDATE]${NC} Dependency sync failed; restarting anyway (optional deps degrade gracefully)."
     fi
