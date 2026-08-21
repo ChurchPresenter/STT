@@ -16709,23 +16709,31 @@ def _sermon_model_label(llm_cfg):
     if kind == "local":
         return os.path.basename(detail) or "local"
     if kind == "peer":
-        return f"peer:{detail}"
+        # Without the scheme: it is the machine that matters, and that is the form already
+        # stored against every summary generated so far.
+        return "peer:" + detail.split("://", 1)[-1]
     if kind == "endpoint":
         return llm_cfg.get("model") or "endpoint"
     return ""
 
 
 def _sermon_peer_endpoint():
-    """The paired machine to ask for inference, or "" when this box is not offloading.
+    """The paired machine to ask for inference, as a URL that can actually be called.
+
+    Through _get_remote_endpoint_safe, which is what every other call to the peer uses: the
+    endpoint is stored the way an operator types it ("192.168.2.52:8080"), and that helper is
+    what adds the scheme and fills in a missing port. Reading remote["endpoint"] directly
+    produced a string requests refuses outright — translation worked over the identical
+    config only because it had never skipped this step.
 
     Offload is configured for captions, but the peer it names is the machine holding the
-    model — so it is also the answer to "who can summarise for me" on a box that has no
-    model of its own. That is what makes .62 work without configuring the same peer twice.
+    model — so it is also the answer to "who can summarise for me" on a box that has no model
+    of its own. That is what makes .62 work without configuring the same peer twice.
     """
     remote = (config.get("live_translation", {}) or {}).get("remote", {}) or {}
-    if not remote.get("enabled"):
+    if not (remote.get("enabled") and (remote.get("endpoint") or "").strip()):
         return ""
-    return (remote.get("endpoint") or "").strip()
+    return _get_remote_endpoint_safe() or ""
 
 
 def _sermon_llm_target(llm_cfg):
@@ -16753,9 +16761,15 @@ def _sermon_llm_target(llm_cfg):
     elif (llm_cfg.get("endpoint") or "").strip():
         return "endpoint", llm_cfg["endpoint"].strip()
 
-    peer = _sermon_peer_endpoint()
-    if peer:
-        return "peer", peer
+    remote = (config.get("live_translation", {}) or {}).get("remote", {}) or {}
+    if remote.get("enabled") and (remote.get("endpoint") or "").strip():
+        peer = _sermon_peer_endpoint()
+        if peer:
+            return "peer", peer
+        # Configured but unresolvable is a different complaint from unconfigured, and
+        # sends the operator to a different place.
+        return None, (f"The paired machine at {remote['endpoint']} could not be reached. "
+                      f"Check the offload endpoint in the translation settings.")
     return None, ("No LLM is configured. Set one in the translation settings "
                   "(a local GGUF, or an endpoint), or offload translation to a machine "
                   "that has one.")
@@ -16769,6 +16783,16 @@ def _sermon_llm_unavailable(llm_cfg):
 
 class _PeerBusy(Exception):
     """The paired machine is translating captions and declined the work for now."""
+
+
+class _SermonUnavailable(Exception):
+    """The call could not be made at all — as opposed to a model that replied with nothing.
+
+    The distinction is the whole point. Returning None for both meant the worker could not
+    tell a fatal condition from one weak chunk, so an unusable endpoint was reported as "the
+    model returned nothing for any part" after grinding through thirty chunks that never had
+    a chance.
+    """
 
 
 def _sermon_llm_generate(system_prompt, user_text, max_tokens, llm_cfg):
@@ -16802,8 +16826,8 @@ def _sermon_llm_generate(system_prompt, user_text, max_tokens, llm_cfg):
                 )
             return _llm_extract_text(out)
         except Exception as e:
-            print(f"[SERMON] generation failed ({type(e).__name__}: {e})")
-            return None
+            raise _SermonUnavailable(
+                f"the local model failed: {type(e).__name__}: {e}") from e
 
     if kind == "peer":
         # Through _peer_request so the bearer token and the 403 self-heal come for free —
@@ -16816,14 +16840,15 @@ def _sermon_llm_generate(system_prompt, user_text, max_tokens, llm_cfg):
             resp.raise_for_status()
             data = resp.json()
             if not data.get("success"):
-                print(f"[SERMON] peer refused: {data.get('error')}")
-                return None
+                raise _SermonUnavailable(
+                    f"the paired machine refused: {data.get('error') or 'no reason given'}")
             return data.get("text") or None
-        except _PeerBusy:
+        except (_PeerBusy, _SermonUnavailable):
             raise
         except Exception as e:
-            print(f"[SERMON] peer call failed ({type(e).__name__}: {e})")
-            return None
+            raise _SermonUnavailable(
+                f"could not reach the paired machine at {detail}: "
+                f"{type(e).__name__}: {e}") from e
 
     payload = _llm_chat_payload(llm_cfg.get("model") or "", user_text, system_prompt,
                                max_tokens=max_tokens, keep_alive=llm_cfg.get("keep_alive", -1))
@@ -16838,8 +16863,9 @@ def _sermon_llm_generate(system_prompt, user_text, max_tokens, llm_cfg):
         resp.raise_for_status()
         return _llm_extract_text(resp.json())
     except Exception as e:
-        print(f"[SERMON] endpoint call failed ({type(e).__name__}: {e})")
-        return None
+        raise _SermonUnavailable(
+            f"could not reach the LLM endpoint at {detail}: "
+            f"{type(e).__name__}: {e}") from e
 
 
 def _sermon_budget(llm_cfg, system_prompt, reply_tokens):
@@ -16900,6 +16926,8 @@ def _sermon_generate_waiting(system_prompt, user_text, max_tokens, llm_cfg,
             return None
         try:
             return _sermon_llm_generate(system_prompt, user_text, max_tokens, llm_cfg)
+        except _SermonUnavailable:
+            raise  # fatal for the whole sermon, not just this part
         except _PeerBusy:
             if attempt == 0:
                 print("[SERMON] peer is translating captions; waiting", flush=True)
@@ -17058,6 +17086,15 @@ def _sermon_summarize_one(db_path, fingerprint_value, is_live=True):
               generated_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
         print(f"[SERMON] {entry['label']}: {len(chunks)} parts, {len(chapters)} chapters, "
               f"{time.perf_counter() - started:.0f}s", flush=True)
+    except _SermonUnavailable as e:
+        # Fatal on the first part it hit, so it stops there rather than asking the remaining
+        # thirty and reporting the weaker "returned nothing" at the end of it.
+        print(f"[SERMON] {e}", flush=True)
+        try:
+            _sermon_mark_error(conn, fingerprint_value, str(e))
+            _sermon_emit(_sermon_load(conn, fingerprint_value) or {}, session_id)
+        except Exception:
+            pass
     except Exception as e:
         print(f"[SERMON] summary failed ({type(e).__name__}: {e})")
         try:

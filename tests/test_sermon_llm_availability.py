@@ -18,7 +18,7 @@ import pytest
 
 from conftest import extract_definitions
 
-OFFLOADED = {"remote": {"enabled": True, "endpoint": "http://192.168.2.52:8080/api/translate"}}
+OFFLOADED = {"remote": {"enabled": True, "endpoint": "http://192.168.2.52:8080"}}
 LOCAL_ONLY = {"remote": {"enabled": False, "endpoint": ""}}
 
 
@@ -32,6 +32,12 @@ def target_ns(live_translation=None, *, models_dir="/models", llama_installed=Tr
             "config": {"live_translation": live_translation or LOCAL_ONLY},
             "MODELS_DIR": models_dir,
             "local_llm_available": lambda: llama_installed,
+            # The real helper adds the scheme and fills in a missing port; the summariser
+            # must go through it rather than reading the raw config value.
+            "_get_remote_endpoint_safe": lambda: (
+                (lambda ep: ep if "://" in ep else "http://" + ep)(
+                    ((live_translation or LOCAL_ONLY).get("remote", {}) or {}).get("endpoint", "").strip())
+                or None),
             "_llm_local_model_path": lambda d, repo, name: os.path.join(
                 d, repo.replace("/", "--"), name),
         })
@@ -101,6 +107,22 @@ class TestPrecedence:
         kind, detail = target_for({"provider": "endpoint", "endpoint": ""}, OFFLOADED)
         assert kind == "peer" and detail == OFFLOADED["remote"]["endpoint"]
 
+    def test_a_bare_host_and_port_is_given_a_scheme(self):
+        """The shape .62 actually stores, and the one that broke.
+
+        requests refuses a URL with no scheme outright, so reading the config value directly
+        produced a call that could never be made. Every other peer call site goes through the
+        helper that fixes this.
+        """
+        bare = {"remote": {"enabled": True, "endpoint": "192.168.2.52:8080"}}
+        kind, detail = target_for({}, bare)
+        assert kind == "peer"
+        assert detail.startswith("http://"), detail
+
+    def test_the_label_keeps_the_readable_form(self):
+        bare = {"remote": {"enabled": True, "endpoint": "192.168.2.52:8080"}}
+        assert label_for({}, bare) == "peer:192.168.2.52:8080"
+
     def test_a_local_provider_with_no_model_falls_back_to_the_peer(self):
         kind, _ = target_for({"provider": "local"}, OFFLOADED)
         assert kind == "peer"
@@ -121,7 +143,7 @@ class TestPrecedence:
 class TestProvenance:
     def test_a_peer_summary_records_the_machine_that_ran_it(self):
         # Months later, "which model wrote this" and "which machine ran it" are one question.
-        assert label_for({}, OFFLOADED) == "peer:" + OFFLOADED["remote"]["endpoint"]
+        assert label_for({}, OFFLOADED) == "peer:" + OFFLOADED["remote"]["endpoint"].split("://", 1)[-1]
 
     def test_a_local_summary_records_the_model_file(self, gguf):
         assert label_for({"provider": "local", "gguf_path": gguf}) == os.path.basename(gguf)
@@ -191,14 +213,15 @@ class TestBlockedRunDoesNoWork:
         conn.close()
         return path, fp
 
-    def run_worker(self, path, fp, llm_cfg):
+    def run_worker(self, path, fp, llm_cfg, generate=None):
         import stt.sermon_summary as ss
 
         calls = []
+        boom = {}
         ns = extract_definitions(
             "speech_to_text.py",
             ["_sermon_peer_endpoint", "_sermon_llm_target", "_sermon_llm_unavailable",
-             "_sermon_summarize_one"],
+             "_SermonUnavailable", "_sermon_summarize_one"],
             extra_globals={
                 "os": os, "sqlite3": sqlite3, "time": __import__("time"),
                 "datetime": __import__("datetime").datetime,
@@ -228,14 +251,19 @@ class TestBlockedRunDoesNoWork:
                 "_SERMON_ERROR": ss.STATUS_ERROR,
                 "_SERMON_MAP_SYSTEM": ss.MAP_SYSTEM,
                 "_sermon_model_label": lambda cfg: "test-model",
-                "_sermon_budget": lambda cfg, sys_p, n: (2000, None),
-                "_sermon_generate_waiting": lambda *a, **k: calls.append(a) or "a gist",
+                # Small on purpose: the fixture has to chunk into several parts, or
+                # "stopped at the first" and "ran them all" are the same number.
+                "_sermon_budget": lambda cfg, sys_p, n: (60, None),
+                "_sermon_generate_waiting": (
+                    generate(calls, boom) if generate
+                    else (lambda *a, **k: calls.append(a) or "a gist")),
                 "_sermon_fold": lambda g, *a, **k: g,
                 "_sermon_emit": lambda *a, **k: None,
                 "_archive_write_done": lambda *a, **k: None,
                 "_sermon_yield": lambda: None,
                 "_server_shutting_down": type("E", (), {"is_set": staticmethod(lambda: False)})(),
             })
+        boom["exc"] = ns["_SermonUnavailable"]
         ns["_sermon_summarize_one"](path, fp, True)
         return calls
 
@@ -260,4 +288,58 @@ class TestBlockedRunDoesNoWork:
         path, fp = self.session(tmp_path)
         calls = self.run_worker(path, fp, {"provider": "local", "gguf_path": gguf})
         assert calls, "a configured machine never called the model"
+
+    def test_a_call_that_cannot_be_made_stops_at_the_first_part(self, tmp_path, gguf):
+        """The bug this replaced: an unusable endpoint asked ~30 times.
+
+        The count is the only thing that separates the fix from the bug — both end at
+        status=error either way.
+        """
+        path, fp = self.session(tmp_path)
+
+        def raiser(calls, boom):
+            def _gen(*a, **k):
+                calls.append(a)
+                raise boom["exc"]("could not reach the paired machine at http://x: boom")
+            return _gen
+
+        calls = self.run_worker(path, fp, {"provider": "local", "gguf_path": gguf},
+                                generate=raiser)
+        assert len(calls) == 1, f"kept going after a fatal failure: {len(calls)} calls"
+
+    def test_it_stores_the_transport_reason_not_the_symptom(self, tmp_path, gguf):
+        from stt.sermon_summary import STATUS_ERROR, load_summary
+        path, fp = self.session(tmp_path)
+
+        def raiser(calls, boom):
+            def _gen(*a, **k):
+                calls.append(a)
+                raise boom["exc"]("could not reach the paired machine at http://x: boom")
+            return _gen
+
+        self.run_worker(path, fp, {"provider": "local", "gguf_path": gguf}, generate=raiser)
+        conn = sqlite3.connect(path)
+        entry = load_summary(conn, fp)
+        conn.close()
+        assert entry["status"] == STATUS_ERROR
+        assert "could not reach the paired machine" in entry["error"]
+        assert "returned nothing" not in entry["error"]
+
+    def test_an_empty_reply_still_reports_returning_nothing(self, tmp_path, gguf):
+        # The other half of the distinction: a model that answers with nothing is not the
+        # same as a call that could not be made, and must still say so.
+        from stt.sermon_summary import STATUS_ERROR, load_summary
+        path, fp = self.session(tmp_path)
+
+        def empty(calls, boom):
+            return lambda *a, **k: calls.append(a) or None
+
+        calls = self.run_worker(path, fp, {"provider": "local", "gguf_path": gguf},
+                                generate=empty)
+        conn = sqlite3.connect(path)
+        entry = load_summary(conn, fp)
+        conn.close()
+        assert len(calls) > 1, "an empty reply is per-part, so the run should continue"
+        assert entry["status"] == STATUS_ERROR
+        assert "returned nothing" in entry["error"]
 
