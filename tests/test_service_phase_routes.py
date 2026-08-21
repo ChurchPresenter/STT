@@ -461,6 +461,32 @@ class TestSessionSelection:
         path, _, err = ns["_archive_resolve_db"]("")
         assert path is None and err is not None
 
+    def test_the_live_session_is_resolved_without_sweeping_the_archive(self, tmp_path):
+        """The sweep walks the whole backup tree; the live case never needs it.
+
+        Doing it anyway made every poll, correction and re-run pay for a filesystem walk to
+        build an enumeration that resolve_session then does not look at — on a real archive
+        that walk *was* the request.
+        """
+        class CountingArchive(list):
+            sweeps = 0
+
+            def __iter__(self):
+                type(self).sweeps += 1
+                return list.__iter__(self)
+
+        db = session_db(tmp_path)
+        archive = CountingArchive([db])
+        ns = make_ns(live_db=db, archive=archive)
+
+        path, is_live, err = ns["_archive_resolve_db"]("")
+        assert (path, is_live, err) == (db, True, None)
+        assert CountingArchive.sweeps == 0, "resolving the live session swept the archive"
+
+        # Naming one is the case that genuinely needs the enumeration.
+        ns["_archive_resolve_db"]("2026-03-01_093218.db")
+        assert CountingArchive.sweeps > 0
+
 
 class TestRerunAndSave:
     def test_it_saves_where_recompute_does_not(self, tmp_path):
@@ -503,6 +529,12 @@ class TestRerunAndSave:
         make_ns(live_db=None, archive=[old],
                 params={"session": "2026-01-01_000000.db"})["rerun_service_phase"]()
         assert len(load_corrections(sqlite3.connect(old))) == 1
+
+    def test_it_reports_how_long_it_took(self, tmp_path):
+        # "It feels slow" is only actionable as a number.
+        db = session_db(tmp_path, analyzed=False)
+        body = make_ns(live_db=db, params={})["rerun_service_phase"]()
+        assert isinstance(body["elapsed_ms"], int) and body["elapsed_ms"] >= 0
 
     def test_an_unknown_session_is_refused(self, tmp_path):
         db = session_db(tmp_path)

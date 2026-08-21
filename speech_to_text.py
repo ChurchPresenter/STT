@@ -5571,8 +5571,14 @@ def _archive_resolve_db(session):
 
     ``is_live`` is what decides whether a write may retire the database's WAL afterwards —
     see _archive_write_done.
+
+    The archive is swept only when the caller actually named a session. Sweeping it for the
+    live case as well walked the whole backup tree on every poll, every correction and every
+    re-run, to build an enumeration that resolve_session then never looks at — and on an
+    archive of any size that walk was the request.
     """
-    resolved = _session_resolve(_archive_session_paths(), session,
+    named = (session or "").strip()
+    resolved = _session_resolve(_archive_session_paths() if named else (), session,
                                _service_phase_session_db())
     if resolved is None:
         if (session or "").strip():
@@ -5675,8 +5681,13 @@ def rerun_service_phase():
         return err
 
     cfg = _service_phase_config()
+    started = time.perf_counter()
     try:
-        conn = sqlite3.connect(db_path, timeout=15)
+        # Short timeout on the live session: the transcription worker owns that database and
+        # the phase tick is already re-running the detector over it every interval, so a
+        # re-run here has nothing to add and must not sit in a lock queue behind a service
+        # that is recording. An archived session has no competing writer.
+        conn = sqlite3.connect(db_path, timeout=3 if is_live else 15)
         try:
             result = _service_phase_analyze(
                 _service_phase_rows(conn), cfg,
@@ -5691,6 +5702,7 @@ def rerun_service_phase():
     _archive_write_done(db_path, is_live)
     return jsonify({"success": True, "session_id": os.path.basename(db_path),
                     "live": is_live, "written": written,
+                    "elapsed_ms": round((time.perf_counter() - started) * 1000),
                     "blocks": len(result.get("blocks", []))})
 
 

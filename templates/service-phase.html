@@ -111,9 +111,12 @@
       }
       .sp-toolbar { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-bottom: 14px; }
 
-      /* One box for every control in the row. A <button> and an <a> with the same padding
-         are still different heights — they take line-height and font-family from different
-         defaults — so both are pinned here rather than assumed to match. */
+      /* One box for every control in the row. A button element and an anchor with the same
+         padding are still different heights — they take line-height and font-family from
+         different defaults — so both are pinned here rather than assumed to match.
+         (Angle brackets are deliberately avoided in this comment: the template markup check
+         strips Jinja and script/style tags, not a raw extra_css body, so a tag name written
+         here parses as real markup.) */
       .sp-toolbar button,
       .sp-toolbar select,
       .sp-toolbar input,
@@ -174,6 +177,16 @@
 </div>
 
 <div id="sp-proposals"></div>
+
+<!-- Same floating pill the settings pages use; styles live in base.html. Here it means
+     "the timeline on screen was recomputed and is not what the database holds". -->
+<div id="unsaved-bar" class="unsaved-bar" role="status" aria-live="polite">
+  <div class="unsaved-bar-inner">
+    <span class="unsaved-dot" aria-hidden="true"></span>
+    <span class="unsaved-label" id="sp-unsaved-label">Re-run not saved</span>
+    <button onclick="saveRecomputed()" class="btn-save unsaved-save">Save</button>
+  </div>
+</div>
 
 <div class="sp-now">
   <span class="sp-now-label" id="sp-now-label">—</span>
@@ -697,12 +710,29 @@
       status.textContent = data.session_id + ' · ' + data.bins.length + ' min'
         + (data.recomputed ? ' · re-run, not saved' : '')
         + (data.enabled ? '' : ' · detection disabled in settings');
+      if (data.recomputed) { markUnsaved(); } else { markSaved(); }
       render();
     } catch (e) {
       // A paused poll is not an error to report — the last loaded view stays.
       if (e && e.pollingPaused) return;
       status.textContent = 'Could not load: ' + e;
     }
+  }
+
+  // A recompute shows the operator a timeline the database does not hold. Until now the
+  // only way to keep it was to know that a differently-named button existed; the pill makes
+  // the unsaved state visible and gives it one obvious action.
+  let spUnsaved = false;
+
+  function markUnsaved() {
+    if (spUnsaved) return;
+    spUnsaved = true;
+    document.getElementById('unsaved-bar').classList.add('is-visible');
+  }
+
+  function markSaved() {
+    spUnsaved = false;
+    document.getElementById('unsaved-bar').classList.remove('is-visible');
   }
 
   function fmtDuration(minutes) {
@@ -755,6 +785,7 @@
     spSession = document.getElementById('sp-session').value || '';
     showArchivedBadge();
     picked.clear();
+    markSaved();  // the pill belongs to the service that was on screen, not the new one
     loadPhases();
     loadSermon();
   }
@@ -773,10 +804,18 @@
   }
 
   // Distinct from 'Re-run detector', which recomputes and stores nothing on purpose. This
-  // is the one that brings a past service's saved phases up to date with current logic.
+  // is the one that brings a service's saved phases up to date with current logic, and it
+  // is what the Save pill calls.
+  async function saveRecomputed() { return rerunAndSave(); }
+
   async function rerunAndSave() {
     const status = document.getElementById('sp-status');
+    const buttons = ['sp-rerun', 'sp-recompute', 'sp-load'].map(id => document.getElementById(id));
+    const before = status.textContent;
     status.textContent = 'Re-running…';
+    // Disabled while in flight: the work is milliseconds, so a second press means the first
+    // is stuck waiting on a lock, and queueing another write behind it does not help.
+    buttons.forEach(b => { if (b) b.disabled = true; });
     try {
       const resp = await fetch('/api/service-phase/rerun', {
         method: 'POST',
@@ -784,11 +823,22 @@
         body: spBody({})
       });
       const data = await resp.json();
-      if (!data.success) { showAlert('Could not re-run: ' + data.error, 'error'); return; }
-      showAlert('Re-ran the detector: ' + data.blocks + ' blocks saved.', 'success');
-      loadPhases();
+      if (!data.success) {
+        // Put the failure where the operator was already looking. Leaving 'Re-running…' on
+        // screen after a refused request is what made a 404 look like a hang.
+        status.textContent = 'Could not re-run: ' + data.error;
+        showAlert('Could not re-run: ' + data.error, 'error');
+        return;
+      }
+      markSaved();
+      showAlert('Saved: ' + data.blocks + ' blocks (' + data.elapsed_ms + ' ms).', 'success');
+      await loadPhases();
     } catch (e) {
+      status.textContent = 'Could not re-run: ' + e;
       showAlert('Could not re-run: ' + e, 'error');
+    } finally {
+      buttons.forEach(b => { if (b) b.disabled = false; });
+      if (status.textContent === 'Re-running…') status.textContent = before;
     }
   }
 
