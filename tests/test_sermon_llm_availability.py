@@ -22,11 +22,11 @@ OFFLOADED = {"remote": {"enabled": True, "endpoint": "http://192.168.2.52:8080/a
 LOCAL_ONLY = {"remote": {"enabled": False, "endpoint": ""}}
 
 
-def reason_for(llm_cfg, live_translation=None, *, models_dir="/models",
-               llama_installed=True):
-    ns = extract_definitions(
+def target_ns(live_translation=None, *, models_dir="/models", llama_installed=True):
+    return extract_definitions(
         "speech_to_text.py",
-        ["_sermon_llm_unavailable"],
+        ["_sermon_peer_endpoint", "_sermon_llm_target", "_sermon_llm_unavailable",
+         "_sermon_model_label"],
         extra_globals={
             "os": os,
             "config": {"live_translation": live_translation or LOCAL_ONLY},
@@ -35,7 +35,18 @@ def reason_for(llm_cfg, live_translation=None, *, models_dir="/models",
             "_llm_local_model_path": lambda d, repo, name: os.path.join(
                 d, repo.replace("/", "--"), name),
         })
-    return ns["_sermon_llm_unavailable"](llm_cfg)
+
+
+def reason_for(llm_cfg, live_translation=None, **kw):
+    return target_ns(live_translation, **kw)["_sermon_llm_unavailable"](llm_cfg)
+
+
+def target_for(llm_cfg, live_translation=None, **kw):
+    return target_ns(live_translation, **kw)["_sermon_llm_target"](llm_cfg)
+
+
+def label_for(llm_cfg, live_translation=None, **kw):
+    return target_ns(live_translation, **kw)["_sermon_model_label"](llm_cfg)
 
 
 @pytest.fixture()
@@ -65,28 +76,55 @@ class TestNothingConfigured:
         assert "translation settings" in reason
         assert "returned nothing" not in reason
 
-    def test_offloading_does_not_change_the_message(self):
-        assert reason_for({}, OFFLOADED) == reason_for({}, LOCAL_ONLY)
-
     def test_an_empty_block_is_never_read_as_load_the_local_model(self):
         # provider defaults to endpoint; defaulting to local would mean an unconfigured
         # machine trying to load a GGUF it was never told about.
         assert "No LLM is configured" in reason_for({})
 
 
-class TestOffloadIsNotConsulted:
-    """The rule that replaced the one this file used to pin."""
+class TestPrecedence:
+    """Explicit configuration wins; offload is the fallback.
 
-    def test_a_configured_endpoint_works_while_offloading(self):
-        assert reason_for({"provider": "endpoint", "endpoint": "http://x/v1/chat"},
-                          OFFLOADED) is None
+    A machine told to use a particular model keeps using it whether or not its captions go
+    elsewhere — offload names the peer, it does not overrule a local choice.
+    """
 
-    def test_a_configured_local_model_works_while_offloading(self, gguf):
-        assert reason_for({"provider": "local", "gguf_path": gguf}, OFFLOADED) is None
+    def test_a_configured_local_model_beats_the_peer(self, gguf):
+        assert target_for({"provider": "local", "gguf_path": gguf}, OFFLOADED) == ("local", gguf)
 
-    def test_the_verdict_is_identical_offloaded_or_not(self, gguf):
-        cfg = {"provider": "local", "gguf_path": gguf}
-        assert reason_for(cfg, OFFLOADED) == reason_for(cfg, LOCAL_ONLY) is None
+    def test_a_configured_endpoint_beats_the_peer(self):
+        assert target_for({"provider": "endpoint", "endpoint": "http://x/v1/chat"},
+                          OFFLOADED) == ("endpoint", "http://x/v1/chat")
+
+    def test_an_unconfigured_machine_falls_back_to_the_peer(self):
+        # .62 exactly: provider endpoint, endpoint empty, no GGUF, captions offloaded.
+        kind, detail = target_for({"provider": "endpoint", "endpoint": ""}, OFFLOADED)
+        assert kind == "peer" and detail == OFFLOADED["remote"]["endpoint"]
+
+    def test_a_local_provider_with_no_model_falls_back_to_the_peer(self):
+        kind, _ = target_for({"provider": "local"}, OFFLOADED)
+        assert kind == "peer"
+
+    def test_offloading_makes_an_otherwise_unusable_machine_usable(self):
+        assert reason_for({}, LOCAL_ONLY) is not None
+        assert reason_for({}, OFFLOADED) is None
+
+    def test_a_disabled_remote_is_not_a_peer(self):
+        cfg = {"remote": {"enabled": False, "endpoint": "http://192.168.2.52:8080"}}
+        assert target_for({}, cfg)[0] is None
+
+    def test_a_remote_with_no_endpoint_is_not_a_peer(self):
+        cfg = {"remote": {"enabled": True, "endpoint": ""}}
+        assert target_for({}, cfg)[0] is None
+
+
+class TestProvenance:
+    def test_a_peer_summary_records_the_machine_that_ran_it(self):
+        # Months later, "which model wrote this" and "which machine ran it" are one question.
+        assert label_for({}, OFFLOADED) == "peer:" + OFFLOADED["remote"]["endpoint"]
+
+    def test_a_local_summary_records_the_model_file(self, gguf):
+        assert label_for({"provider": "local", "gguf_path": gguf}) == os.path.basename(gguf)
 
 
 class TestLocalModel:
@@ -159,7 +197,8 @@ class TestBlockedRunDoesNoWork:
         calls = []
         ns = extract_definitions(
             "speech_to_text.py",
-            ["_sermon_llm_unavailable", "_sermon_summarize_one"],
+            ["_sermon_peer_endpoint", "_sermon_llm_target", "_sermon_llm_unavailable",
+             "_sermon_summarize_one"],
             extra_globals={
                 "os": os, "sqlite3": sqlite3, "time": __import__("time"),
                 "datetime": __import__("datetime").datetime,
@@ -190,7 +229,7 @@ class TestBlockedRunDoesNoWork:
                 "_SERMON_MAP_SYSTEM": ss.MAP_SYSTEM,
                 "_sermon_model_label": lambda cfg: "test-model",
                 "_sermon_budget": lambda cfg, sys_p, n: (2000, None),
-                "_sermon_llm_generate": lambda *a, **k: calls.append(a) or "unreachable",
+                "_sermon_generate_waiting": lambda *a, **k: calls.append(a) or "a gist",
                 "_sermon_fold": lambda g, *a, **k: g,
                 "_sermon_emit": lambda *a, **k: None,
                 "_archive_write_done": lambda *a, **k: None,

@@ -5733,6 +5733,29 @@ def get_sermon_summary():
     })
 
 
+@app.route("/api/sermon-summary/settings", methods=["POST"])
+def save_sermon_summary_settings():
+    """Turn the automatic summariser on or off.
+
+    Only the automatic trigger. The buttons stay live either way, because asking for a
+    summary is asking for one and an operator who has just pressed Summarise is not asking
+    to be told the feature is disabled.
+    """
+    if not check_ip_whitelist():
+        return jsonify({"success": False, "error": "Access Denied"}), 403
+
+    global config
+    data = _control_params(keep_blank=True)
+    if "sermon_summary" not in config:
+        config["sermon_summary"] = {}
+
+    raw = data.get("enabled")
+    enabled = raw if isinstance(raw, bool) else str(raw).strip().lower() in ("1", "true", "yes", "on")
+    config["sermon_summary"]["enabled"] = enabled
+    save_config(config)
+    return jsonify({"success": True, "enabled": enabled})
+
+
 @app.route("/api/sermon-summary/generate", methods=["POST"])
 def generate_sermon_summary():
     """Summarise a sermon now, or regenerate one — live session or an archived one.
@@ -8366,6 +8389,55 @@ def translate_remote():
         except Exception:
             pass
     return jsonify({"success": True, "translated_text": translated, "confidence": None, "alternatives": []})
+
+
+@app.route("/api/llm/summarize", methods=["POST"])
+def summarize_remote():
+    """Run one summarisation prompt on this machine's model, for a paired machine.
+
+    The counterpart to /api/translate, and paired the same way: the machine that records the
+    services is usually not the machine that holds the model, and it has no other way to
+    reach one. A generic prompt runner is a wider door than caption translation, so it is
+    bearer-token gated exactly as its neighbour is and never reachable by address alone
+    outside an established pairing.
+
+    Returns 503 while captions are queued here. The caller cannot see this machine's
+    backlog, so the decision to defer belongs on this side of the wire — and live captions
+    win it every time.
+    """
+    if not _paired_client_ok():
+        return jsonify({"success": False,
+                        "error": "Not paired. Use the pairing flow in the Translations tab."}), 403
+
+    data = request.get_json() or {}
+    system_prompt = (data.get("system") or "").strip()
+    user_text = (data.get("user") or "").strip()
+    if not user_text:
+        return jsonify({"success": False, "error": "Nothing to summarise"}), 400
+
+    # A sermon chunk is sized to a context window; anything past this is a runaway payload
+    # rather than a part of a service, and it would be this machine's memory it ran through.
+    if len(user_text) + len(system_prompt) > 200_000:
+        return jsonify({"success": False, "error": "Prompt too long"}), 413
+
+    llm_cfg = (config.get("live_translation", {}) or {}).get("llm") or {}
+    kind, detail = _sermon_llm_target(llm_cfg)
+    # Never bounce the request onward: a peer asking a peer is a loop, and the caller asked
+    # this machine because this is the one holding the model.
+    if kind not in ("local", "endpoint"):
+        return jsonify({"success": False,
+                        "error": detail if kind is None else "no model on this machine"}), 503
+
+    if _sermon_captions_waiting():
+        return jsonify({"success": False, "busy": True,
+                        "error": "Translating captions; try again shortly."}), 503
+
+    _register_translation_client(request.remote_addr)
+    max_tokens = coerce_int(data.get("max_tokens"), 220, lo=16, hi=4096)
+    text = _sermon_llm_generate(system_prompt, user_text, max_tokens, llm_cfg)
+    if not text:
+        return jsonify({"success": False, "error": "The model returned nothing"}), 502
+    return jsonify({"success": True, "text": text, "model": _sermon_model_label(llm_cfg)})
 
 
 @app.route("/api/translate/unload", methods=["POST"])
@@ -16602,60 +16674,95 @@ def _sermon_yield():
 
 
 def _sermon_model_label(llm_cfg):
-    """What produced a summary, for the stored provenance."""
-    if (llm_cfg.get("provider") or "endpoint") == "local":
-        return os.path.basename(llm_cfg.get("gguf_path") or llm_cfg.get("gguf_file") or "") or "local"
-    return llm_cfg.get("model") or "endpoint"
+    """What produced a summary, for the stored provenance.
+
+    A summary generated on the paired machine is recorded as such: months later, "which
+    model wrote this" and "which machine ran it" are the same question.
+    """
+    kind, detail = _sermon_llm_target(llm_cfg)
+    if kind == "local":
+        return os.path.basename(detail) or "local"
+    if kind == "peer":
+        return f"peer:{detail}"
+    if kind == "endpoint":
+        return llm_cfg.get("model") or "endpoint"
+    return ""
 
 
-def _sermon_llm_unavailable(llm_cfg):
-    """Why this machine cannot summarise, or None if it can.
+def _sermon_peer_endpoint():
+    """The paired machine to ask for inference, or "" when this box is not offloading.
 
-    The only question is whether an LLM is actually configured. Offload is deliberately not
-    consulted: it decides where *captions* are translated, and a machine translating with
-    MADLAD while an LLM sits configured beside it can still summarise perfectly well. An
-    earlier version of this refused a local model whenever the machine offloaded, which
-    turned a caption-routing setting into a summariser kill switch.
+    Offload is configured for captions, but the peer it names is the machine holding the
+    model — so it is also the answer to "who can summarise for me" on a box that has no
+    model of its own. That is what makes .62 work without configuring the same peer twice.
+    """
+    remote = (config.get("live_translation", {}) or {}).get("remote", {}) or {}
+    if not remote.get("enabled"):
+        return ""
+    return (remote.get("endpoint") or "").strip()
 
-    The single source of truth for the route and the worker both, so the two cannot disagree
-    about whether a run is worth queueing.
+
+def _sermon_llm_target(llm_cfg):
+    """Where summarising would run: ('local'|'endpoint'|'peer', detail), or (None, reason).
+
+    Explicit configuration wins and offload is the fallback, so a machine told to use a
+    particular model keeps using it whether or not its captions go elsewhere. The single
+    source of truth for the route, the worker and the provenance label alike, so none of
+    them can disagree about whether a run is worth starting.
     """
     provider = (llm_cfg.get("provider") or "endpoint").strip().lower()
-    unset = ("No LLM is configured. Set one in the translation settings "
-             "(a local GGUF, or an endpoint) to generate summaries.")
     if provider == "local":
         path = (llm_cfg.get("gguf_path") or "").strip()
         if not path:
             repo = (llm_cfg.get("gguf_repo") or "").strip()
             name = (llm_cfg.get("gguf_file") or "").strip()
             path = _llm_local_model_path(MODELS_DIR, repo, name) if (repo and name) else ""
-        if not path or not os.path.isfile(path):
-            return unset
-        # Reported separately from "nothing configured": the operator picked a model and
-        # the runtime for it is missing, which is a different thing to go and fix.
-        if not local_llm_available():
-            return ("llama-cpp-python is not installed, so the configured local model "
-                    "cannot run")
-        return None
-    if not (llm_cfg.get("endpoint") or "").strip():
-        return unset
-    return None
+        if path and os.path.isfile(path):
+            # Reported separately from "nothing configured": the operator picked a model and
+            # the runtime for it is missing, which is a different thing to go and fix.
+            if not local_llm_available():
+                return None, ("llama-cpp-python is not installed, so the configured local "
+                              "model cannot run")
+            return "local", path
+    elif (llm_cfg.get("endpoint") or "").strip():
+        return "endpoint", llm_cfg["endpoint"].strip()
+
+    peer = _sermon_peer_endpoint()
+    if peer:
+        return "peer", peer
+    return None, ("No LLM is configured. Set one in the translation settings "
+                  "(a local GGUF, or an endpoint), or offload translation to a machine "
+                  "that has one.")
+
+
+def _sermon_llm_unavailable(llm_cfg):
+    """Why this machine cannot summarise, or None if it can."""
+    kind, detail = _sermon_llm_target(llm_cfg)
+    return None if kind else detail
+
+
+class _PeerBusy(Exception):
+    """The paired machine is translating captions and declined the work for now."""
 
 
 def _sermon_llm_generate(system_prompt, user_text, max_tokens, llm_cfg):
-    """One summarisation call. Returns the reply text, or None.
+    """One summarisation call, wherever this machine's model actually lives.
 
     Deliberately not routed through _translate_via_llm: that path validates its output as a
     caption (length, expansion, script) and feeds _record_local_translate_ms. A summary
     fails every one of those checks by design, and folding its multi-second generations into
     the caption-latency EMA would make the health dashboard unreadable.
+
+    Raises _PeerBusy when the peer declines; the caller retries that chunk rather than
+    losing the sermon over it.
     """
-    # Backstop only: every caller checks first, so reaching this means a configuration
-    # changed mid-run. Deliberately silent — it used to log once per chunk.
-    if _sermon_llm_unavailable(llm_cfg):
+    kind, detail = _sermon_llm_target(llm_cfg)
+    if kind is None:
+        # Backstop only: every caller checks first, so reaching this means configuration
+        # changed mid-run. Deliberately silent — it used to log once per chunk.
         return None
-    provider = (llm_cfg.get("provider") or "endpoint").strip().lower()
-    if provider == "local":
+
+    if kind == "local":
         llm = get_local_llm(llm_cfg)
         if llm is None:
             return None
@@ -16672,9 +16779,26 @@ def _sermon_llm_generate(system_prompt, user_text, max_tokens, llm_cfg):
             print(f"[SERMON] generation failed ({type(e).__name__}: {e})")
             return None
 
-    endpoint = (llm_cfg.get("endpoint") or "").strip()
-    if not endpoint:
-        return None
+    if kind == "peer":
+        # Through _peer_request so the bearer token and the 403 self-heal come for free —
+        # the same door every other call to the paired machine goes through.
+        try:
+            resp = _peer_request("POST", detail, "/api/llm/summarize", timeout=180, json={
+                "system": system_prompt, "user": user_text, "max_tokens": max_tokens})
+            if resp.status_code == 503:
+                raise _PeerBusy()
+            resp.raise_for_status()
+            data = resp.json()
+            if not data.get("success"):
+                print(f"[SERMON] peer refused: {data.get('error')}")
+                return None
+            return data.get("text") or None
+        except _PeerBusy:
+            raise
+        except Exception as e:
+            print(f"[SERMON] peer call failed ({type(e).__name__}: {e})")
+            return None
+
     payload = _llm_chat_payload(llm_cfg.get("model") or "", user_text, system_prompt,
                                max_tokens=max_tokens, keep_alive=llm_cfg.get("keep_alive", -1))
     headers = {}
@@ -16684,7 +16808,7 @@ def _sermon_llm_generate(system_prompt, user_text, max_tokens, llm_cfg):
         import requests as _req
         # A summary is not a caption: nobody is waiting on it in real time, so it gets a
         # generous timeout rather than the caption path's few seconds.
-        resp = _req.post(endpoint, json=payload, headers=headers, timeout=120)
+        resp = _req.post(detail, json=payload, headers=headers, timeout=120)
         resp.raise_for_status()
         return _llm_extract_text(resp.json())
     except Exception as e:
@@ -16734,6 +16858,29 @@ _SERMON_FOLD_SYSTEM = (
     "Write in the same language as the input.\n"
     "Output only the condensed summary."
 )
+
+
+def _sermon_generate_waiting(system_prompt, user_text, max_tokens, llm_cfg,
+                             attempts=40):
+    """One call, waiting out a busy peer rather than losing the sermon over it.
+
+    A peer says busy while it has captions queued, which during a service is most of the
+    time and between services is never. Retrying is therefore the whole point: the work is
+    not urgent and the caption backlog it is waiting on is, so a chunk that waits several
+    minutes has cost nothing anyone was watching.
+    """
+    for attempt in range(max(1, attempts)):
+        if _server_shutting_down.is_set():
+            return None
+        try:
+            return _sermon_llm_generate(system_prompt, user_text, max_tokens, llm_cfg)
+        except _PeerBusy:
+            if attempt == 0:
+                print("[SERMON] peer is translating captions; waiting", flush=True)
+            socketio.sleep(coerce_int(_sermon_summary_config().get("peer_wait_seconds"),
+                                      15, lo=2, hi=300))
+    print("[SERMON] peer stayed busy; giving up on this part", flush=True)
+    return None
 
 
 def _sermon_summary_scan(blocks, db_path, ignore_settle=False, is_live=True):
@@ -16856,7 +17003,7 @@ def _sermon_summarize_one(db_path, fingerprint_value, is_live=True):
             if _server_shutting_down.is_set():
                 return
             system, user = _sermon_map_prompt(chunk, base_ms=start_ms)
-            out = _sermon_llm_generate(system, user, map_tokens, llm_cfg)
+            out = _sermon_generate_waiting(system, user, map_tokens, llm_cfg)
             span = (f"[{_sermon_format_offset(chunk.start_ms, start_ms)}-"
                     f"{_sermon_format_offset(chunk.end_ms, start_ms)}]")
             if out:
@@ -16871,7 +17018,7 @@ def _sermon_summarize_one(db_path, fingerprint_value, is_live=True):
         reduce_system, _ = _sermon_reduce_prompt([], max_chapters=max_chapters)
         gists = _sermon_fold(gists, llm_cfg, cfg, reduce_system, max_chapters)
         _, reduce_user = _sermon_reduce_prompt(gists, max_chapters=max_chapters)
-        raw = _sermon_llm_generate(reduce_system, reduce_user, reduce_tokens, llm_cfg)
+        raw = _sermon_generate_waiting(reduce_system, reduce_user, reduce_tokens, llm_cfg)
         if not raw:
             store(_SERMON_ERROR, error="the model returned nothing for the final summary")
             return

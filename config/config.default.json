@@ -643,7 +643,7 @@
   "sermon_summary": {
     "_comment": "Summary and chapter markers for each sermon, written a few minutes after the sermon ends and reviewable on /sermon-summary. Uses the same local LLM as translation, so it needs live_translation.llm configured; the sermon is summarised in its own language. Everything is stored in the session database beside the transcript it came from and is deleted with it.",
     "enabled": false,
-    "_enabled_comment": "Summarise sermons during a live service. Off by default: it shares the translation model, and an installation that has not configured an LLM has nothing to run it on.",
+    "_enabled_comment": "Summarise sermons automatically once they end. Off by default: it shares the translation model, and an installation that has not configured an LLM has nothing to run it on. This governs the automatic trigger only — 'Summarise now' and 'Regenerate' on /sermon-summary work either way, because asking for a summary is asking for one. Toggle it from that page.",
     "settle_seconds": 180,
     "_settle_seconds_comment": "How long a sermon block must stay closed before it is summarised. The detector back-dates a closing block's end to where the next run began, so a block that just closed is still moving; summarising immediately writes a summary of a range that then changes. Waiting costs nothing — the service has moved on to closing songs.",
     "min_minutes": 8,
@@ -658,6 +658,8 @@
     "_reduce_max_tokens_comment": "Reply reservation for the final summary and chapter list, which is the only generated text anyone reads.",
     "pause_on_backlog": true,
     "_pause_on_backlog_comment": "Hold the summariser while captions are waiting to be translated, so live output always wins the shared model. Turning this off makes summaries finish sooner at the cost of caption latency during the run.",
+    "peer_wait_seconds": 15,
+    "_peer_wait_seconds_comment": "When summarising is offloaded to a paired machine, how long to wait before retrying a part that machine declined because it was translating captions. Live captions always win; a part that waits several minutes has cost nothing anyone was watching.",
     "archive_scan_limit": 200,
     "_archive_scan_limit_comment": "How many past session databases /sermon-summary looks back through when listing services to review. They are opened read-only, one at a time, newest first."
   },
