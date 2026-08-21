@@ -1039,6 +1039,42 @@
                 .catch(function () {});
         };
         window.refreshSysreqBanner();
+
+        // Fallback alert. Five pages define a richer showAlert of their own against their
+        // own #alert_message element; their script block runs after this one, so those
+        // definitions still win and nothing about them changes.
+        //
+        // This exists because a page can call showAlert without defining it, and did:
+        // /service-phase has called it since it shipped and never defined it, so every
+        // correction confirmation and every error on that page died as a ReferenceError —
+        // silently, because the throw happened inside the handler that was reporting the
+        // result. A page that forgets the boilerplate should get a visible message, not
+        // lose the one it was trying to show.
+        //
+        // The element is created lazily and held on the function rather than given an id
+        // and looked up: adding one to this template's body would put a duplicate id above
+        // the one those five pages own, and getElementById would start answering with the
+        // wrong element.
+        if (typeof window.showAlert !== 'function') {
+            window.showAlert = function (message, type) {
+                var el = window.showAlert._el;
+                if (!el || !el.isConnected) {
+                    el = document.createElement('div');
+                    el.setAttribute('role', 'status');
+                    el.setAttribute('aria-live', 'polite');
+                    el.style.cssText = 'position:fixed; left:50%; transform:translateX(-50%);'
+                        + 'bottom:24px; z-index:1200; max-width:min(560px, calc(100vw - 32px));';
+                    document.body.appendChild(el);
+                    window.showAlert._el = el;
+                }
+                el.textContent = message;
+                el.className = 'alert ' + (type || 'info') + ' show';
+                clearTimeout(window.showAlert._timer);
+                window.showAlert._timer = setTimeout(function () {
+                    el.classList.remove('show');
+                }, 5000);
+            };
+        }
     </script>
 
     {% block scripts %}{% endblock %}

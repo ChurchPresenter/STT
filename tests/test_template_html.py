@@ -74,3 +74,31 @@ def test_tags_are_balanced_and_correctly_nested(path):
 
 def test_templates_are_actually_being_checked():
     assert len(TEMPLATES) >= 8
+
+
+# A page that calls showAlert without providing it does not fail loudly: the
+# ReferenceError is thrown inside the handler that was reporting the result, so
+# the confirmation and the error both vanish and the page looks like it did
+# nothing. /service-phase shipped that way — 25 calls, no definition — and it went
+# unnoticed until an unrelated change happened to print the exception on screen.
+_ALERT_CALL = re.compile(r"\bshowAlert\s*\(")
+_ALERT_DEF = re.compile(r"(function\s+showAlert\s*\()|(showAlert\s*=\s*function)")
+
+BASE = REPO / "templates" / "base.html"
+
+
+def test_base_provides_a_fallback_alert():
+    """Removing it would silently re-break every page that does not define its own."""
+    assert _ALERT_DEF.search(BASE.read_text(encoding="utf-8"))
+
+
+@pytest.mark.parametrize("path", TEMPLATES, ids=lambda p: p.name)
+def test_a_page_that_alerts_can_actually_alert(path):
+    src = path.read_text(encoding="utf-8")
+    if not _ALERT_CALL.search(src):
+        return
+    own = _ALERT_DEF.search(src)
+    inherited = "{% extends" in src and _ALERT_DEF.search(BASE.read_text(encoding="utf-8"))
+    assert own or inherited, (
+        f"{path.name} calls showAlert but neither defines it nor extends a base that does")
+
