@@ -12,6 +12,23 @@
       .ss-toolbar {
         display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 14px;
       }
+
+      /* One box for every control in the row, matching /service-phase. Without this the
+         buttons fall back to the base stylesheet's larger metrics and no background, and a
+         link beside them is a third height again. */
+      .ss-toolbar button,
+      .ss-toolbar select,
+      .ss-toolbar .ss-link,
+      .ss-card button {
+        padding: 6px 12px; border: 1px solid var(--border); border-radius: var(--radius-sm);
+        background: var(--bg-card); color: var(--text-primary);
+        font-size: 0.88em; font-family: inherit; line-height: 1.5; cursor: pointer;
+      }
+      /* Navigation, not an action: same box, accent text. */
+      .ss-toolbar .ss-link {
+        display: inline-flex; align-items: center; gap: 6px;
+        text-decoration: none; color: var(--info);
+      }
       .ss-card {
         padding: 18px 20px; background: var(--bg-card); border: 1px solid var(--border);
         border-radius: var(--radius-md); margin-bottom: 14px;
@@ -73,6 +90,7 @@
   <button type="button" id="ss-refresh" onclick="loadSummaries()">Refresh</button>
   <button type="button" id="ss-generate" onclick="generateNow()">Summarise now</button>
   <span class="ss-archived" id="ss-archived" style="display: none;">finished service</span>
+  <a href="/service-phase" class="ss-link">⛪ Service phase</a>
   <span id="ss-status" style="color: var(--text-secondary); font-size: 0.86em;"></span>
 </div>
 

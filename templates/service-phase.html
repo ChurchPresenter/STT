@@ -42,12 +42,6 @@
         border: 1px solid var(--warning);
       }
 
-      .sp-link {
-        display: inline-flex; align-items: center; gap: 6px; text-decoration: none;
-        padding: 6px 12px; color: var(--info); background: var(--info-bg);
-        border: 1px solid var(--info); border-radius: var(--radius-sm); font-size: 0.88em;
-      }
-
       /* Sermon summary panel. Read-only here — the full view, the archive and the
          regenerate button live on /sermon-summary. */
       .sp-sermon {
@@ -116,14 +110,24 @@
         padding-left: 294px; padding-top: 4px;
       }
       .sp-toolbar { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-bottom: 14px; }
-      .sp-toolbar button {
+
+      /* One box for every control in the row. A <button> and an <a> with the same padding
+         are still different heights — they take line-height and font-family from different
+         defaults — so both are pinned here rather than assumed to match. */
+      .sp-toolbar button,
+      .sp-toolbar select,
+      .sp-toolbar input,
+      .sp-toolbar .sp-link {
         padding: 6px 12px; border: 1px solid var(--border); border-radius: var(--radius-sm);
-        background: var(--bg-card); color: var(--text-primary); font-size: 0.88em;
-        cursor: pointer;
+        background: var(--bg-card); color: var(--text-primary);
+        font-size: 0.88em; font-family: inherit; line-height: 1.5;
       }
-      .sp-toolbar input {
-        padding: 6px 10px; border: 1px solid var(--border); border-radius: var(--radius-sm);
-        background: var(--bg-base); color: var(--text-primary); font-size: 0.88em; min-width: 220px;
+      .sp-toolbar button, .sp-toolbar select, .sp-toolbar .sp-link { cursor: pointer; }
+      .sp-toolbar input { background: var(--bg-base); min-width: 220px; }
+      /* Navigation, not an action: same box, accent text. */
+      .sp-toolbar .sp-link {
+        display: inline-flex; align-items: center; gap: 6px;
+        text-decoration: none; color: var(--info);
       }
       .sp-pick { width: 16px; height: 16px; accent-color: var(--accent); flex-shrink: 0; }
       .sp-pick-gap { width: 16px; flex-shrink: 0; }
