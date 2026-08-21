@@ -4,6 +4,8 @@
 {% block page_title %}Sermon Summaries{% endblock %}
 
 {% block extra_css %}
+      /* Shared with /service-phase: the two pages are one job and should not look like
+         two products. */
       .ss-note {
         padding: 12px 14px; background: var(--info-bg); border: 1px solid var(--info);
         border-radius: var(--radius-sm); color: var(--text-secondary);
@@ -47,9 +49,10 @@
       .ss-state.error { color: var(--danger); background: rgba(239,68,68,0.15); }
       .ss-summary { color: var(--text-secondary); line-height: 1.7; margin-bottom: 14px; }
       /* Permanent, so the row does not reflow when the state changes — the wording is the
-         only thing that moves. */
-      .ss-state { color: var(--text-secondary); font-size: 0.86em; }
-      .ss-state a { color: var(--info); }
+         only thing that moves. Deliberately not called .ss-state: that is the per-card
+         status pill, and reusing the name stripped its padding and uppercase. */
+      .ss-feature-state { color: var(--text-secondary); font-size: 0.86em; }
+      .ss-feature-state a { color: var(--info); }
       .ss-switch {
         display: inline-flex; align-items: center; gap: 7px;
         color: var(--text-secondary); font-size: 0.88em; cursor: pointer;
@@ -108,15 +111,19 @@
 
 <div class="ss-toolbar">
   <label for="ss-session" style="color: var(--text-secondary); font-size: 0.88em;">Service</label>
-  <select id="ss-session" onchange="loadSummaries()"></select>
+  <select id="ss-session" onchange="pickSession()"></select>
+  <span class="ss-archived" id="ss-archived" style="display: none;">finished service</span>
+  <button type="button" id="ss-back-live" onclick="backToLive()" style="display: none;">← Back to live</button>
+  <a href="/service-phase" class="ss-link">⛪ Service phase</a>
+</div>
+
+<div class="ss-toolbar">
   <button type="button" id="ss-refresh" onclick="loadSummaries()">Refresh</button>
   <button type="button" id="ss-generate" onclick="generateNow()">Summarise now</button>
   <label class="ss-switch" title="Only the automatic trigger. Summarise now and Regenerate always work.">
     <input type="checkbox" id="ss-enabled" onchange="saveEnabled()"> summarise automatically
   </label>
-  <span class="ss-state" id="ss-state"></span>
-  <span class="ss-archived" id="ss-archived" style="display: none;">finished service</span>
-  <a href="/service-phase" class="ss-link">⛪ Service phase</a>
+  <span class="ss-feature-state" id="ss-state"></span>
   <span id="ss-status" style="color: var(--text-secondary); font-size: 0.86em;"></span>
 </div>
 
@@ -195,13 +202,22 @@
   // Shares /api/service-phase/sessions with the phase page, so both list the same services
   // in the same order. Every recorded service is offered, not only those already
   // summarised — generating a summary for one that has none is the point of the page.
+  // Whether a service is running at all. Without one there is no live view to return to,
+  // and 'Back to live' has to say so rather than appearing to do nothing.
+  let ssHasLive = false;
+
+  // Safe to call repeatedly: the chosen service is preserved. Letting the selection fall
+  // back to the first option would move an operator off the service they were reading — and
+  // since Regenerate carries the selection, aim their next write somewhere else.
   async function loadSessions() {
+    const select = document.getElementById('ss-session');
+    const previous = select.value || '';
     try {
       const resp = await pollFetch('/api/service-phase/sessions');
       const data = await resp.json();
       if (!data.success) return;
-      const select = document.getElementById('ss-session');
       const rows = (data.sessions || []).slice().sort((a, b) => (b.live ? 1 : 0) - (a.live ? 1 : 0));
+      ssHasLive = rows.some(r => r.live);
       select.innerHTML = rows.map(r => {
         const bits = [r.live ? 'Live' : (r.date || r.session_id)];
         if (r.rows) bits.push(fmtDuration(r.minutes), r.rows + ' rows');
@@ -209,9 +225,30 @@
         return '<option value="' + (r.live ? '' : esc(r.session_id)) + '">'
           + esc(bits.join(' · ')) + '</option>';
       }).join('') || '<option value="">No recorded service</option>';
+      const kept = Array.prototype.some.call(select.options, o => o.value === previous);
+      select.value = kept ? previous : (select.options[0] || {}).value || '';
     } catch (e) {
       if (e && e.pollingPaused) return;
     }
+  }
+
+  function pickSession() {
+    document.getElementById('ss-back-live').style.display =
+      document.getElementById('ss-session').value ? '' : 'none';
+    loadSummaries();
+  }
+
+  // The way back, matching /service-phase. It refreshes the list first: a service that
+  // started after this page loaded has no entry yet, and "no live option" is otherwise
+  // indistinguishable from "nothing is running".
+  async function backToLive() {
+    await loadSessions();
+    if (!ssHasLive) {
+      showAlert('No service is running right now.', 'info');
+      return;
+    }
+    document.getElementById('ss-session').value = '';
+    pickSession();
   }
 
   async function loadSummaries() {
@@ -230,6 +267,7 @@
       // Which service the Regenerate buttons are about to write to. Silent ambiguity here
       // is the one mistake this page can make that the operator cannot see.
       document.getElementById('ss-archived').style.display = ssLive ? 'none' : '';
+      document.getElementById('ss-back-live').style.display = ssLive ? 'none' : '';
       status.textContent = data.session_id;
       render(data.summaries || []);
     } catch (e) {

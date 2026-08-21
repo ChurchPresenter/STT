@@ -145,7 +145,13 @@
       .sp-pick-gap { width: 16px; flex-shrink: 0; }
       .sp-custom, .sp-note-in { min-width: 120px; }
       .sp-block.sp-group { border-color: var(--accent); background: var(--accent-subtle); }
-      .sp-note { color: var(--text-secondary); font-size: 0.86em; line-height: 1.5; margin-bottom: 14px; }
+      /* Same treatment as /sermon-summary: the two pages are one job and should not look
+         like two products. */
+      .sp-note {
+        padding: 12px 14px; background: var(--info-bg); border: 1px solid var(--info);
+        border-radius: var(--radius-sm); color: var(--text-secondary);
+        font-size: 0.88em; line-height: 1.6; margin-bottom: 14px;
+      }
 {% endblock %}
 
 {% block content %}
