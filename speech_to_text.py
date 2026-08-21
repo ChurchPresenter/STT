@@ -987,6 +987,8 @@ from stt.sermon_summary import (
     mark_error as _sermon_mark_error,
     parse_chapters as _sermon_parse_chapters,
     parse_sections as _sermon_parse_sections,
+    progress_text as _sermon_progress_text,
+    set_progress as _sermon_set_progress,
     read_sermon_rows as _sermon_read_rows,
     ready_sermons as _sermon_ready,
     save_summary as _sermon_save,
@@ -16908,7 +16910,7 @@ _SERMON_FOLD_SYSTEM = (
 
 
 def _sermon_generate_waiting(system_prompt, user_text, max_tokens, llm_cfg,
-                             attempts=40):
+                             attempts=40, on_wait=None):
     """One call, waiting out a busy peer rather than losing the sermon over it.
 
     A peer says busy while it has captions queued, which during a service is most of the
@@ -16926,6 +16928,8 @@ def _sermon_generate_waiting(system_prompt, user_text, max_tokens, llm_cfg,
         except _PeerBusy:
             if attempt == 0:
                 print("[SERMON] peer is translating captions; waiting", flush=True)
+                if on_wait:
+                    on_wait()
             socketio.sleep(coerce_int(_sermon_summary_config().get("peer_wait_seconds"),
                                       15, lo=2, hi=300))
     print("[SERMON] peer stayed busy; giving up on this part", flush=True)
@@ -17016,6 +17020,15 @@ def _sermon_summarize_one(db_path, fingerprint_value, is_live=True):
             _sermon_delete(conn, fingerprint_value)
             return
 
+        def note(text):
+            """Publish how far this run has got. Never worth failing a summary over."""
+            try:
+                _sermon_set_progress(conn, fingerprint_value, text)
+                _sermon_emit({**(_sermon_load(conn, fingerprint_value) or {}),
+                              "progress": text}, session_id)
+            except Exception:
+                pass
+
         def store(status, **kw):
             _sermon_save(conn, fingerprint=fingerprint_value, label=entry["label"],
                          start_ms=start_ms, end_ms=end_ms, status=status,
@@ -17054,11 +17067,14 @@ def _sermon_summarize_one(db_path, fingerprint_value, is_live=True):
             return
 
         gists = []
-        for chunk in chunks:
+        for done, chunk in enumerate(chunks):
             if _server_shutting_down.is_set():
                 return
+            note(_sermon_progress_text(done, len(chunks)))
             system, user = _sermon_map_prompt(chunk, base_ms=start_ms)
-            out = _sermon_generate_waiting(system, user, map_tokens, llm_cfg)
+            out = _sermon_generate_waiting(
+                system, user, map_tokens, llm_cfg,
+                on_wait=lambda d=done: note(_sermon_progress_text(d, len(chunks), waiting=True)))
             span = (f"[{_sermon_format_offset(chunk.start_ms, start_ms)}-"
                     f"{_sermon_format_offset(chunk.end_ms, start_ms)}]")
             if out:
@@ -17070,6 +17086,7 @@ def _sermon_summarize_one(db_path, fingerprint_value, is_live=True):
             return
 
         reduce_tokens = coerce_int(cfg.get("reduce_max_tokens"), 700, lo=128, hi=4096)
+        note(_sermon_progress_text(len(chunks), len(chunks), reducing=True))
         reduce_system, _ = _sermon_reduce_prompt([], floor=floor, ceiling=ceiling)
         gists = _sermon_fold(gists, llm_cfg, cfg, reduce_system, floor, ceiling)
         _, reduce_user = _sermon_reduce_prompt(gists, floor=floor, ceiling=ceiling)

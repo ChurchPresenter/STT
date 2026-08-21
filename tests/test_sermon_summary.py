@@ -33,10 +33,12 @@ from stt.sermon_summary import (
     parse_chapters,
     parse_offset,
     parse_sections,
+    progress_text,
     read_sermon_rows,
     ready_sermons,
     render_markdown,
     save_summary,
+    set_progress,
     snap_chapters,
     supersede,
     transcript_text,
@@ -602,4 +604,101 @@ class TestUnfinished:
         two = self.block(label="Sermon 2", start_ms=BASE + 60 * MIN, end_ms=BASE + 90 * MIN)
         out = unfinished([self.block(), two], [self.stored("done")])
         assert [b["label"] for b in out] == ["Sermon 2"]
+
+
+class TestProgress:
+    """A run takes minutes; silence for all of them looks the same as stuck."""
+
+    def test_it_counts_parts_from_one(self):
+        assert progress_text(0, 15) == "part 1 of 15"
+        assert progress_text(14, 15) == "part 15 of 15"
+
+    def test_it_does_not_run_past_the_total(self):
+        # The reduce step reports done == total; it must not read "part 16 of 15".
+        assert progress_text(15, 15) == "part 15 of 15"
+
+    def test_waiting_on_the_peer_says_so(self):
+        # During a service the machine holding the model defers to its captions, so a part
+        # can sit for minutes having been told to come back. That is correct, and identical
+        # to a hang unless it says which it is.
+        assert "waiting for the paired machine" in progress_text(3, 15, waiting=True)
+        assert "part 4 of 15" in progress_text(3, 15, waiting=True)
+
+    def test_the_reduce_step_has_its_own_wording(self):
+        assert progress_text(15, 15, reducing=True) == "writing the summary"
+
+    def test_an_unknown_total_still_says_something(self):
+        assert progress_text(0, 0) == "starting"
+
+
+class TestSetProgress:
+    @pytest.fixture()
+    def conn(self, tmp_path):
+        c = sqlite3.connect(tmp_path / "session.db")
+        ensure_tables(c)
+        save_summary(c, fingerprint="fp1", label="Sermon 1", start_ms=BASE,
+                     end_ms=BASE + 30 * MIN, status=STATUS_PENDING, transcript="text")
+        yield c
+        c.close()
+
+    def test_it_records_progress(self, conn):
+        assert set_progress(conn, "fp1", "part 3 of 15") == 1
+        assert load_summary(conn, "fp1")["progress"] == "part 3 of 15"
+
+    def test_it_touches_nothing_else(self, conn):
+        set_progress(conn, "fp1", "part 3 of 15")
+        got = load_summary(conn, "fp1")
+        assert got["label"] == "Sermon 1" and got["start_ms"] == BASE
+        assert got["transcript"] == "text" and got["status"] == STATUS_PENDING
+
+    def test_finishing_clears_it(self, conn):
+        # A finished run has no progress left to report, and a stale note beside a summary
+        # reads as though it were still going.
+        set_progress(conn, "fp1", "part 15 of 15")
+        save_summary(conn, fingerprint="fp1", label="Sermon 1", start_ms=BASE,
+                     end_ms=BASE + 30 * MIN, status=STATUS_DONE, summary="Done.")
+        assert load_summary(conn, "fp1")["progress"] == ""
+
+    def test_an_unknown_fingerprint_writes_nothing(self, conn):
+        assert set_progress(conn, "nope", "part 1 of 2") == 0
+
+    def test_a_migration_that_cannot_run_does_not_stop_a_summary(self, tmp_path):
+        # A progress note is never worth failing a summary over, so a database that refuses
+        # the ALTER degrades to having no progress rather than raising.
+        class Refuses(sqlite3.Connection):
+            def execute(self, sql, *a):
+                if sql.startswith("PRAGMA table_info"):
+                    raise sqlite3.OperationalError("locked")
+                return sqlite3.Connection.execute(self, sql, *a)
+
+        c = sqlite3.connect(tmp_path / "awkward.db", factory=Refuses)
+        ensure_tables(c)  # must not raise
+        assert load_summaries(c) == []
+        c.close()
+
+    def test_progress_on_a_table_without_the_column_reads_as_empty(self, tmp_path):
+        c = sqlite3.connect(tmp_path / "bare.db")
+        assert set_progress(c, "fp1", "part 1 of 2") == 0
+        c.close()
+
+    def test_a_session_summarised_before_the_column_existed_still_reads(self, tmp_path):
+        """.62 already holds rows written without this column.
+
+        CREATE TABLE IF NOT EXISTS is a no-op on an existing table, so without the migration
+        every write against those sessions would fail on the missing column.
+        """
+        path = tmp_path / "older.db"
+        c = sqlite3.connect(path)
+        c.execute("CREATE TABLE sermon_summaries ("
+                  "id INTEGER PRIMARY KEY AUTOINCREMENT, label TEXT, start_ms INTEGER, "
+                  "end_ms INTEGER, fingerprint TEXT UNIQUE, transcript TEXT, summary TEXT, "
+                  "chapters_json TEXT, model TEXT, status TEXT, error TEXT, generated_at TEXT)")
+        c.execute("INSERT INTO sermon_summaries (fingerprint, label, status) "
+                  "VALUES ('old', 'Sermon 1', 'done')")
+        c.commit()
+
+        ensure_tables(c)
+        assert set_progress(c, "old", "part 1 of 3") == 1
+        assert load_summary(c, "old")["progress"] == "part 1 of 3"
+        c.close()
 

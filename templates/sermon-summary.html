@@ -62,6 +62,19 @@
         border: 1px solid var(--warning);
       }
 
+      .ss-progress {
+        color: var(--warning); font-size: 0.92em; margin-bottom: 14px;
+        display: flex; align-items: center; gap: 9px;
+      }
+      .ss-progress::before {
+        content: ""; width: 9px; height: 9px; border-radius: 50%;
+        background: var(--warning); flex: none;
+        animation: ss-pulse 1.4s var(--ease-out) infinite;
+      }
+      @keyframes ss-pulse { 0%, 100% { opacity: 0.35; } 50% { opacity: 1; } }
+      @media (prefers-reduced-motion: reduce) {
+        .ss-progress::before { animation: none; }
+      }
       .ss-chapters { list-style: none; padding: 0; margin: 0 0 14px; }
       .ss-chapters li {
         display: flex; gap: 14px; padding: 6px 0; border-top: 1px solid var(--border);
@@ -139,9 +152,13 @@
     const chapters = (entry.chapters || []).map(c =>
       '<li><span class="ss-at">' + esc(fmtOffset(c.ts_ms, entry.start_ms)) + '</span>'
       + '<span>' + esc(c.title) + '</span></li>').join('');
+    // A run takes minutes, so "summarising" on its own is indistinguishable from stuck.
+    const running = state === 'running' || state === 'pending';
     const body = state === 'error'
       ? '<div class="ss-summary">' + esc(entry.error || 'Failed.') + '</div>'
-      : '<div class="ss-summary">' + esc(entry.summary || '') + '</div>';
+      : running
+        ? '<div class="ss-progress">' + esc(entry.progress || 'starting') + '</div>'
+        : '<div class="ss-summary">' + esc(entry.summary || '') + '</div>';
     return '<div class="ss-card">'
       + '<div class="ss-head">'
       +   '<span class="ss-label">' + esc(entry.label || 'Sermon') + '</span>'

@@ -466,6 +466,23 @@ def unfinished(blocks: Sequence[dict], stored: Sequence[dict], *,
     return out
 
 
+def progress_text(done: int, total: int, *, waiting: bool = False,
+                  reducing: bool = False) -> str:
+    """What a run in flight should say about itself.
+
+    A sermon takes minutes, and "summarising" alone for all of them is indistinguishable
+    from stuck. The waiting case matters most: during a service the machine holding the model
+    defers to its captions, so a part can sit for minutes having asked and been told to come
+    back — which is correct behaviour and looks identical to a hang unless it says so.
+    """
+    if reducing:
+        return "writing the summary"
+    if total <= 0:
+        return "starting"
+    place = f"part {min(int(done) + 1, int(total))} of {int(total)}"
+    return f"{place} — waiting for the paired machine" if waiting else place
+
+
 # --- Persistence ------------------------------------------------------------------
 #
 # One table, in the session's own database beside the transcript it was written from. A
@@ -480,6 +497,11 @@ _DDL = (
         model TEXT, status TEXT, error TEXT, generated_at TEXT)""",
 )
 
+# Columns added after the table first shipped. CREATE TABLE IF NOT EXISTS is a no-op on an
+# existing table, so a session summarised under an earlier build keeps the older shape and
+# the write would fail on the missing column.
+_ADDED_COLUMNS = (("sermon_summaries", "progress", "TEXT"),)
+
 STATUS_PENDING = "pending"
 STATUS_RUNNING = "running"
 STATUS_DONE = "done"
@@ -487,10 +509,33 @@ STATUS_ERROR = "error"
 
 
 def ensure_tables(conn: "sqlite3.Connection") -> None:
-    """Create the table if absent. Safe to call on every run."""
+    """Create the table if absent and add any later columns. Safe to call on every run."""
     for stmt in _DDL:
         conn.execute(stmt)
+    for table, column, decl in _ADDED_COLUMNS:
+        try:
+            have = {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
+            if column not in have:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
+        except sqlite3.Error:
+            pass  # a progress note is never worth failing a summary over
     conn.commit()
+
+
+def set_progress(conn: "sqlite3.Connection", fingerprint: str, text: str) -> int:
+    """Note how far a run has got, touching nothing else.
+
+    An UPDATE rather than a save_summary upsert, for the same reason mark_error is: the
+    caller knows the fingerprint and little else, and writing a row from those defaults would
+    replace a real sermon's label and range with placeholders.
+    """
+    try:
+        cur = conn.execute("UPDATE sermon_summaries SET progress = ? WHERE fingerprint = ?",
+                           (text, fingerprint))
+    except sqlite3.Error:
+        return 0
+    conn.commit()
+    return int(cur.rowcount or 0)
 
 
 def save_summary(conn: "sqlite3.Connection", *, fingerprint: str, label: str,
@@ -515,7 +560,8 @@ def save_summary(conn: "sqlite3.Connection", *, fingerprint: str, label: str,
         "start_ms=excluded.start_ms, end_ms=excluded.end_ms, "
         "transcript=excluded.transcript, summary=excluded.summary, "
         "chapters_json=excluded.chapters_json, model=excluded.model, "
-        "status=excluded.status, error=excluded.error, generated_at=excluded.generated_at",
+        "status=excluded.status, error=excluded.error, generated_at=excluded.generated_at, "
+        "progress=''",
         (fingerprint, label, int(start_ms), int(end_ms), transcript, summary,
          chapters_json, model, status, error, generated_at))
     conn.commit()
@@ -535,11 +581,13 @@ def _to_dict(r: Sequence) -> dict:
         "transcript": r[5] or "", "summary": r[6] or "", "chapters": chapters,
         "model": r[8] or "", "status": r[9] or "", "error": r[10] or "",
         "generated_at": r[11] or "",
+        "progress": (r[12] if len(r) > 12 else "") or "",
     }
 
 
 _SELECT = ("SELECT id, fingerprint, label, start_ms, end_ms, transcript, summary, "
-           "chapters_json, model, status, error, generated_at FROM sermon_summaries")
+           "chapters_json, model, status, error, generated_at, progress "
+           "FROM sermon_summaries")
 
 
 def load_summaries(conn: "sqlite3.Connection") -> List[dict]:

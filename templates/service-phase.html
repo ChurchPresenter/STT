@@ -914,10 +914,12 @@
     if (!entry) { box.style.display = 'none'; return; }
     box.style.display = '';
     document.getElementById('sp-sermon-label').textContent = entry.label || 'Sermon';
+    const running = entry.status === 'running' || entry.status === 'pending';
     document.getElementById('sp-sermon-state').textContent =
       entry.status === 'done' ? '' : (SERMON_STATE[entry.status] || entry.status || '');
-    document.getElementById('sp-sermon-body').innerHTML =
-      esc(entry.summary || entry.error || '');
+    // While it runs, the part count is the only thing that distinguishes working from stuck.
+    document.getElementById('sp-sermon-body').innerHTML = esc(
+      running ? (entry.progress || 'starting') : (entry.summary || entry.error || ''));
     const list = document.getElementById('sp-sermon-chapters');
     list.innerHTML = (entry.chapters || []).map(c =>
       '<li><span class="sp-chapter-at">' + esc(fmtClock(c.ts_ms, entry.start_ms)) + '</span>'
