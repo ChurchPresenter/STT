@@ -1,0 +1,562 @@
+"""Summary and chapters for one sermon, derived from the transcript under a phase block.
+
+Extracted from the monolith so it can be imported and unit-tested without the import-time
+side effects; stdlib-only, and every threshold, prompt and connection is passed in.
+
+The detector in :mod:`stt.service_phase` already finds where the sermon was. This module
+answers the next question — what was it about — for an operator who wants the answer while
+the service is still running, a few minutes after the preaching stops.
+
+Two constraints shape everything here:
+
+* **The model never gets to invent a timestamp.** It proposes chapter times in mm:ss, and
+  :func:`snap_chapters` resolves each one to a real ``transcriptions.ts_ms`` inside the
+  block or drops it. A chapter marker is published content: one that points at a moment
+  that does not exist is worse than no chapter at all, and a model asked for times will
+  always produce plausible ones.
+* **A sermon does not fit in one call.** A 30-minute sermon is ~7-10k tokens against a
+  default ``n_ctx`` of 2048, so the work is map-reduce: short per-chunk calls whose gists
+  are then reduced to one summary. That is not only a context-window workaround — it is
+  what keeps live caption translation responsive, because the shared GGUF is released
+  between chunks instead of being held for one multi-minute generation.
+
+Identity is the transcript fingerprint, never the block index. Phase blocks renumber,
+merge, and back-date their ``end_ms`` as a service runs (see service_phase.track_blocks),
+so a summary keyed by index would silently come to describe a different stretch of the
+service than the one it was written from.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import re
+import sqlite3
+from typing import Callable, Dict, List, NamedTuple, Optional, Sequence, Tuple
+
+from stt.llm_translate import estimate_tokens
+
+TokenCounter = Callable[[str], int]
+
+# Phase labels the detector numbers ("Sermon 1", "Sermon 2"), so the trigger matches on
+# the prefix rather than equality. _base_name in stt/phase_learn.py takes the same view.
+SERMON_LABEL_PREFIX = "Sermon"
+
+
+class Row(NamedTuple):
+    """One finalized transcript row: the id, its epoch-ms stamp, and the text."""
+
+    id: int
+    ts_ms: int
+    text: str
+
+
+class Chapter(NamedTuple):
+    """A chapter marker. ``ts_ms`` is always a real row's stamp, never a proposed one."""
+
+    ts_ms: int
+    title: str
+
+
+class Chunk:
+    """A run of consecutive rows that fits one map call, with the range it covers."""
+
+    __slots__ = ("end_ms", "index", "rows", "start_ms")
+
+    def __init__(self, index: int, rows: Sequence[Row]) -> None:
+        self.index = index
+        self.rows = list(rows)
+        self.start_ms = self.rows[0].ts_ms if self.rows else 0
+        self.end_ms = self.rows[-1].ts_ms if self.rows else 0
+
+    @property
+    def text(self) -> str:
+        return " ".join(r.text for r in self.rows if r.text)
+
+    def __repr__(self) -> str:  # pragma: no cover - debugging aid
+        return f"<Chunk {self.index} rows={len(self.rows)} {self.start_ms}-{self.end_ms}>"
+
+
+def _tokens(text: str, counter: Optional[TokenCounter]) -> int:
+    """Token count via ``counter``, falling back to the heuristic if it raises.
+
+    Mirrors llm_translate._count: the local GGUF path can hand us the model's own
+    tokenizer, and a tokenizer that throws must degrade rather than abort a summary.
+    """
+    if counter is not None:
+        try:
+            return int(counter(text))
+        except Exception:
+            pass
+    return estimate_tokens(text)
+
+
+# --- Reading ----------------------------------------------------------------------
+
+
+def read_sermon_rows(conn: "sqlite3.Connection", start_ms: int, end_ms: int) -> List[Row]:
+    """Finalized, visible transcript rows inside one block, oldest first.
+
+    Unlike phase_learn.read_phase_text this keeps the row id and stamp (chapters have to
+    resolve to a real moment) and excludes denied rows. The detector deliberately keeps
+    denied rows because auto-denied music is evidence a song is playing; a summary is
+    published prose, so hallucination-flagged and music rows have no business in it.
+    """
+    try:
+        cur = conn.execute(
+            "SELECT id, ts_ms, text FROM transcriptions "
+            "WHERE is_final = 1 AND denied = 0 AND ts_ms IS NOT NULL "
+            "AND ts_ms >= ? AND ts_ms <= ? ORDER BY ts_ms, id",
+            (int(start_ms), int(end_ms)))
+    except sqlite3.Error:
+        return []
+    return [Row(int(r[0]), int(r[1]), (r[2] or "").strip()) for r in cur if (r[2] or "").strip()]
+
+
+def fingerprint(rows: Sequence[Row]) -> str:
+    """Stable identity for the text a summary was written from.
+
+    Row ids are included alongside the text so that re-transcribing a stretch (same words,
+    new rows) is treated as new material, and so that a correction to one caption
+    invalidates the summary that quoted it.
+    """
+    h = hashlib.sha256()
+    for r in rows:
+        h.update(str(r.id).encode("utf-8"))
+        h.update(b"\x1f")
+        h.update(r.text.encode("utf-8"))
+        h.update(b"\x1e")
+    return h.hexdigest()
+
+
+def transcript_text(rows: Sequence[Row]) -> str:
+    """The sermon as one block of prose, for storage and for the review page."""
+    return " ".join(r.text for r in rows if r.text)
+
+
+# --- Chunking ---------------------------------------------------------------------
+
+
+def chunk_rows(rows: Sequence[Row], budget_tokens: int, *,
+               counter: Optional[TokenCounter] = None) -> List[Chunk]:
+    """Pack rows into chunks that each fit ``budget_tokens``.
+
+    A row is never split: it is one caption, and half a caption is neither quotable nor
+    attributable to a timestamp. A single row larger than the budget therefore gets a
+    chunk of its own and is allowed to exceed it — declining it would silently drop that
+    stretch of the sermon, and the model truncating an over-long prompt is the better
+    failure of the two.
+    """
+    if budget_tokens <= 0 or not rows:
+        return []
+    chunks: List[Chunk] = []
+    current: List[Row] = []
+    used = 0
+    for row in rows:
+        cost = _tokens(row.text, counter) + 1  # +1 for the joining space
+        if current and used + cost > budget_tokens:
+            chunks.append(Chunk(len(chunks), current))
+            current, used = [], 0
+        current.append(row)
+        used += cost
+    if current:
+        chunks.append(Chunk(len(chunks), current))
+    return chunks
+
+
+# --- Time formatting --------------------------------------------------------------
+
+
+def format_offset(ts_ms: int, base_ms: int) -> str:
+    """``ts_ms`` as mm:ss (or h:mm:ss past an hour) relative to the sermon start."""
+    secs = max(0, int(ts_ms) - int(base_ms)) // 1000
+    hours, rem = divmod(secs, 3600)
+    minutes, seconds = divmod(rem, 60)
+    if hours:
+        return f"{hours}:{minutes:02d}:{seconds:02d}"
+    return f"{minutes}:{seconds:02d}"
+
+
+_OFFSET_RE = re.compile(r"^(?:(\d{1,2}):)?(\d{1,3}):(\d{2})$")
+
+
+def parse_offset(text: str) -> Optional[int]:
+    """mm:ss / h:mm:ss to milliseconds, or None if it is not a timestamp."""
+    m = _OFFSET_RE.match((text or "").strip())
+    if not m:
+        return None
+    hours = int(m.group(1) or 0)
+    minutes, seconds = int(m.group(2)), int(m.group(3))
+    if seconds >= 60:
+        return None
+    return ((hours * 3600) + (minutes * 60) + seconds) * 1000
+
+
+# --- Prompts ----------------------------------------------------------------------
+
+# Written to be language-neutral and to say "in the same language as the transcript" rather
+# than naming one: the summary is for the operator who just heard the sermon, and the
+# services this runs on are not in English. Naming a language here would also make the
+# prompt wrong the moment the installation changes congregation.
+
+MAP_SYSTEM = (
+    "You are summarising one part of a church sermon transcript.\n"
+    "Write 2-4 short sentences covering what is actually said in this part: the point being "
+    "made, any scripture referenced, and any story or illustration used.\n"
+    "Write in the same language as the transcript.\n"
+    "Do not add anything that is not in the text. Do not add a preface, a heading, or a "
+    "closing remark. Output only the summary sentences."
+)
+
+
+def build_map_prompt(chunk: Chunk, *, base_ms: int) -> Tuple[str, str]:
+    """``(system, user)`` for one chunk.
+
+    The time range is stated so the reduce step can place the gists on a timeline without
+    the map step being asked to produce timestamps of its own.
+    """
+    span = f"[{format_offset(chunk.start_ms, base_ms)}-{format_offset(chunk.end_ms, base_ms)}]"
+    return MAP_SYSTEM, f"Part {chunk.index + 1} {span}:\n\n{chunk.text}"
+
+
+def _reduce_system(max_chapters: int) -> str:
+    """The reduce instructions, parameterised by the chapter cap.
+
+    The 'Major Movements' framing and the cap are deliberate. Asked for chapters without
+    them, a model returns one per point and produces a table of contents nobody scrubs
+    through; the cap forces it to decide what the sermon's actual movements were.
+    """
+    return (
+        "You are given ordered summaries of consecutive parts of one church sermon, each "
+        "with the time range it covers.\n"
+        "Write in the same language as the summaries.\n"
+        "Reply with exactly these two sections and nothing else:\n"
+        "\n"
+        "### Summary\n"
+        "One paragraph of 4-6 sentences: what this sermon was about, its main point, and "
+        "the scripture it worked from.\n"
+        "\n"
+        "### Chapters\n"
+        f"Between 3 and {max_chapters} lines, each `m:ss Title`.\n"
+        "Chapters are the sermon's major movements, not every individual point. Each title "
+        "is a short phrase describing what that stretch is about.\n"
+        "Use only timestamps that appear in the time ranges above. Never invent a time. "
+        "The first chapter starts at the beginning of the sermon.\n"
+        "Do not add any other section, preface, or closing remark."
+    )
+
+
+def build_reduce_prompt(gists: Sequence[Tuple[str, str]], *,
+                        max_chapters: int = 8) -> Tuple[str, str]:
+    """``(system, user)`` for the reduce call.
+
+    ``gists`` is ``(span_label, gist_text)`` in order — the span label carries the time
+    range, which is the only timing information the model is ever shown.
+    """
+    body = "\n\n".join(f"{span}\n{text}" for span, text in gists if text)
+    return _reduce_system(max_chapters), body
+
+
+# --- Parsing ----------------------------------------------------------------------
+
+_HEADING_RE = re.compile(r"^\s{0,3}#{1,6}\s*(.+?)\s*#*\s*$")
+
+
+def parse_sections(raw: str) -> Dict[str, str]:
+    """Split a markdown reply into ``{lowercased heading: body}``.
+
+    Tolerant of the heading level and of decoration, because the model varies both between
+    replies. Text before the first heading is returned under ``""`` so a reply that came
+    back with no headings at all is still recoverable by the caller.
+    """
+    sections: Dict[str, List[str]] = {"": []}
+    current = ""
+    for line in (raw or "").splitlines():
+        m = _HEADING_RE.match(line)
+        if m:
+            current = m.group(1).strip().strip("*_").lower()
+            sections.setdefault(current, [])
+            continue
+        sections[current].append(line)
+    return {k: "\n".join(v).strip() for k, v in sections.items()}
+
+
+_CHAPTER_RE = re.compile(
+    r"^\s*(?:[-*•]\s*)?\[?\s*"          # optional bullet, optional opening bracket
+    r"((?:\d{1,2}:)?\d{1,3}:\d{2})"          # the timestamp
+    r"\s*\]?\s*[—–:.\-]?\s*"       # optional closing bracket and separator
+    r"(.+?)\s*$")
+
+
+def parse_chapters(section: str) -> List[Tuple[int, str]]:
+    """``(offset_ms, title)`` for each parseable line, in the order given.
+
+    Lines without a leading timestamp are skipped rather than guessed at: a chapter with
+    no time is not a chapter, and inferring one would be exactly the fabrication that
+    snap_chapters exists to prevent.
+    """
+    out: List[Tuple[int, str]] = []
+    for line in (section or "").splitlines():
+        m = _CHAPTER_RE.match(line)
+        if not m:
+            continue
+        offset = parse_offset(m.group(1))
+        title = m.group(2).strip().strip("*_").strip()
+        if offset is None or not title:
+            continue
+        out.append((offset, title))
+    return out
+
+
+# --- The anti-fabrication step ----------------------------------------------------
+
+
+def snap_chapters(proposed: Sequence[Tuple[int, str]], rows: Sequence[Row], *,
+                  start_ms: int, max_chapters: int = 8) -> List[Chapter]:
+    """Resolve proposed offsets onto real transcript rows, dropping what cannot resolve.
+
+    Every returned ``ts_ms`` is some row's own stamp. An offset that lands outside the
+    sermon is dropped outright rather than clamped: past the end it is the model
+    inventing material, and clamping would turn a fabrication into a plausible-looking
+    marker on the last sentence.
+
+    The first chapter is moved to the first row, because the model is told the sermon
+    starts at 0:00 but the block's first row is a second or two in, and a chapter list
+    that starts after the beginning leaves the opening unlabelled. That is still a real
+    row, so the no-invented-timestamp rule holds.
+    """
+    if not rows:
+        return []
+    stamps = [r.ts_ms for r in rows]
+    lo, hi = stamps[0], stamps[-1]
+
+    snapped: List[Chapter] = []
+    for offset, title in proposed:
+        target = int(start_ms) + int(offset)
+        if target < lo - 60_000 or target > hi:
+            continue  # outside the sermon; a minute of slack for the block's own back-dating
+        nearest = min(stamps, key=lambda s: abs(s - target))
+        snapped.append(Chapter(nearest, title))
+
+    snapped.sort(key=lambda c: c.ts_ms)
+
+    # One marker per moment, and strictly increasing: two chapters snapping to the same row
+    # would render as a duplicate, and the first title is the one the model put earlier.
+    deduped: List[Chapter] = []
+    for chapter in snapped:
+        if deduped and chapter.ts_ms <= deduped[-1].ts_ms:
+            continue
+        deduped.append(chapter)
+
+    if deduped:
+        deduped[0] = Chapter(lo, deduped[0].title)
+    return deduped[:max(1, int(max_chapters))]
+
+
+# --- The trigger predicate --------------------------------------------------------
+
+
+def ready_sermons(blocks: Sequence[dict], *, now_ms: int, settle_seconds: int = 180,
+                  min_minutes: int = 8, include_ongoing: bool = False,
+                  label_prefix: str = SERMON_LABEL_PREFIX) -> List[dict]:
+    """Sermon blocks that have finished and stayed finished long enough to summarise.
+
+    The settle window is the whole point. track_blocks back-dates a closing block's
+    ``end_ms`` to where the following run began, so a block that just closed is still
+    moving; summarising immediately would write a summary of a range that then changes
+    and be invalidated on the next tick. Waiting past the window costs a few minutes of a
+    service that has moved on to closing songs anyway.
+
+    ``include_ongoing`` is for the operator pressing the button. The detector always calls
+    the last block ongoing, so a sermon that is still the final block — the usual case at
+    the end of a service — is otherwise unreachable by any automatic rule. The operator can
+    see the preaching has stopped; the detector cannot yet.
+    """
+    out = []
+    for block in blocks:
+        if block.get("ongoing") and not include_ongoing:
+            continue
+        label = (block.get("label") or "")
+        if not label.startswith(label_prefix):
+            continue
+        if int(block.get("minutes") or 0) < int(min_minutes):
+            continue
+        end_ms = int(block.get("end_ms") or 0)
+        if not end_ms:
+            continue
+        # An ongoing block's end is simply "now", so there is nothing to settle.
+        if not block.get("ongoing") and now_ms - end_ms < int(settle_seconds) * 1000:
+            continue
+        out.append(block)
+    return out
+
+
+# --- Persistence ------------------------------------------------------------------
+#
+# One table, in the session's own database beside the transcript it was written from. A
+# sermon transcript is verbatim congregation speech, so it lives in exactly one place and
+# is deleted when the session is: an aggregate store would outlive the recording it came
+# from. Cross-service review reads the archive instead, one database at a time.
+
+_DDL = (
+    """CREATE TABLE IF NOT EXISTS sermon_summaries (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, label TEXT, start_ms INTEGER, end_ms INTEGER,
+        fingerprint TEXT UNIQUE, transcript TEXT, summary TEXT, chapters_json TEXT,
+        model TEXT, status TEXT, error TEXT, generated_at TEXT)""",
+)
+
+STATUS_PENDING = "pending"
+STATUS_RUNNING = "running"
+STATUS_DONE = "done"
+STATUS_ERROR = "error"
+
+
+def ensure_tables(conn: "sqlite3.Connection") -> None:
+    """Create the table if absent. Safe to call on every run."""
+    for stmt in _DDL:
+        conn.execute(stmt)
+    conn.commit()
+
+
+def save_summary(conn: "sqlite3.Connection", *, fingerprint: str, label: str,
+                 start_ms: int, end_ms: int, status: str,
+                 transcript: str = "", summary: str = "",
+                 chapters: Sequence[Chapter] = (), model: str = "",
+                 error: str = "", generated_at: str = "") -> int:
+    """Upsert one sermon's summary, keyed by fingerprint. Returns the row id.
+
+    Keyed on the fingerprint rather than the block index so that a re-derived block whose
+    boundaries moved writes a new row, while an unchanged one is updated in place through
+    its pending -> running -> done progression.
+    """
+    ensure_tables(conn)
+    chapters_json = json.dumps([{"ts_ms": c.ts_ms, "title": c.title} for c in chapters],
+                               ensure_ascii=False)
+    conn.execute(
+        "INSERT INTO sermon_summaries (fingerprint, label, start_ms, end_ms, transcript, "
+        "summary, chapters_json, model, status, error, generated_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+        "ON CONFLICT(fingerprint) DO UPDATE SET label=excluded.label, "
+        "start_ms=excluded.start_ms, end_ms=excluded.end_ms, "
+        "transcript=excluded.transcript, summary=excluded.summary, "
+        "chapters_json=excluded.chapters_json, model=excluded.model, "
+        "status=excluded.status, error=excluded.error, generated_at=excluded.generated_at",
+        (fingerprint, label, int(start_ms), int(end_ms), transcript, summary,
+         chapters_json, model, status, error, generated_at))
+    conn.commit()
+    row = conn.execute("SELECT id FROM sermon_summaries WHERE fingerprint = ?",
+                       (fingerprint,)).fetchone()
+    return int(row[0]) if row else 0
+
+
+def _to_dict(r: Sequence) -> dict:
+    try:
+        chapters = json.loads(r[7] or "[]")
+    except (ValueError, TypeError):
+        chapters = []
+    return {
+        "id": int(r[0]), "fingerprint": r[1], "label": r[2],
+        "start_ms": int(r[3] or 0), "end_ms": int(r[4] or 0),
+        "transcript": r[5] or "", "summary": r[6] or "", "chapters": chapters,
+        "model": r[8] or "", "status": r[9] or "", "error": r[10] or "",
+        "generated_at": r[11] or "",
+    }
+
+
+_SELECT = ("SELECT id, fingerprint, label, start_ms, end_ms, transcript, summary, "
+           "chapters_json, model, status, error, generated_at FROM sermon_summaries")
+
+
+def load_summaries(conn: "sqlite3.Connection") -> List[dict]:
+    """Every stored summary for this session, in service order."""
+    try:
+        return [_to_dict(r) for r in conn.execute(_SELECT + " ORDER BY start_ms, id")]
+    except sqlite3.Error:
+        return []  # a session recorded before this feature simply has none
+
+
+def load_summary(conn: "sqlite3.Connection", fingerprint: str) -> Optional[dict]:
+    """One stored summary by fingerprint, or None."""
+    try:
+        row = conn.execute(_SELECT + " WHERE fingerprint = ?", (fingerprint,)).fetchone()
+    except sqlite3.Error:
+        return None
+    return _to_dict(row) if row else None
+
+
+def delete_summary(conn: "sqlite3.Connection", fingerprint: str) -> int:
+    """Drop one summary so it can be regenerated. Returns rows removed."""
+    try:
+        cur = conn.execute("DELETE FROM sermon_summaries WHERE fingerprint = ?", (fingerprint,))
+    except sqlite3.Error:
+        return 0
+    conn.commit()
+    return int(cur.rowcount or 0)
+
+
+def mark_error(conn: "sqlite3.Connection", fingerprint: str, error: str) -> int:
+    """Record that a summary failed, touching only the status and the message.
+
+    Deliberately an UPDATE and not a save_summary upsert: the failure handler often knows
+    nothing but the fingerprint, and writing a row from those defaults would replace a real
+    sermon's label and time range with placeholders — losing the very thing that says which
+    sermon failed. Returns rows updated; 0 means there was nothing to mark.
+    """
+    try:
+        cur = conn.execute(
+            "UPDATE sermon_summaries SET status = ?, error = ? WHERE fingerprint = ?",
+            (STATUS_ERROR, error, fingerprint))
+    except sqlite3.Error:
+        return 0
+    conn.commit()
+    return int(cur.rowcount or 0)
+
+
+def supersede(conn: "sqlite3.Connection", *, label: str, start_ms: int,
+              keep: str) -> int:
+    """Drop earlier summaries of the same sermon, keeping fingerprint ``keep``.
+
+    A sermon summarised on request while it was still running, and then again once it
+    closed, produces two rows for one sermon — the first describing only as much of it as
+    had been preached. Same label and same start is the same sermon; the newer row is the
+    complete one. Returns rows removed.
+
+    Keyed on the block's start rather than its end because a block's start is fixed when it
+    begins, while its end moves until the following block settles.
+    """
+    try:
+        cur = conn.execute(
+            "DELETE FROM sermon_summaries WHERE label = ? AND start_ms = ? AND fingerprint != ?",
+            (label, int(start_ms), keep))
+    except sqlite3.Error:
+        return 0
+    conn.commit()
+    return int(cur.rowcount or 0)
+
+
+def has_summaries(conn: "sqlite3.Connection") -> bool:
+    """Whether this session holds any summary — the archive listing's filter."""
+    try:
+        row = conn.execute("SELECT 1 FROM sermon_summaries LIMIT 1").fetchone()
+    except sqlite3.Error:
+        return False
+    return row is not None
+
+
+def render_markdown(entry: dict) -> str:
+    """One summary as markdown, for the review page's copy-out.
+
+    Chapter times are rendered relative to the sermon's own start, which is what a reader
+    scrubbing a recording of the sermon needs; the absolute stamps stay in the database.
+    """
+    base = int(entry.get("start_ms") or 0)
+    lines = [f"# {entry.get('label') or 'Sermon'}", ""]
+    if entry.get("summary"):
+        lines += [entry["summary"], ""]
+    chapters = entry.get("chapters") or []
+    if chapters:
+        lines.append("## Chapters")
+        for c in chapters:
+            lines.append(f"- {format_offset(int(c.get('ts_ms') or 0), base)} {c.get('title') or ''}")
+        lines.append("")
+    return "\n".join(lines).strip() + "\n"
