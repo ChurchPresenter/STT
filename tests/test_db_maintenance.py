@@ -8,6 +8,7 @@ passes every other test in this file and fails that one.
 """
 
 import os
+import shutil
 import sqlite3
 from pathlib import Path
 
@@ -16,6 +17,7 @@ import pytest
 from stt.db_maintenance import (
     SIDECAR_SUFFIXES,
     checkpoint_and_release,
+    open_readonly,
     resolve_sidecars,
     sweep_orphaned_sidecars,
 )
@@ -261,3 +263,95 @@ class TestSweep:
         result = sweep_orphaned_sidecars([str(tmp_path)])
         assert set(result) == {"scanned", "cleaned", "skipped_active",
                                "skipped_recent", "failed", "errors"}
+
+
+class TestOpenReadonly:
+    """Reading a session that was never retired.
+
+    journal_mode is persistent, so a database whose header says WAL stays that way in a
+    *copy* — which is what delivery produces. Opened ``mode=ro`` with no ``-shm`` beside it,
+    SQLite must create that index to read the WAL and a read-only connection may not, so the
+    open fails outright. A caller that treats that as "skip this file" hides exactly the
+    finished services a review page exists to show.
+
+    The never-lose-a-WAL property belongs to checkpoint_and_release and is pinned at the top
+    of this file; open_readonly delegates to it rather than reimplementing it.
+    """
+
+    def delivered_copy(self, tmp_path, rows=4):
+        """A WAL-header database copied without its sidecars, as a delivered session is.
+
+        The source is checkpointed first so the rows and the schema are really in the .db —
+        otherwise the copy is empty and the test would pass for the wrong reason. Nothing is
+        deleted: the copy simply does not include the sidecars.
+        """
+        src = tmp_path / "src.db"
+        conn = make_session_db(src, rows=rows)
+        conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")   # into the .db, still WAL mode
+        conn.commit()
+        dst = tmp_path / "2026-08-16_101502.db"
+        shutil.copyfile(src, dst)
+        conn.close()
+        assert not os.path.exists(str(dst) + "-shm")
+        return dst
+
+    def header_is_wal(self, path):
+        """Whether the file header says WAL, read without opening the database.
+
+        PRAGMA journal_mode would open it read-write, which creates the very -shm whose
+        absence is the condition under test — the probe would fix what it is probing. Bytes
+        18 and 19 of the header are the write and read format versions; 2 means WAL.
+        """
+        with open(path, "rb") as fh:
+            header = fh.read(20)
+        return len(header) >= 20 and header[18] == 2
+
+    def test_the_copy_really_is_a_wal_database(self, tmp_path):
+        path = self.delivered_copy(tmp_path, rows=4)
+        assert self.header_is_wal(path), "setup no longer reproduces a delivered WAL session"
+
+    def test_a_delivered_wal_database_cannot_be_opened_readonly(self, tmp_path):
+        path = self.delivered_copy(tmp_path)
+        assert self.header_is_wal(path)
+        with pytest.raises(sqlite3.Error):
+            ro = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+            ro.execute("SELECT count(*) FROM sqlite_master").fetchone()
+
+    def test_open_readonly_reads_it_anyway(self, tmp_path):
+        path = self.delivered_copy(tmp_path, rows=4)
+        with open_readonly(str(path)) as ro:
+            assert ro.execute("SELECT COUNT(*) FROM transcriptions").fetchone()[0] == 4
+
+    def test_recovery_leaves_no_sidecars_and_a_persistent_mode(self, tmp_path):
+        path = self.delivered_copy(tmp_path)
+        open_readonly(str(path)).close()
+        assert not os.path.exists(str(path) + "-wal")
+        assert not os.path.exists(str(path) + "-shm")
+        assert not self.header_is_wal(path), "recovery must leave it out of WAL mode"
+
+    def test_a_clean_database_opens_untouched(self, tmp_path):
+        path = tmp_path / "session.db"
+        make_session_db(path, rows=4, leave_wal=False)
+        before = os.stat(path).st_mtime_ns
+        with open_readonly(str(path)) as ro:
+            assert ro.execute("SELECT COUNT(*) FROM transcriptions").fetchone()[0] == 4
+        assert os.stat(path).st_mtime_ns == before
+
+    def test_the_connection_is_genuinely_read_only(self, tmp_path):
+        path = tmp_path / "session.db"
+        make_session_db(path, leave_wal=False)
+        with open_readonly(str(path)) as ro:
+            with pytest.raises(sqlite3.OperationalError):
+                ro.execute("INSERT INTO transcriptions (text) VALUES ('nope')")
+
+    def test_recover_false_refuses_rather_than_retiring_someone_elses_wal(self, tmp_path):
+        # The live session's writer owns its WAL; retiring it from a reader is not ours.
+        path = self.delivered_copy(tmp_path)
+        assert self.header_is_wal(path)
+        with pytest.raises(sqlite3.Error):
+            open_readonly(str(path), recover=False)
+        assert self.header_is_wal(path), "a refused open must not retire the database"
+
+    def test_a_missing_file_raises(self, tmp_path):
+        with pytest.raises(sqlite3.Error):
+            open_readonly(str(tmp_path / "nope.db"))

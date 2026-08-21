@@ -58,6 +58,46 @@ def looks_like_sqlite(path: str) -> bool:
         return False
 
 
+def open_readonly(db_path: str, recover: bool = True,
+                  timeout: float = 5.0) -> "sqlite3.Connection":
+    """A read-only connection, retiring an un-checkpointed WAL first if that is what blocks.
+
+    ``mode=ro`` cannot open a database still in WAL mode whose ``-shm`` is absent: SQLite
+    must create that shared-memory index to read the WAL, and a read-only connection may
+    not. That is precisely the shape a session left behind when the process died
+    mid-recording — the case this module exists for — so treating the failure as "skip this
+    database" would hide exactly the services most worth reading.
+
+    With ``recover`` the failure is instead treated as "this session was never retired":
+    :func:`checkpoint_and_release` folds its WAL in, which is the same thing the end of a
+    normal session does, and the open is retried. The database is left tidier than it was
+    found and nothing is discarded — the WAL is recovered, never deleted.
+
+    ``recover=False`` is for a database another process may be writing: its WAL is not ours
+    to retire, and the caller wants the error.
+
+    The statement after connect is not decoration. ``sqlite3.connect`` is lazy, so a
+    database that cannot actually be read hands back a healthy-looking connection and fails
+    later, somewhere further from the cause.
+    """
+    def _open() -> "sqlite3.Connection":
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=timeout)
+        try:
+            conn.execute("SELECT count(*) FROM sqlite_master").fetchone()
+        except Exception:
+            conn.close()
+            raise
+        return conn
+
+    try:
+        return _open()
+    except sqlite3.Error:
+        if not recover:
+            raise
+        checkpoint_and_release(db_path, timeout=timeout)
+        return _open()
+
+
 def checkpoint_and_release(db_path: str, timeout: float = 5.0) -> bool:
     """Fold the WAL into ``db_path`` and retire the sidecars.
 
