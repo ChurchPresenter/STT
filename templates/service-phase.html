@@ -145,6 +145,7 @@
   <label for="sp-session" style="color: var(--text-secondary); font-size: 0.88em;">Service</label>
   <select id="sp-session" onchange="pickSession()"></select>
   <span class="sp-archived" id="sp-archived" style="display: none;">finished service</span>
+  <button type="button" id="sp-back-live" onclick="backToLive()" style="display: none;">← Back to live</button>
   <a href="/sermon-summary" class="sp-link">📖 Sermon summaries</a>
 </div>
 
@@ -705,8 +706,16 @@
     return (h ? h + 'h' : '') + m + 'm';
   }
 
+  // Whether a service is running at all. Without one there is no live view to return to,
+  // and 'Back to live' has to say so rather than appearing to do nothing.
+  let spHasLive = false;
+
+  // Safe to call repeatedly: the chosen service is preserved across a refresh. Re-rendering
+  // the list and letting the selection fall back to the first option would silently move an
+  // operator off the service they were part-way through reviewing.
   async function loadSessions() {
     const select = document.getElementById('sp-session');
+    const previous = spSession;
     try {
       const resp = await pollFetch('/api/service-phase/sessions');
       const data = await resp.json();
@@ -714,6 +723,7 @@
       // The live service sorts to the top and stays selectable even before it has rows;
       // an operator mid-service is looking for it, not for last Sunday.
       const rows = (data.sessions || []).slice().sort((a, b) => (b.live ? 1 : 0) - (a.live ? 1 : 0));
+      spHasLive = rows.some(r => r.live);
       select.innerHTML = rows.map(r => {
         const bits = [r.live ? 'Live' : (r.date || r.session_id)];
         if (r.rows) bits.push(fmtDuration(r.minutes), r.rows + ' rows');
@@ -721,25 +731,41 @@
         return '<option value="' + (r.live ? '' : esc(r.session_id)) + '">'
           + esc(bits.join(' · ')) + '</option>';
       }).join('') || '<option value="">No recorded service</option>';
+
+      const kept = Array.prototype.some.call(select.options, o => o.value === previous);
+      select.value = kept ? previous : (select.options[0] || {}).value || '';
       spSession = select.value || '';
-      showArchivedBadge(rows);
+      showArchivedBadge();
     } catch (e) {
       if (e && e.pollingPaused) return;
     }
   }
 
-  function showArchivedBadge(rows) {
-    const chosen = (rows || []).find(r => (r.live ? '' : r.session_id) === spSession);
-    const archived = !!spSession && !(chosen && chosen.live);
-    document.getElementById('sp-archived').style.display = archived ? '' : 'none';
+  function showArchivedBadge() {
+    // spSession is '' only for the running service, so it is the whole test.
+    document.getElementById('sp-archived').style.display = spSession ? '' : 'none';
+    document.getElementById('sp-back-live').style.display = spSession ? '' : 'none';
   }
 
   function pickSession() {
     spSession = document.getElementById('sp-session').value || '';
-    document.getElementById('sp-archived').style.display = spSession ? '' : 'none';
+    showArchivedBadge();
     picked.clear();
     loadPhases();
     loadSermon();
+  }
+
+  // The way back. It refreshes the list first: a service that started after this page
+  // loaded has no entry yet, and 'no live option' is otherwise indistinguishable from
+  // 'nothing is running'.
+  async function backToLive() {
+    await loadSessions();
+    if (!spHasLive) {
+      showAlert('No service is running right now.', 'info');
+      return;
+    }
+    document.getElementById('sp-session').value = '';
+    pickSession();
   }
 
   // Distinct from 'Re-run detector', which recomputes and stores nothing on purpose. This
@@ -832,7 +858,14 @@
     loadSermon();
     // Only the live service changes under us; polling a finished one would keep
     // overwriting whatever the operator is part-way through reading.
-    setInterval(function () { if (!spSession) loadPhases(); }, 60000);
+    setInterval(function () {
+      // Only the live service changes under us; polling a finished one would keep
+      // overwriting whatever the operator is part-way through reading. The session list
+      // is refreshed either way, so a service that starts now becomes reachable without
+      // a reload.
+      loadSessions();
+      if (!spSession) loadPhases();
+    }, 60000);
   });
 </script>
 {% endblock %}
