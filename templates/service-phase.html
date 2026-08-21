@@ -33,6 +33,44 @@
       .sp-cell._ { background: var(--bg-elevated); }
       .sp-cell.cue { outline: 1px solid var(--warning); outline-offset: -1px; }
 
+      /* Which service the write buttons are about to touch. Correcting the wrong
+         service is the one mistake this page can make that the operator cannot see. */
+      .sp-archived {
+        font-size: 0.72em; letter-spacing: 0.04em; text-transform: uppercase;
+        padding: 3px 9px; border-radius: var(--radius-sm);
+        color: var(--warning); background: rgba(234,179,8,0.15);
+        border: 1px solid var(--warning);
+      }
+
+      .sp-link {
+        display: inline-flex; align-items: center; gap: 6px; text-decoration: none;
+        padding: 6px 12px; color: var(--info); background: var(--info-bg);
+        border: 1px solid var(--info); border-radius: var(--radius-sm); font-size: 0.88em;
+      }
+
+      /* Sermon summary panel. Read-only here — the full view, the archive and the
+         regenerate button live on /sermon-summary. */
+      .sp-sermon {
+        padding: 16px 18px; background: var(--bg-card); border: 1px solid var(--border);
+        border-radius: var(--radius-md); margin-bottom: 14px;
+      }
+      .sp-sermon h3 {
+        margin: 0 0 8px; font-size: 1em; color: var(--text-primary);
+        display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap;
+      }
+      .sp-sermon-state { font-size: 0.78em; color: var(--text-secondary); font-weight: 400; }
+      .sp-sermon-body { color: var(--text-secondary); line-height: 1.6; margin-bottom: 10px; }
+      .sp-chapters { list-style: none; padding: 0; margin: 0; }
+      .sp-chapters li {
+        display: flex; gap: 12px; padding: 4px 0;
+        border-top: 1px solid var(--border); color: var(--text-primary);
+      }
+      .sp-chapters li:first-child { border-top: none; }
+      .sp-chapter-at {
+        font-variant-numeric: tabular-nums; color: var(--text-muted);
+        min-width: 56px; flex-shrink: 0;
+      }
+
       /* Block timeline */
       .sp-block {
         display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
@@ -104,8 +142,17 @@
 </div>
 
 <div class="sp-toolbar">
+  <label for="sp-session" style="color: var(--text-secondary); font-size: 0.88em;">Service</label>
+  <select id="sp-session" onchange="pickSession()"></select>
+  <span class="sp-archived" id="sp-archived" style="display: none;">finished service</span>
+  <a href="/sermon-summary" class="sp-link">📖 Sermon summaries</a>
+</div>
+
+<div class="sp-toolbar">
   <button type="button" id="sp-load" onclick="loadPhases()">Refresh</button>
   <button type="button" id="sp-recompute" onclick="loadPhases(true)">Re-run detector</button>
+  <button type="button" id="sp-rerun" onclick="rerunAndSave()">Re-run &amp; save</button>
+  <button type="button" id="sp-summarise" onclick="generateSummaries()">Generate summaries</button>
   <span id="sp-status" style="color: var(--text-secondary); font-size: 0.86em;"></span>
 </div>
 
@@ -131,6 +178,15 @@
 
 <div class="sp-notes" id="sp-notes" style="display: none;"></div>
 
+<div class="sp-sermon" id="sp-sermon" style="display: none;">
+  <h3>
+    <span id="sp-sermon-label">Sermon</span>
+    <span class="sp-sermon-state" id="sp-sermon-state"></span>
+  </h3>
+  <div class="sp-sermon-body" id="sp-sermon-body"></div>
+  <ul class="sp-chapters" id="sp-sermon-chapters"></ul>
+</div>
+
 <div class="sp-strip" id="sp-strip"></div>
 
 <div class="sp-head"><span class="sp-pick-gap"></span><span>clock</span><span>into service</span></div>
@@ -148,6 +204,25 @@
   const SP_KINDS = { 'M': 'Songs', 'S': 'Speaking', '_': 'Quiet' };
 
   let spData = { blocks: [], bins: [], corrections: [] };
+
+  // Which service every request on this page is about. '' means the running one, which is
+  // what the routes default to. Held here rather than read from the <select> at each call
+  // site so a write can never disagree with what the badge is showing.
+  let spSession = '';
+
+  // Every POST body goes through here. The alternative — remembering to add `session` at
+  // six call sites — is how a correction ends up written to the wrong service.
+  function spBody(obj) {
+    return JSON.stringify(Object.assign({ session: spSession }, obj));
+  }
+
+  function spQuery(extra) {
+    const p = new URLSearchParams();
+    if (spSession) p.set('session', spSession);
+    Object.keys(extra || {}).forEach(k => p.set(k, extra[k]));
+    const q = p.toString();
+    return q ? '?' + q : '';
+  }
 
   // Which rows are ticked for grouping. Held outside the DOM because the socket tick
   // re-renders the list every 20 seconds and would otherwise clear the operator's selection
@@ -400,8 +475,8 @@
       const resp = await fetch('/api/service-phase/correct', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ block_index: index, kind: kind,
-                               label: typed.trim() || sel.value, note: note.trim() })
+        body: spBody({ block_index: index, kind: kind,
+                       label: typed.trim() || sel.value, note: note.trim() })
       });
       const data = await resp.json();
       if (data.success) {
@@ -435,7 +510,7 @@
       const resp = await fetch('/api/service-phase/uncorrect', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body)
+        body: spBody(body)
       });
       const data = await resp.json();
       if (data.success) {
@@ -462,7 +537,7 @@
       const resp = await fetch('/api/service-phase/group', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
+        body: spBody({
           start_ms: span.start_ms, end_ms: span.end_ms, kind: span.kind || '',
           label: typed.trim() || span.label, note: ''
         })
@@ -578,7 +653,7 @@
       const resp = await fetch('/api/service-phase/group', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
+        body: spBody({
           start_ms: chosen[0].start_ms,
           end_ms: chosen[chosen.length - 1].end_ms,
           kind: kinds.size === 1 ? chosen[0].kind : '',
@@ -607,7 +682,7 @@
   async function loadPhases(recompute) {
     const status = document.getElementById('sp-status');
     try {
-      const resp = await pollFetch('/api/service-phase' + (recompute ? '?recompute=1' : ''));
+      const resp = await pollFetch('/api/service-phase' + spQuery(recompute ? { recompute: 1 } : {}));
       const data = await resp.json();
       if (!data.success) {
         status.textContent = data.error || 'Could not load.';
@@ -625,9 +700,125 @@
     }
   }
 
+  function fmtDuration(minutes) {
+    const h = Math.floor((minutes || 0) / 60), m = (minutes || 0) % 60;
+    return (h ? h + 'h' : '') + m + 'm';
+  }
+
+  async function loadSessions() {
+    const select = document.getElementById('sp-session');
+    try {
+      const resp = await pollFetch('/api/service-phase/sessions');
+      const data = await resp.json();
+      if (!data.success) return;
+      // The live service sorts to the top and stays selectable even before it has rows;
+      // an operator mid-service is looking for it, not for last Sunday.
+      const rows = (data.sessions || []).slice().sort((a, b) => (b.live ? 1 : 0) - (a.live ? 1 : 0));
+      select.innerHTML = rows.map(r => {
+        const bits = [r.live ? 'Live' : (r.date || r.session_id)];
+        if (r.rows) bits.push(fmtDuration(r.minutes), r.rows + ' rows');
+        if (r.has_summaries) bits.push('📖');
+        return '<option value="' + (r.live ? '' : esc(r.session_id)) + '">'
+          + esc(bits.join(' · ')) + '</option>';
+      }).join('') || '<option value="">No recorded service</option>';
+      spSession = select.value || '';
+      showArchivedBadge(rows);
+    } catch (e) {
+      if (e && e.pollingPaused) return;
+    }
+  }
+
+  function showArchivedBadge(rows) {
+    const chosen = (rows || []).find(r => (r.live ? '' : r.session_id) === spSession);
+    const archived = !!spSession && !(chosen && chosen.live);
+    document.getElementById('sp-archived').style.display = archived ? '' : 'none';
+  }
+
+  function pickSession() {
+    spSession = document.getElementById('sp-session').value || '';
+    document.getElementById('sp-archived').style.display = spSession ? '' : 'none';
+    picked.clear();
+    loadPhases();
+    loadSermon();
+  }
+
+  // Distinct from 'Re-run detector', which recomputes and stores nothing on purpose. This
+  // is the one that brings a past service's saved phases up to date with current logic.
+  async function rerunAndSave() {
+    const status = document.getElementById('sp-status');
+    status.textContent = 'Re-running…';
+    try {
+      const resp = await fetch('/api/service-phase/rerun', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: spBody({})
+      });
+      const data = await resp.json();
+      if (!data.success) { showAlert('Could not re-run: ' + data.error, 'error'); return; }
+      showAlert('Re-ran the detector: ' + data.blocks + ' blocks saved.', 'success');
+      loadPhases();
+    } catch (e) {
+      showAlert('Could not re-run: ' + e, 'error');
+    }
+  }
+
+  async function generateSummaries() {
+    try {
+      const resp = await fetch('/api/sermon-summary/generate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: spBody({})
+      });
+      const data = await resp.json();
+      if (!data.success) { showAlert('Could not queue: ' + data.error, 'error'); return; }
+      showAlert(data.queued
+        ? 'Queued ' + data.queued + (data.queued === 1 ? ' sermon.' : ' sermons.')
+        : 'No sermon block to summarise in this service.', data.queued ? 'success' : 'info');
+      loadSermon();
+    } catch (e) {
+      showAlert('Could not queue: ' + e, 'error');
+    }
+  }
+
+  // The most recent sermon summary, if there is one. Chapter times are rendered relative
+  // to that sermon's own start, which is what someone scrubbing a recording of it needs.
+  const SERMON_STATE = { pending: 'queued', running: 'summarising…', error: 'failed' };
+
+  function renderSermon(entry) {
+    const box = document.getElementById('sp-sermon');
+    if (!entry) { box.style.display = 'none'; return; }
+    box.style.display = '';
+    document.getElementById('sp-sermon-label').textContent = entry.label || 'Sermon';
+    document.getElementById('sp-sermon-state').textContent =
+      entry.status === 'done' ? '' : (SERMON_STATE[entry.status] || entry.status || '');
+    document.getElementById('sp-sermon-body').innerHTML =
+      esc(entry.summary || entry.error || '');
+    const list = document.getElementById('sp-sermon-chapters');
+    list.innerHTML = (entry.chapters || []).map(c =>
+      '<li><span class="sp-chapter-at">' + esc(fmtClock(c.ts_ms, entry.start_ms)) + '</span>'
+      + '<span>' + esc(c.title) + '</span></li>').join('');
+  }
+
+  async function loadSermon() {
+    try {
+      const resp = await pollFetch('/api/sermon-summary' + spQuery());
+      const data = await resp.json();
+      if (!data.success) return;
+      renderSermon((data.summaries || []).slice(-1)[0]);
+    } catch (e) {
+      if (e && e.pollingPaused) return;
+      // A missing summary is not an error worth a banner on the phase page.
+    }
+  }
+
   // Live updates straight from the detector tick.
   const socket = io();
+  socket.on('sermon_summary_update', function (data) {
+    if (spSession && data.session_id !== spSession) return;
+    renderSermon(data);
+  });
   socket.on('service_phase_update', function (data) {
+    if (spSession) return;  // watching a finished service; the live tick is not about it
     spData.current = data.current;
     spData.blocks = data.blocks || [];
     spData.spans = data.spans || [];
@@ -635,9 +826,13 @@
     renderBlocks();
   });
 
-  document.addEventListener('DOMContentLoaded', function () {
+  document.addEventListener('DOMContentLoaded', async function () {
+    await loadSessions();
     loadPhases();
-    setInterval(loadPhases, 60000);
+    loadSermon();
+    // Only the live service changes under us; polling a finished one would keep
+    // overwriting whatever the operator is part-way through reading.
+    setInterval(function () { if (!spSession) loadPhases(); }, 60000);
   });
 </script>
 {% endblock %}

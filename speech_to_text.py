@@ -958,6 +958,41 @@ from stt.service_phase import (
     save_group_correction as _service_phase_save_group,
 )
 from stt.phase_rules import load_rules as _phase_rules_load
+from stt.session_index import (
+    describe as _session_describe,
+    index as _session_index,
+    resolve_session as _session_resolve,
+)
+
+# Sermon summary and chapters live in stt/sermon_summary.py, beside the phase detector that
+# tells it where the sermon was; the monolith supplies the connection, the config and the
+# model call.
+from stt.sermon_summary import (
+    MAP_SYSTEM as _SERMON_MAP_SYSTEM,
+    STATUS_DONE as _SERMON_DONE,
+    STATUS_ERROR as _SERMON_ERROR,
+    STATUS_PENDING as _SERMON_PENDING,
+    STATUS_RUNNING as _SERMON_RUNNING,
+    build_map_prompt as _sermon_map_prompt,
+    build_reduce_prompt as _sermon_reduce_prompt,
+    chunk_rows as _sermon_chunk_rows,
+    delete_summary as _sermon_delete,
+    ensure_tables as _sermon_ensure_tables,
+    fingerprint as _sermon_fingerprint,
+    format_offset as _sermon_format_offset,
+    has_summaries as _sermon_has_summaries,
+    load_summaries as _sermon_load_all,
+    load_summary as _sermon_load,
+    mark_error as _sermon_mark_error,
+    parse_chapters as _sermon_parse_chapters,
+    parse_sections as _sermon_parse_sections,
+    read_sermon_rows as _sermon_read_rows,
+    ready_sermons as _sermon_ready,
+    save_summary as _sermon_save,
+    supersede as _sermon_supersede,
+    snap_chapters as _sermon_snap_chapters,
+    transcript_text as _sermon_transcript_text,
+)
 from stt.phase_learn import (
     apply_proposals as _phase_learn_apply,
     collect as _phase_learn_collect,
@@ -965,6 +1000,7 @@ from stt.phase_learn import (
 )
 from stt.db_maintenance import (
     checkpoint_and_release as _db_checkpoint_and_release,
+    open_readonly as _db_open_readonly,
     sweep_orphaned_sidecars as _db_sweep_sidecars,
     _iter_databases as _db_iter_databases,
 )
@@ -5460,24 +5496,24 @@ def _service_phase_resolve_db():
 
 @app.route("/api/service-phase")
 def get_service_phase():
-    """Detected phases for the running session.
+    """Detected phases for a session — the running one, or ``?session=`` from the archive.
 
     ``?recompute=1`` re-runs the detector over the session's rows instead of reading the
     output the tick saved, without writing anything. That is what makes the logic
     improvable without waiting: change a threshold, reload, compare against what the
-    operator is watching happen.
+    operator is watching happen. POST /api/service-phase/rerun is the writing version.
     """
     if not check_ip_whitelist():
         return jsonify({"success": False, "error": "Access denied"}), 403
 
-    db_path, err = _service_phase_resolve_db()
+    db_path, is_live, err = _archive_resolve_db(request.args.get("session"))
     if err:
         return err
 
     cfg = _service_phase_config()
     recompute = request.args.get("recompute") in ("1", "true", "yes")
     try:
-        with sqlite3.connect(f"file:{db_path}?mode=ro", uri=True) as conn:
+        with _archive_open_ro(db_path, is_live) as conn:
             if recompute:
                 result = _service_phase_analyze(
                     _service_phase_rows(conn), cfg,
@@ -5492,6 +5528,7 @@ def get_service_phase():
     return jsonify({
         "success": True,
         "session_id": os.path.basename(db_path),
+        "live": is_live,
         "recomputed": recompute,
         "enabled": bool(cfg.get("enabled", True)),
         # The page renumbers the songs itself when a correction moves the opening, so it
@@ -5507,6 +5544,227 @@ def get_service_phase():
     })
 
 
+@app.route("/sermon-summary")
+def sermon_summary_page():
+    """Render the sermon summary review page (live session and the archive)."""
+    if not check_ip_whitelist():
+        return render_template("auth-required.html"), 403
+
+    return render_template("sermon-summary.html")
+
+
+def _archive_session_paths(limit=None):
+    """Every recorded session database, newest first.
+
+    The same sweep _service_phase_learn_scan uses. It is also the whitelist: a caller names
+    a session by basename and stt.session_index.resolve_session only ever compares that name
+    against this enumeration, so no caller-supplied string is joined onto a directory and
+    none of it reaches sqlite3.connect.
+    """
+    if limit is None:
+        limit = coerce_int(_sermon_summary_config().get("archive_scan_limit"), 200, lo=1, hi=2000)
+    return sorted(_db_iter_databases(_sidecar_sweep_dirs()), reverse=True)[:limit]
+
+
+def _archive_resolve_db(session):
+    """(path, is_live, error_response) for a named session, or the running one.
+
+    ``is_live`` is what decides whether a write may retire the database's WAL afterwards —
+    see _archive_write_done.
+    """
+    resolved = _session_resolve(_archive_session_paths(), session,
+                               _service_phase_session_db())
+    if resolved is None:
+        if (session or "").strip():
+            return None, False, (jsonify({"success": False, "error": "Unknown session"}), 404)
+        return None, False, (jsonify({"success": False, "error": "No session is running"}), 404)
+    return resolved[0], resolved[1], None
+
+
+def _archive_open_ro(db_path, is_live=False):
+    """A read-only connection to a session database.
+
+    Thin wrapper over db_maintenance.open_readonly, which carries the reasoning: a session
+    the process died during is still in WAL mode, and a plain ``mode=ro`` open cannot read
+    it. Recovery is refused for the live session — its writer owns that WAL.
+    """
+    return _db_open_readonly(db_path, recover=not is_live)
+
+
+def _archive_write_done(db_path, is_live):
+    """Retire the sidecars after writing to a finished session. No-op on the live one.
+
+    A finished session may already have been delivered to the NAS by stt/file_mover.py, and
+    writing to it in WAL mode leaves -wal/-shm beside a file this process no longer owns —
+    the litter sweep_db_sidecars exists to clean. checkpoint_and_release folds the WAL in and
+    switches the database to journal_mode=DELETE, which is persistent, so a service that has
+    been reviewed never grows sidecars again.
+
+    The live session is excluded deliberately: its writer is another thread that owns that
+    WAL, and retiring it from a web request would be reaching into a file still in use.
+    sweep_db_sidecars takes the same stance.
+    """
+    if is_live or not db_path:
+        return False
+    try:
+        return _db_checkpoint_and_release(db_path)
+    except Exception as e:
+        print(f"[ARCHIVE] could not retire sidecars for {os.path.basename(db_path)} "
+              f"({type(e).__name__}: {e})")
+        return False
+
+
+@app.route("/api/service-phase/sessions")
+def list_service_phase_sessions():
+    """Every recorded service, newest first — the picker behind both review pages.
+
+    Databases are opened read-only and one at a time: the archive shares a disk with the
+    session a service may be recording to, and a listing is never worth competing with the
+    writer for it. One unreadable session is skipped rather than failing the request, the
+    same way _service_phase_learn_scan sweeps.
+
+    Sessions with no finalized rows are dropped by session_index.index — a start/stop leaves
+    a database behind, and listing those buries the real services.
+    """
+    if not check_ip_whitelist():
+        return jsonify({"success": False, "error": "Access denied"}), 403
+
+    live = _service_phase_session_db()
+    described = []
+    for path in _archive_session_paths():
+        try:
+            conn = _archive_open_ro(path, is_live=bool(live and os.path.basename(path) == os.path.basename(live)))
+        except sqlite3.Error:
+            continue
+        try:
+            described.append((path, _session_describe(conn)))
+        except Exception:
+            continue
+        finally:
+            conn.close()
+
+    sessions = _session_index(described, live_path=live)
+    # A session that has just started has no rows yet, so the sweep drops it — but it is the
+    # one an operator mid-service is looking for. Put it back at the top.
+    if live and not any(x["live"] for x in sessions):
+        sessions.insert(0, {"session_id": os.path.basename(live), "date": os.path.basename(live)[:10],
+                            "live": True, "rows": 0, "start_ms": 0, "end_ms": 0, "minutes": 0,
+                            "has_phase": False, "has_summaries": False})
+    return jsonify({"success": True, "sessions": sessions,
+                    "live_session_id": os.path.basename(live) if live else None})
+
+
+@app.route("/api/service-phase/rerun", methods=["POST"])
+def rerun_service_phase():
+    """Re-run the detector over a session and save the result.
+
+    Deliberately a POST rather than a flag on GET ?recompute=1, which re-derives and writes
+    nothing on purpose — that is what lets a threshold change be compared against what is
+    stored. This is the other thing an operator wants: a past service whose phases were
+    detected by older logic, brought up to date.
+
+    Corrections are untouched; they live in their own table precisely so a re-run cannot
+    destroy them.
+    """
+    if not check_ip_whitelist():
+        return jsonify({"success": False, "error": "Access denied"}), 403
+
+    data = _control_params(keep_blank=True)
+    db_path, is_live, err = _archive_resolve_db(data.get("session"))
+    if err:
+        return err
+
+    cfg = _service_phase_config()
+    try:
+        conn = sqlite3.connect(db_path, timeout=15)
+        try:
+            result = _service_phase_analyze(
+                _service_phase_rows(conn), cfg,
+                first_sunday=_service_phase_first_sunday(db_path),
+                rules=_service_phase_rules())
+            written = _service_phase_save(conn, result)
+        finally:
+            conn.close()
+    except Exception as e:
+        return jsonify({"success": False, "error": f"{type(e).__name__}: {e}"}), 500
+
+    _archive_write_done(db_path, is_live)
+    return jsonify({"success": True, "session_id": os.path.basename(db_path),
+                    "live": is_live, "written": written,
+                    "blocks": len(result.get("blocks", []))})
+
+
+@app.route("/api/sermon-summary")
+def get_sermon_summary():
+    """Stored sermon summaries — the running session, or ``?session=`` from the archive."""
+    if not check_ip_whitelist():
+        return jsonify({"success": False, "error": "Access denied"}), 403
+
+    db_path, is_live, err = _archive_resolve_db(request.args.get("session"))
+    if err:
+        return err
+
+    cfg = _sermon_summary_config()
+    try:
+        with _archive_open_ro(db_path, is_live) as conn:
+            summaries = _sermon_load_all(conn)
+    except Exception as e:
+        return jsonify({"success": False, "error": f"{type(e).__name__}: {e}"}), 500
+
+    return jsonify({
+        "success": True,
+        "session_id": os.path.basename(db_path),
+        "live": is_live,
+        "enabled": bool(cfg.get("enabled", False)),
+        "summaries": summaries,
+    })
+
+
+@app.route("/api/sermon-summary/generate", methods=["POST"])
+def generate_sermon_summary():
+    """Summarise a sermon now, or regenerate one — live session or an archived one.
+
+    With no ``fingerprint`` it scans the session's blocks ignoring the settle window and
+    including a still-ongoing one, which is the operator saying the sermon is over
+    regardless of what the detector still thinks. On a finished service every block is
+    closed already, so the same call simply summarises whatever sermons it holds.
+    """
+    if not check_ip_whitelist():
+        return jsonify({"success": False, "error": "Access denied"}), 403
+
+    data = _control_params(keep_blank=True)
+    db_path, is_live, err = _archive_resolve_db(data.get("session"))
+    if err:
+        return err
+
+    fingerprint_value = (data.get("fingerprint") or "").strip()
+    if fingerprint_value:
+        try:
+            with sqlite3.connect(db_path, timeout=5) as conn:
+                entry = _sermon_load(conn, fingerprint_value)
+                if not entry:
+                    return jsonify({"success": False, "error": "Unknown summary"}), 404
+                _sermon_save(conn, fingerprint=fingerprint_value, label=entry["label"],
+                             start_ms=entry["start_ms"], end_ms=entry["end_ms"],
+                             status=_SERMON_PENDING, transcript=entry.get("transcript") or "")
+        except Exception as e:
+            return jsonify({"success": False, "error": f"{type(e).__name__}: {e}"}), 500
+        _sermon_queue.put((db_path, fingerprint_value, is_live))
+        return jsonify({"success": True, "queued": 1, "live": is_live})
+
+    # No fingerprint: queue whatever is summarisable right now.
+    try:
+        with _archive_open_ro(db_path, is_live) as conn:
+            blocks = _service_phase_load(conn).get("blocks", [])
+    except Exception as e:
+        return jsonify({"success": False, "error": f"{type(e).__name__}: {e}"}), 500
+
+    before = _sermon_queue.qsize()
+    _sermon_summary_scan(blocks, db_path, ignore_settle=True, is_live=is_live)
+    return jsonify({"success": True, "live": is_live,
+                    "queued": max(0, _sermon_queue.qsize() - before)})
+
+
 @app.route("/api/service-phase/correct", methods=["POST"])
 def save_service_phase_correction():
     """Record an operator correction. Never touched by the detector's own rewrites."""
@@ -5514,7 +5772,7 @@ def save_service_phase_correction():
         return jsonify({"success": False, "error": "Access denied"}), 403
 
     data = _control_params(keep_blank=True)
-    db_path, err = _service_phase_resolve_db()
+    db_path, is_live, err = _archive_resolve_db(data.get("session"))
     if err:
         return err
 
@@ -5540,6 +5798,7 @@ def save_service_phase_correction():
     except Exception as e:
         return jsonify({"success": False, "error": f"{type(e).__name__}: {e}"}), 500
 
+    _archive_write_done(db_path, is_live)
     return jsonify({"success": True, "id": row_id, "corrections": corrections})
 
 
@@ -5550,7 +5809,7 @@ def delete_service_phase_correction():
         return jsonify({"success": False, "error": "Access denied"}), 403
 
     data = _control_params(keep_blank=True)
-    db_path, err = _service_phase_resolve_db()
+    db_path, is_live, err = _archive_resolve_db(data.get("session"))
     if err:
         return err
 
@@ -5580,6 +5839,7 @@ def delete_service_phase_correction():
     except Exception as e:
         return jsonify({"success": False, "error": f"{type(e).__name__}: {e}"}), 500
 
+    _archive_write_done(db_path, is_live)
     return jsonify({"success": True, "removed": removed, "corrections": corrections})
 
 
@@ -5590,7 +5850,7 @@ def group_service_phase_blocks():
         return jsonify({"success": False, "error": "Access denied"}), 403
 
     data = _control_params(keep_blank=True)
-    db_path, err = _service_phase_resolve_db()
+    db_path, is_live, err = _archive_resolve_db(data.get("session"))
     if err:
         return err
 
@@ -5616,6 +5876,7 @@ def group_service_phase_blocks():
     except Exception as e:
         return jsonify({"success": False, "error": f"{type(e).__name__}: {e}"}), 500
 
+    _archive_write_done(db_path, is_live)
     return jsonify({"success": True, "id": row_id, "corrections": corrections})
 
 
@@ -5629,7 +5890,10 @@ def _service_phase_learn_scan(limit=200):
     phases = []
     for path in paths:
         try:
-            conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+            # Same recovery as the review pages: a session the process died during is
+            # still in WAL mode, and it is the corrections in exactly those that the
+            # learner most wants.
+            conn = _archive_open_ro(path)
         except sqlite3.Error:
             continue
         try:
@@ -16267,6 +16531,319 @@ def _service_phase_tick(is_running):
     except Exception:
         pass  # a diagnostic broadcast must never break the emit loop
 
+    _sermon_summary_scan(result.get("blocks", []), db_path)
+
+
+# --- Sermon summary -----------------------------------------------------------------
+#
+# The phase detector says where the sermon was; this says what it was about. The logic
+# (chunking, prompts, parsing, and the chapter snapping that keeps invented timestamps out)
+# lives in stt/sermon_summary.py; what stays here is the model call, the queue, and the
+# rule for when a sermon has settled enough to be worth summarising.
+
+_sermon_queue = Queue()
+
+# Published by the translation pump each cycle so the summariser can tell whether captions
+# are waiting. It is a hint, not a handshake: a stale count simply makes the summariser
+# more polite than it needed to be, which is the safe direction to be wrong in.
+_translation_pending = {"count": 0, "at": 0.0}
+
+
+def _sermon_summary_config():
+    return config.get("sermon_summary", {}) or {}
+
+
+def _sermon_captions_waiting():
+    """Whether live translation currently has captions queued."""
+    if not _sermon_summary_config().get("pause_on_backlog", True):
+        return False
+    state = _translation_pending
+    if time.time() - float(state.get("at") or 0) > 5.0:
+        return False  # nothing has reported recently; the pump is idle or off
+    return int(state.get("count") or 0) > 0
+
+
+def _sermon_yield():
+    """Give live translation the shared model between chunks.
+
+    The summariser holds the generation lock for one chunk at a time; this is the gap in
+    between, and it widens while captions are actually queued. Without it a sermon's worth
+    of back-to-back chunks would win the lock every time simply by asking first.
+    """
+    socketio.sleep(0.5)
+    waited = 0.0
+    while _sermon_captions_waiting() and waited < 120.0 and not _server_shutting_down.is_set():
+        socketio.sleep(1.0)
+        waited += 1.0
+
+
+def _sermon_model_label(llm_cfg):
+    """What produced a summary, for the stored provenance."""
+    if (llm_cfg.get("provider") or "endpoint") == "local":
+        return os.path.basename(llm_cfg.get("gguf_path") or llm_cfg.get("gguf_file") or "") or "local"
+    return llm_cfg.get("model") or "endpoint"
+
+
+def _sermon_llm_generate(system_prompt, user_text, max_tokens, llm_cfg):
+    """One summarisation call. Returns the reply text, or None.
+
+    Deliberately not routed through _translate_via_llm: that path validates its output as a
+    caption (length, expansion, script) and feeds _record_local_translate_ms. A summary
+    fails every one of those checks by design, and folding its multi-second generations into
+    the caption-latency EMA would make the health dashboard unreadable.
+    """
+    provider = (llm_cfg.get("provider") or "endpoint").strip().lower()
+    if provider == "local":
+        llm = get_local_llm(llm_cfg)
+        if llm is None:
+            return None
+        try:
+            with _local_llm_gen_lock:
+                out = llm.create_chat_completion(
+                    messages=[{"role": "system", "content": system_prompt},
+                              {"role": "user", "content": user_text}],
+                    temperature=0.0,
+                    max_tokens=max_tokens,
+                )
+            return _llm_extract_text(out)
+        except Exception as e:
+            print(f"[SERMON] generation failed ({type(e).__name__}: {e})")
+            return None
+
+    endpoint = (llm_cfg.get("endpoint") or "").strip()
+    if not endpoint:
+        return None
+    payload = _llm_chat_payload(llm_cfg.get("model") or "", user_text, system_prompt,
+                               max_tokens=max_tokens, keep_alive=llm_cfg.get("keep_alive", -1))
+    headers = {}
+    if (llm_cfg.get("api_key") or "").strip():
+        headers["Authorization"] = f"Bearer {llm_cfg['api_key'].strip()}"
+    try:
+        import requests as _req
+        # A summary is not a caption: nobody is waiting on it in real time, so it gets a
+        # generous timeout rather than the caption path's few seconds.
+        resp = _req.post(endpoint, json=payload, headers=headers, timeout=120)
+        resp.raise_for_status()
+        return _llm_extract_text(resp.json())
+    except Exception as e:
+        print(f"[SERMON] endpoint call failed ({type(e).__name__}: {e})")
+        return None
+
+
+def _sermon_budget(llm_cfg, system_prompt, reply_tokens):
+    """(input token budget, counter) for one call, from the configured context window."""
+    return _llm_budget_for(llm_cfg, system_prompt, reply_tokens)
+
+
+def _sermon_fold(gists, llm_cfg, cfg, reduce_system, max_chapters):
+    """Condense gists until the reduce prompt fits the context window.
+
+    A long service can produce more part-summaries than the window holds. Folding adjacent
+    pairs keeps the timeline ordered and simply makes the chapters coarser, which is the
+    right thing to lose — the alternative is truncating the tail and summarising a sermon
+    that stops halfway through.
+    """
+    reduce_tokens = coerce_int(cfg.get("reduce_max_tokens"), 700, lo=128, hi=4096)
+    budget, counter = _sermon_budget(llm_cfg, reduce_system, reduce_tokens)
+    map_tokens = coerce_int(cfg.get("map_max_tokens"), 220, lo=64, hi=1024)
+
+    for _ in range(3):
+        _, user = _sermon_reduce_prompt(gists, max_chapters=max_chapters)
+        if len(gists) <= 1 or _llm_input_fits(user, budget, counter=counter):
+            return gists
+        folded = []
+        for i in range(0, len(gists), 2):
+            pair = gists[i:i + 2]
+            if len(pair) == 1:
+                folded.append(pair[0])
+                continue
+            span = f"[{pair[0][0].strip('[]').split('-')[0]}-{pair[1][0].strip('[]').split('-')[-1]}]"
+            merged = "\n\n".join(t for _, t in pair)
+            out = _sermon_llm_generate(_SERMON_FOLD_SYSTEM, merged, map_tokens, llm_cfg)
+            folded.append((span, (out or merged).strip()))
+            _sermon_yield()
+        gists = folded
+    return gists
+
+
+_SERMON_FOLD_SYSTEM = (
+    "You are condensing two consecutive summaries of parts of one church sermon into one.\n"
+    "Write 2-4 short sentences keeping the points, scripture and illustrations of both.\n"
+    "Write in the same language as the input.\n"
+    "Output only the condensed summary."
+)
+
+
+def _sermon_summary_scan(blocks, db_path, ignore_settle=False, is_live=True):
+    """Queue any sermon that has finished and settled and has no summary yet.
+
+    Called from the phase tick, which already holds the freshly derived blocks. Identity is
+    the transcript fingerprint: a block whose boundaries moved is new material and gets a
+    new row, while an unchanged one is never queued twice.
+
+    ``ignore_settle`` is the operator pressing the button: they can see the sermon is over,
+    so the wait that exists to let a back-dated boundary settle is theirs to skip. It also
+    bypasses the enabled flag, because asking for a summary is asking for one.
+    """
+    cfg = _sermon_summary_config()
+    if not cfg.get("enabled", False) and not ignore_settle:
+        return
+    ready = _sermon_ready(
+        blocks,
+        now_ms=int(time.time() * 1000),
+        settle_seconds=0 if ignore_settle else coerce_int(cfg.get("settle_seconds"), 180, lo=0, hi=3600),
+        include_ongoing=ignore_settle,
+        min_minutes=coerce_int(cfg.get("min_minutes"), 8, lo=1, hi=240))
+    if not ready:
+        return
+    try:
+        conn = sqlite3.connect(db_path, timeout=5)
+    except sqlite3.Error:
+        return
+    try:
+        _sermon_ensure_tables(conn)
+        for block in ready:
+            rows = _sermon_read_rows(conn, block.get("start_ms") or 0, block.get("end_ms") or 0)
+            if not rows:
+                continue
+            fp = _sermon_fingerprint(rows)
+            if _sermon_load(conn, fp):
+                continue  # already summarised, running, or queued
+            _sermon_save(conn, fingerprint=fp, label=block.get("label") or "Sermon",
+                         start_ms=block.get("start_ms") or 0, end_ms=block.get("end_ms") or 0,
+                         status=_SERMON_PENDING,
+                         transcript=_sermon_transcript_text(rows))
+            _sermon_supersede(conn, label=block.get("label") or "Sermon",
+                              start_ms=block.get("start_ms") or 0, keep=fp)
+            _sermon_queue.put((db_path, fp, is_live))
+            print(f"[SERMON] queued {block.get('label')} "
+                  f"({block.get('minutes')} min, {len(rows)} rows)", flush=True)
+    except Exception as e:
+        print(f"[SERMON] scan failed ({type(e).__name__}: {e})")
+    finally:
+        conn.close()
+
+
+def _sermon_emit(entry, session_id):
+    try:
+        socketio.emit("sermon_summary_update", {**entry, "session_id": session_id})
+    except Exception:
+        pass  # a broadcast must never break the worker
+
+
+def _sermon_summarize_one(db_path, fingerprint_value, is_live=True):
+    """Map-reduce one queued sermon and store the result.
+
+    ``is_live`` decides whether the database's WAL may be retired afterwards: summarising a
+    finished service writes to a file that may already have been delivered, and leaving
+    sidecars beside it is what _archive_write_done exists to prevent.
+    """
+    cfg = _sermon_summary_config()
+    llm_cfg = (config.get("live_translation", {}) or {}).get("llm") or {}
+    session_id = os.path.basename(db_path)
+    try:
+        conn = sqlite3.connect(db_path, timeout=15)
+    except sqlite3.Error:
+        return
+    try:
+        entry = _sermon_load(conn, fingerprint_value)
+        if not entry or entry.get("status") == _SERMON_DONE:
+            return
+        start_ms, end_ms = entry["start_ms"], entry["end_ms"]
+        rows = _sermon_read_rows(conn, start_ms, end_ms)
+        if not rows or _sermon_fingerprint(rows) != fingerprint_value:
+            # The block moved or was corrected while this sat in the queue. Drop the stale
+            # row rather than summarising text that no longer describes that stretch; the
+            # next tick re-queues whatever the range is now.
+            _sermon_delete(conn, fingerprint_value)
+            return
+
+        def store(status, **kw):
+            _sermon_save(conn, fingerprint=fingerprint_value, label=entry["label"],
+                         start_ms=start_ms, end_ms=end_ms, status=status,
+                         transcript=entry.get("transcript") or _sermon_transcript_text(rows),
+                         model=_sermon_model_label(llm_cfg), **kw)
+            stored = _sermon_load(conn, fingerprint_value) or {}
+            _sermon_emit(stored, session_id)
+            return stored
+
+        store(_SERMON_RUNNING)
+        started = time.perf_counter()
+
+        map_tokens = coerce_int(cfg.get("map_max_tokens"), 220, lo=64, hi=1024)
+        max_chapters = coerce_int(cfg.get("max_chapters"), 8, lo=2, hi=20)
+        budget, counter = _sermon_budget(llm_cfg, _SERMON_MAP_SYSTEM, map_tokens)
+        chunk_tokens = min(coerce_int(cfg.get("chunk_tokens"), 900, lo=100, hi=8192), budget)
+        chunks = _sermon_chunk_rows(rows, chunk_tokens, counter=counter)
+        if not chunks:
+            store(_SERMON_ERROR, error="no context budget — lower map_max_tokens or raise n_ctx")
+            return
+
+        gists = []
+        for chunk in chunks:
+            if _server_shutting_down.is_set():
+                return
+            system, user = _sermon_map_prompt(chunk, base_ms=start_ms)
+            out = _sermon_llm_generate(system, user, map_tokens, llm_cfg)
+            span = (f"[{_sermon_format_offset(chunk.start_ms, start_ms)}-"
+                    f"{_sermon_format_offset(chunk.end_ms, start_ms)}]")
+            if out:
+                gists.append((span, out.strip()))
+            _sermon_yield()
+
+        if not gists:
+            store(_SERMON_ERROR, error="the model returned nothing for any part")
+            return
+
+        reduce_tokens = coerce_int(cfg.get("reduce_max_tokens"), 700, lo=128, hi=4096)
+        reduce_system, _ = _sermon_reduce_prompt([], max_chapters=max_chapters)
+        gists = _sermon_fold(gists, llm_cfg, cfg, reduce_system, max_chapters)
+        _, reduce_user = _sermon_reduce_prompt(gists, max_chapters=max_chapters)
+        raw = _sermon_llm_generate(reduce_system, reduce_user, reduce_tokens, llm_cfg)
+        if not raw:
+            store(_SERMON_ERROR, error="the model returned nothing for the final summary")
+            return
+
+        sections = _sermon_parse_sections(raw)
+        summary = sections.get("summary") or sections.get("") or ""
+        chapters = _sermon_snap_chapters(
+            _sermon_parse_chapters(sections.get("chapters", "")), rows,
+            start_ms=start_ms, max_chapters=max_chapters)
+        store(_SERMON_DONE, summary=summary.strip(), chapters=chapters,
+              generated_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+        print(f"[SERMON] {entry['label']}: {len(chunks)} parts, {len(chapters)} chapters, "
+              f"{time.perf_counter() - started:.0f}s", flush=True)
+    except Exception as e:
+        print(f"[SERMON] summary failed ({type(e).__name__}: {e})")
+        try:
+            _sermon_mark_error(conn, fingerprint_value, f"{type(e).__name__}: {e}")
+            _sermon_emit(_sermon_load(conn, fingerprint_value) or {}, session_id)
+        except Exception:
+            pass
+    finally:
+        conn.close()
+        _archive_write_done(db_path, is_live)
+
+
+def _sermon_summary_worker():
+    """Background task draining the sermon queue, one sermon at a time.
+
+    Single-threaded on purpose: two sermons summarising at once would double the contention
+    for the shared model with nothing waiting on either of them.
+    """
+    while not _server_shutting_down.is_set():
+        try:
+            db_path, fp, is_live = _sermon_queue.get(timeout=1.0)
+        except Empty:
+            continue
+        except Exception:
+            socketio.sleep(1.0)
+            continue
+        try:
+            _sermon_summarize_one(db_path, fp, is_live)
+        except Exception as e:
+            print(f"[SERMON] worker error ({type(e).__name__}: {e})")
+
 
 # Caches keyed by database row id. Ids restart low in every new session
 # database, so anything carried across a rollover addresses unrelated rows.
@@ -16502,6 +17079,17 @@ _local_llm_path = ""        # file the resident model was loaded from
 _local_llm_failed = False   # a load that failed once; do not retry per caption
 _local_llm_lock = threading.Lock()
 
+# Held across a generation, not just a load. A llama.cpp context is not reentrant: two
+# threads inside create_completion at once corrupt the shared KV cache. Until the sermon
+# summariser arrived only the translation pump ever generated, so an unlocked call was
+# safe by accident; it is not any more, and the failure would be a wrong caption or a
+# crash mid-service rather than anything as visible as an exception here.
+#
+# Contention is deliberately shaped rather than avoided: the summariser takes this lock
+# for one short chunk at a time and sleeps between chunks, so a caption waits behind a
+# single map call instead of a whole sermon.
+_local_llm_gen_lock = threading.Lock()
+
 
 def local_llm_available():
     """Whether the in-process GGUF runtime is installed.
@@ -16690,22 +17278,23 @@ def _translate_via_local_llm(text, system_prompt, max_tokens, llm_cfg_override=N
         return None
     _t0 = time.perf_counter()
     try:
-        if raw_prompt is not None:
-            # Stopped on the turn marker as well as EOS: the primed model turn is an
-            # unfinished line, and a model that decides to open a second turn would
-            # otherwise put the marker itself into the caption.
-            out = llm.create_completion(
-                prompt=raw_prompt,
-                temperature=0.0,
-                max_tokens=max_tokens,
-                stop=["<end_of_turn>", "<eos>", "<start_of_turn>"],
-            )
-        else:
-            out = llm.create_chat_completion(
-                messages=_llm_chat_messages(text, system_prompt),
-                temperature=0.0,
-                max_tokens=max_tokens,
-            )
+        with _local_llm_gen_lock:
+            if raw_prompt is not None:
+                # Stopped on the turn marker as well as EOS: the primed model turn is an
+                # unfinished line, and a model that decides to open a second turn would
+                # otherwise put the marker itself into the caption.
+                out = llm.create_completion(
+                    prompt=raw_prompt,
+                    temperature=0.0,
+                    max_tokens=max_tokens,
+                    stop=["<end_of_turn>", "<eos>", "<start_of_turn>"],
+                )
+            else:
+                out = llm.create_chat_completion(
+                    messages=_llm_chat_messages(text, system_prompt),
+                    temperature=0.0,
+                    max_tokens=max_tokens,
+                )
         try:
             _record_local_translate_ms((time.perf_counter() - _t0) * 1000.0)
         except Exception:
@@ -17260,6 +17849,10 @@ def emit_translated_entries():
                     _allowed_fresh = set(_pending_fresh[-(max_translations_per_cycle - 1):]) | {_pending_fresh[0]}
                 else:
                     _allowed_fresh = set(_pending_fresh)
+                # Published for the sermon summariser, which shares the local model and
+                # steps aside while captions are queued.
+                _translation_pending["count"] = len(_pending_fresh)
+                _translation_pending["at"] = time.time()
                 if _backlogged != _translation_backlog_state["active"]:
                     _translation_backlog_state["active"] = _backlogged
                     if _backlogged:
@@ -18102,6 +18695,7 @@ def _export_and_retire_session(session_db_name):
     """
     if not session_db_name:
         return
+
     # Check if SRT generation is enabled (reload config for fresh settings)
     fresh_config = load_config()
     srt_enabled = fresh_config.get("database", {}).get("srt_enabled", True)
@@ -20717,6 +21311,10 @@ def thread2_function():
         # Start audio streaming background tasks
         socketio.start_background_task(emit_audio_stream)
         socketio.start_background_task(emit_tts_audio)
+        # Drains the sermon-summary queue the phase tick fills. Started unconditionally:
+        # the worker blocks on an empty queue, and nothing is queued while the feature is
+        # off, so an installation without an LLM pays one idle thread.
+        socketio.start_background_task(_sermon_summary_worker)
 
         # Close a public tunnel once the service it was opened for has ended
         threading.Thread(target=_tunnel_auto_stop_watcher, daemon=True, name="tunnel-auto-stop").start()

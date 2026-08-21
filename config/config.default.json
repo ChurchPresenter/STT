@@ -640,6 +640,27 @@
       }
     }
   },
+  "sermon_summary": {
+    "_comment": "Summary and chapter markers for each sermon, written a few minutes after the sermon ends and reviewable on /sermon-summary. Uses the same local LLM as translation, so it needs live_translation.llm configured; the sermon is summarised in its own language. Everything is stored in the session database beside the transcript it came from and is deleted with it.",
+    "enabled": false,
+    "_enabled_comment": "Summarise sermons during a live service. Off by default: it shares the translation model, and an installation that has not configured an LLM has nothing to run it on.",
+    "settle_seconds": 180,
+    "_settle_seconds_comment": "How long a sermon block must stay closed before it is summarised. The detector back-dates a closing block's end to where the next run began, so a block that just closed is still moving; summarising immediately writes a summary of a range that then changes. Waiting costs nothing — the service has moved on to closing songs.",
+    "min_minutes": 8,
+    "_min_minutes_comment": "Shortest speaking block worth summarising. Matches service_phase.sermon_min_minutes, which is what decides a block is called 'Sermon' in the first place.",
+    "chunk_tokens": 900,
+    "_chunk_tokens_comment": "Target size of one map call, in tokens. A sermon does not fit one context window, so it is summarised in parts and the parts are then reduced to one summary. This is also the live-caption contention knob: a caption waits behind at most one chunk, so lower values cost quality and buy responsiveness. Capped by whatever live_translation.llm.n_ctx actually leaves free.",
+    "max_chapters": 8,
+    "_max_chapters_comment": "Most chapter markers to keep. Chapters are meant to be the sermon's major movements; without a cap a model returns one per point and produces a table of contents nobody scrubs through.",
+    "map_max_tokens": 220,
+    "_map_max_tokens_comment": "Reply reservation for one part summary. Short on purpose: these are intermediate notes, not output.",
+    "reduce_max_tokens": 700,
+    "_reduce_max_tokens_comment": "Reply reservation for the final summary and chapter list, which is the only generated text anyone reads.",
+    "pause_on_backlog": true,
+    "_pause_on_backlog_comment": "Hold the summariser while captions are waiting to be translated, so live output always wins the shared model. Turning this off makes summaries finish sooner at the cost of caption latency during the run.",
+    "archive_scan_limit": 200,
+    "_archive_scan_limit_comment": "How many past session databases /sermon-summary looks back through when listing services to review. They are opened read-only, one at a time, newest first."
+  },
   "timezone": {
     "_comment": "Timezone that transcript rows are stamped with. Affects the human-readable `timestamp` column, and therefore SRT/HTML exports and the UI. The immutable `ts_ms` column is always epoch milliseconds and is unaffected.",
     "mode": "auto",

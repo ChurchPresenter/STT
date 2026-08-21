@@ -1,0 +1,239 @@
+{% extends "base.html" %}
+
+{% block title %}Sermon Summaries - Speech to Text{% endblock %}
+{% block page_title %}Sermon Summaries{% endblock %}
+
+{% block extra_css %}
+      .ss-note {
+        padding: 12px 14px; background: var(--info-bg); border: 1px solid var(--info);
+        border-radius: var(--radius-sm); color: var(--text-secondary);
+        font-size: 0.88em; line-height: 1.6; margin-bottom: 14px;
+      }
+      .ss-toolbar {
+        display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 14px;
+      }
+      .ss-card {
+        padding: 18px 20px; background: var(--bg-card); border: 1px solid var(--border);
+        border-radius: var(--radius-md); margin-bottom: 14px;
+      }
+      .ss-head {
+        display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; margin-bottom: 10px;
+      }
+      .ss-label { font-size: 1.25em; font-weight: 600; color: var(--text-primary); }
+      .ss-meta { color: var(--text-muted); font-size: 0.85em; }
+      .ss-state {
+        font-size: 0.72em; letter-spacing: 0.04em; text-transform: uppercase;
+        padding: 2px 8px; border-radius: var(--radius-sm);
+      }
+      .ss-state.done { color: var(--success); background: rgba(34,197,94,0.15); }
+      .ss-state.running, .ss-state.pending { color: var(--warning); background: rgba(234,179,8,0.15); }
+      .ss-state.error { color: var(--danger); background: rgba(239,68,68,0.15); }
+      .ss-summary { color: var(--text-secondary); line-height: 1.7; margin-bottom: 14px; }
+      .ss-archived {
+        font-size: 0.72em; letter-spacing: 0.04em; text-transform: uppercase;
+        padding: 3px 9px; border-radius: var(--radius-sm);
+        color: var(--warning); background: rgba(234,179,8,0.15);
+        border: 1px solid var(--warning);
+      }
+
+      .ss-chapters { list-style: none; padding: 0; margin: 0 0 14px; }
+      .ss-chapters li {
+        display: flex; gap: 14px; padding: 6px 0; border-top: 1px solid var(--border);
+        color: var(--text-primary);
+      }
+      .ss-chapters li:first-child { border-top: none; }
+      .ss-at {
+        font-variant-numeric: tabular-nums; color: var(--text-muted);
+        min-width: 64px; flex-shrink: 0;
+      }
+
+      /* The transcript is long and is not the point of the page, so it starts folded. */
+      .ss-transcript { margin-top: 6px; }
+      .ss-transcript summary { cursor: pointer; color: var(--text-secondary); font-size: 0.88em; }
+      .ss-transcript-body {
+        margin-top: 10px; padding: 12px 14px; background: var(--bg-base);
+        border: 1px solid var(--border); border-radius: var(--radius-sm);
+        color: var(--text-secondary); line-height: 1.7; max-height: 380px; overflow-y: auto;
+        white-space: pre-wrap;
+      }
+      .ss-empty { color: var(--text-muted); padding: 24px 0; }
+{% endblock %}
+
+{% block content %}
+<div class="ss-note">
+  Each sermon is summarised in its own language a few minutes after it ends, using the same
+  local model as translation — nothing is sent off this machine. Chapter times are snapped to
+  real transcript rows, so a marker always points at something that was actually said.
+  Summaries are stored in the session's own database and are deleted with it.
+</div>
+
+<div class="ss-toolbar">
+  <label for="ss-session" style="color: var(--text-secondary); font-size: 0.88em;">Service</label>
+  <select id="ss-session" onchange="loadSummaries()"></select>
+  <button type="button" id="ss-refresh" onclick="loadSummaries()">Refresh</button>
+  <button type="button" id="ss-generate" onclick="generateNow()">Summarise now</button>
+  <span class="ss-archived" id="ss-archived" style="display: none;">finished service</span>
+  <span id="ss-status" style="color: var(--text-secondary); font-size: 0.86em;"></span>
+</div>
+
+<div id="ss-list"></div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  const SS_STATE = { pending: 'queued', running: 'summarising', done: 'done', error: 'failed' };
+
+  let ssLive = false;
+
+  // Transcript and operator-facing text go through innerHTML, so they are escaped on the
+  // way out: a caption is verbatim speech and a stray < must not be able to rewrite a page.
+  function esc(s) {
+    return String(s === null || s === undefined ? '' : s).replace(/[&<>"']/g, c => (
+      { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  }
+
+  function fmtOffset(ms, base) {
+    const s = Math.max(0, Math.round((ms - base) / 1000));
+    const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = s % 60;
+    const mm = h ? String(m).padStart(2, '0') : String(m);
+    return (h ? h + ':' : '') + mm + ':' + String(sec).padStart(2, '0');
+  }
+
+  function minutesOf(entry) {
+    return Math.max(1, Math.round(((entry.end_ms || 0) - (entry.start_ms || 0)) / 60000));
+  }
+
+  function renderOne(entry) {
+    const state = entry.status || '';
+    const chapters = (entry.chapters || []).map(c =>
+      '<li><span class="ss-at">' + esc(fmtOffset(c.ts_ms, entry.start_ms)) + '</span>'
+      + '<span>' + esc(c.title) + '</span></li>').join('');
+    const body = state === 'error'
+      ? '<div class="ss-summary">' + esc(entry.error || 'Failed.') + '</div>'
+      : '<div class="ss-summary">' + esc(entry.summary || '') + '</div>';
+    return '<div class="ss-card">'
+      + '<div class="ss-head">'
+      +   '<span class="ss-label">' + esc(entry.label || 'Sermon') + '</span>'
+      +   '<span class="ss-state ' + esc(state) + '">' + esc(SS_STATE[state] || state) + '</span>'
+      +   '<span class="ss-meta">' + minutesOf(entry) + ' min'
+      +     (entry.model ? ' · ' + esc(entry.model) : '')
+      +     (entry.generated_at ? ' · ' + esc(entry.generated_at) : '') + '</span>'
+      +   '<button type="button" style="margin-left: auto;" onclick="regenerate(\'' + esc(entry.fingerprint) + '\')">Regenerate</button>'
+      + '</div>'
+      + body
+      + (chapters ? '<ul class="ss-chapters">' + chapters + '</ul>' : '')
+      + (entry.transcript
+          ? '<details class="ss-transcript"><summary>Transcript ('
+            + entry.transcript.split(/\s+/).length + ' words)</summary>'
+            + '<div class="ss-transcript-body">' + esc(entry.transcript) + '</div></details>'
+          : '')
+      + '</div>';
+  }
+
+  function render(summaries) {
+    const list = document.getElementById('ss-list');
+    if (!summaries.length) {
+      list.innerHTML = '<div class="ss-empty">No sermon has been summarised for this service.</div>';
+      return;
+    }
+    list.innerHTML = summaries.map(renderOne).join('');
+  }
+
+  function fmtDuration(minutes) {
+    const h = Math.floor((minutes || 0) / 60), m = (minutes || 0) % 60;
+    return (h ? h + 'h' : '') + m + 'm';
+  }
+
+  // Shares /api/service-phase/sessions with the phase page, so both list the same services
+  // in the same order. Every recorded service is offered, not only those already
+  // summarised — generating a summary for one that has none is the point of the page.
+  async function loadSessions() {
+    try {
+      const resp = await pollFetch('/api/service-phase/sessions');
+      const data = await resp.json();
+      if (!data.success) return;
+      const select = document.getElementById('ss-session');
+      const rows = (data.sessions || []).slice().sort((a, b) => (b.live ? 1 : 0) - (a.live ? 1 : 0));
+      select.innerHTML = rows.map(r => {
+        const bits = [r.live ? 'Live' : (r.date || r.session_id)];
+        if (r.rows) bits.push(fmtDuration(r.minutes), r.rows + ' rows');
+        if (r.has_summaries) bits.push('📖');
+        return '<option value="' + (r.live ? '' : esc(r.session_id)) + '">'
+          + esc(bits.join(' · ')) + '</option>';
+      }).join('') || '<option value="">No recorded service</option>';
+    } catch (e) {
+      if (e && e.pollingPaused) return;
+    }
+  }
+
+  async function loadSummaries() {
+    const status = document.getElementById('ss-status');
+    const session = document.getElementById('ss-session').value;
+    try {
+      const resp = await pollFetch('/api/sermon-summary' + (session ? '?session=' + encodeURIComponent(session) : ''));
+      const data = await resp.json();
+      if (!data.success) {
+        status.textContent = data.error || 'Could not load.';
+        render([]);
+        return;
+      }
+      ssLive = !!data.live;
+      // Which service the Regenerate buttons are about to write to. Silent ambiguity here
+      // is the one mistake this page can make that the operator cannot see.
+      document.getElementById('ss-archived').style.display = ssLive ? 'none' : '';
+      status.textContent = data.session_id
+        + (data.enabled ? '' : ' · summaries disabled in settings');
+      render(data.summaries || []);
+    } catch (e) {
+      if (e && e.pollingPaused) return;
+      status.textContent = 'Could not load: ' + e;
+    }
+  }
+
+  async function post(body) {
+    const session = document.getElementById('ss-session').value || '';
+    const resp = await pollFetch('/api/sermon-summary/generate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(Object.assign({ session: session }, body)),
+    });
+    return await resp.json();
+  }
+
+  async function generateNow() {
+    try {
+      const data = await post({});
+      if (!data.success) { showAlert('Could not queue: ' + data.error, 'error'); return; }
+      showAlert(data.queued
+        ? 'Queued ' + data.queued + (data.queued === 1 ? ' sermon.' : ' sermons.')
+        : 'No sermon block to summarise in this service.', data.queued ? 'success' : 'info');
+      loadSummaries();
+    } catch (e) {
+      showAlert('Could not queue: ' + e, 'error');
+    }
+  }
+
+  async function regenerate(fingerprint) {
+    try {
+      const data = await post({ fingerprint: fingerprint });
+      if (!data.success) { showAlert('Could not queue: ' + data.error, 'error'); return; }
+      showAlert('Regenerating.', 'success');
+      loadSummaries();
+    } catch (e) {
+      showAlert('Could not queue: ' + e, 'error');
+    }
+  }
+
+  // The worker pushes each state change, so a summary in progress fills in without a poll.
+  const socket = io();
+  socket.on('sermon_summary_update', function (data) {
+    const session = document.getElementById('ss-session').value;
+    if (!session || data.session_id === session) loadSummaries();
+  });
+
+  document.addEventListener('DOMContentLoaded', async function () {
+    await loadSessions();
+    loadSummaries();
+  });
+</script>
+{% endblock %}

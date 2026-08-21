@@ -4,9 +4,11 @@ Extracted from the monolith and run against a stub namespace (see tests/conftest
 module cannot be imported, and CI installs no Flask. jsonify is stubbed to return the
 mapping unchanged, which is what these assertions care about.
 
-These routes are live-only and take no path from the caller, so there is nothing to
-confine — the behaviour worth guarding is that they read the running session and nothing
-else, and that a session without the tables reads as empty rather than as an error.
+These routes now take a ``session`` from the caller so a finished service can be reviewed
+and corrected, which makes one property load-bearing: the name is only ever *matched against
+an enumeration the server built*, never joined onto a directory. A path, a traversal, or an
+unknown name resolves to nothing rather than to a file. TestSessionSelection pins that, and
+TestSaveCorrection keeps the older guarantee that a stray path cannot steer a write.
 """
 
 import os
@@ -17,6 +19,8 @@ import pytest
 from conftest import extract_definitions
 from stt.phase_rules import load_rules
 from stt.coercion import coerce_int
+from stt.db_maintenance import checkpoint_and_release, open_readonly
+from stt.session_index import describe, index, resolve_session
 from stt.service_phase import (
     analyze,
     delete_correction,
@@ -54,13 +58,31 @@ def session_db(tmp_path, spec="M" * 5 + "S" * 12, name="2026-03-01_093218.db", a
     return path
 
 
-def make_ns(*, live_db=None, params=None, args=None):
+def make_ns(*, live_db=None, params=None, args=None, archive=()):
+    """The routes under test, with the archive enumeration supplied by the caller.
+
+    ``archive`` is what _archive_session_paths would have swept: the whitelist a ``session``
+    name is matched against. Passing it explicitly is the point — it is the only thing
+    standing between a caller-supplied string and a database.
+    """
     ns = extract_definitions(
         "speech_to_text.py",
         ["_service_phase_resolve_db", "get_service_phase", "save_service_phase_correction",
          "delete_service_phase_correction", "group_service_phase_blocks",
-         "_service_phase_first_sunday", "_service_phase_config"],
+         "_service_phase_first_sunday", "_service_phase_config",
+         "_archive_session_paths", "_archive_resolve_db", "_archive_write_done",
+         "_archive_open_ro", "rerun_service_phase", "list_service_phase_sessions"],
         extra_globals={
+            "os": os,
+            "_db_iter_databases": lambda dirs: list(archive),
+            "_sidecar_sweep_dirs": lambda: ["/archive"],
+            "_db_checkpoint_and_release": checkpoint_and_release,
+            "_db_open_readonly": open_readonly,
+            "_session_resolve": resolve_session,
+            "_session_describe": describe,
+            "_session_index": index,
+            "_sermon_summary_config": lambda: {},
+            "_service_phase_save": save_analysis,
             "config": {"service_phase": CFG},
             "request": type("R", (), {
                 "remote_addr": "127.0.0.1",
@@ -128,12 +150,26 @@ class TestGetServicePhase:
         body, status = make_ns(live_db=None)["get_service_phase"]()
         assert status == 404 and body["success"] is False
 
-    def test_a_session_argument_is_ignored(self, tmp_path):
-        # The routes are live-only: a caller-supplied path must not reach sqlite at all.
+    def test_a_session_path_does_not_reach_sqlite(self, tmp_path):
+        # A caller-supplied *path* is never a session name: it is matched against the
+        # enumeration, and an archive that does not contain it resolves to nothing.
         db = session_db(tmp_path)
         other = session_db(tmp_path, name="2026-01-01_000000.db")
-        body = make_ns(live_db=db, args={"session": other})["get_service_phase"]()
-        assert body["session_id"] == "2026-03-01_093218.db"
+        body, status = make_ns(live_db=db, args={"session": other})["get_service_phase"]()
+        assert status == 404 and body["success"] is False
+
+    def test_a_known_session_is_read_instead_of_the_live_one(self, tmp_path):
+        db = session_db(tmp_path)
+        other = session_db(tmp_path, name="2026-01-01_000000.db")
+        body = make_ns(live_db=db, archive=[other],
+                       args={"session": "2026-01-01_000000.db"})["get_service_phase"]()
+        assert body["session_id"] == "2026-01-01_000000.db"
+        assert body["live"] is False
+
+    def test_the_live_session_reads_as_live(self, tmp_path):
+        db = session_db(tmp_path)
+        body = make_ns(live_db=db, archive=[db])["get_service_phase"]()
+        assert body["session_id"] == "2026-03-01_093218.db" and body["live"] is True
 
     def test_recompute_reruns_the_detector_without_saving(self, tmp_path):
         db = session_db(tmp_path, analyzed=False)
@@ -176,14 +212,26 @@ class TestSaveCorrection:
                                params={"block_index": 1})["save_service_phase_correction"]()
         assert status == 400 and body["success"] is False
 
-    def test_a_session_argument_cannot_redirect_the_write(self, tmp_path):
-        # Live-only: a path in the body must not steer the correction to another file.
+    def test_a_session_path_cannot_redirect_the_write(self, tmp_path):
+        # A path in the body is not a session name. It matches nothing in the enumeration,
+        # so the write is refused outright rather than landing on either database.
         db = session_db(tmp_path)
         other = session_db(tmp_path, name="2026-01-01_000000.db")
-        make_ns(live_db=db, params={"session": other, "block_index": 0,
-                                    "label": "Songs"})["save_service_phase_correction"]()
-        assert len(load_corrections(sqlite3.connect(db))) == 1
+        _, status = make_ns(live_db=db, params={"session": other, "block_index": 0,
+                                                "label": "Songs"})["save_service_phase_correction"]()
+        assert status == 404
+        assert load_corrections(sqlite3.connect(db)) == []
         assert load_corrections(sqlite3.connect(other)) == []
+
+    def test_a_known_session_is_corrected_instead_of_the_live_one(self, tmp_path):
+        # The point of the change: last Sunday can be reviewed without it being Sunday.
+        db = session_db(tmp_path)
+        other = session_db(tmp_path, name="2026-01-01_000000.db")
+        make_ns(live_db=db, archive=[other],
+                params={"session": "2026-01-01_000000.db", "block_index": 0,
+                        "label": "Songs"})["save_service_phase_correction"]()
+        assert len(load_corrections(sqlite3.connect(other))) == 1
+        assert load_corrections(sqlite3.connect(db)) == []
 
     def test_no_running_session_is_a_404(self):
         _, status = make_ns(live_db=None, params={"block_index": 0,
@@ -373,3 +421,126 @@ class TestAccessLogPollingSkip:
         cfg = {"enabled": True, "skip_polling_paths": True}
         ns = self.ns(cfg)
         assert ns["_access_log_enabled"]() is True and ns["_access_log_skip_polling"]() is True
+
+
+class TestSessionSelection:
+    """A ``session`` names a service; it never names a file.
+
+    The whole safety story is that the string is matched against an enumeration the server
+    built. These are the cases where getting that wrong would let a request reach a database
+    nobody offered it.
+    """
+
+    @pytest.mark.parametrize("hostile", [
+        "../../../etc/passwd",
+        "/etc/passwd",
+        "../2026-01-01_000000.db",
+        "2026-01-01_000000.db/../../secret.db",
+        "..",
+        "",
+    ])
+    def test_a_hostile_name_never_reaches_a_database_outside_the_archive(self, tmp_path, hostile):
+        db = session_db(tmp_path)
+        ns = make_ns(live_db=db, archive=[db], args={"session": hostile})
+        path, is_live, err = ns["_archive_resolve_db"](hostile)
+        # Either refused, or resolved to something the archive actually offered.
+        assert err is not None or path in (db,)
+        if path == db:
+            assert is_live is True   # "" means the live session, which is db here
+
+    def test_an_unknown_session_is_a_404_not_a_fallback_to_live(self, tmp_path):
+        # Silently writing to the live service because a name was unrecognised is the one
+        # failure mode worse than an error.
+        db = session_db(tmp_path)
+        ns = make_ns(live_db=db, archive=[db])
+        path, _, err = ns["_archive_resolve_db"]("2099-01-01_000000.db")
+        assert path is None and err is not None
+
+    def test_no_session_and_nothing_running_is_a_404(self):
+        ns = make_ns(live_db=None, archive=[])
+        path, _, err = ns["_archive_resolve_db"]("")
+        assert path is None and err is not None
+
+
+class TestRerunAndSave:
+    def test_it_saves_where_recompute_does_not(self, tmp_path):
+        db = session_db(tmp_path, analyzed=False)
+        assert load_analysis(sqlite3.connect(db))["blocks"] == []
+
+        # ?recompute=1 deliberately writes nothing...
+        make_ns(live_db=db, args={"recompute": "1"})["get_service_phase"]()
+        assert load_analysis(sqlite3.connect(db))["blocks"] == []
+
+        # ...and the rerun route is the one that does.
+        body = make_ns(live_db=db, params={})["rerun_service_phase"]()
+        assert body["success"] is True and body["blocks"] > 0
+        assert [b["kind"] for b in load_analysis(sqlite3.connect(db))["blocks"]] == ["M", "S"]
+
+    def test_it_runs_against_a_named_archived_service(self, tmp_path):
+        live = session_db(tmp_path)
+        old = session_db(tmp_path, name="2026-01-01_000000.db", analyzed=False)
+        body = make_ns(live_db=live, archive=[old],
+                       params={"session": "2026-01-01_000000.db"})["rerun_service_phase"]()
+        assert body["session_id"] == "2026-01-01_000000.db" and body["live"] is False
+        assert load_analysis(sqlite3.connect(old))["blocks"]
+
+    def test_a_rerun_leaves_no_sidecars_on_an_archived_service(self, tmp_path):
+        # A finished session may already have been delivered; writing to it must not leave
+        # -wal/-shm beside a file this process no longer owns.
+        old = session_db(tmp_path, name="2026-01-01_000000.db", analyzed=False)
+        live = session_db(tmp_path)
+        make_ns(live_db=live, archive=[old],
+                params={"session": "2026-01-01_000000.db"})["rerun_service_phase"]()
+        assert not os.path.exists(old + "-wal")
+        assert not os.path.exists(old + "-shm")
+
+    def test_a_rerun_keeps_the_corrections(self, tmp_path):
+        # Corrections live in their own table precisely so a re-run cannot destroy them.
+        old = session_db(tmp_path, name="2026-01-01_000000.db")
+        conn = sqlite3.connect(old)
+        save_correction(conn, 0, kind="M", label="Songs")
+        conn.close()
+        make_ns(live_db=None, archive=[old],
+                params={"session": "2026-01-01_000000.db"})["rerun_service_phase"]()
+        assert len(load_corrections(sqlite3.connect(old))) == 1
+
+    def test_an_unknown_session_is_refused(self, tmp_path):
+        db = session_db(tmp_path)
+        _, status = make_ns(live_db=db, archive=[db],
+                            params={"session": "nope.db"})["rerun_service_phase"]()
+        assert status == 404
+
+
+class TestListSessions:
+    def test_lists_recorded_services_newest_first_with_their_shape(self, tmp_path):
+        a = session_db(tmp_path, name="2026-03-01_093218.db")
+        b = session_db(tmp_path, name="2026-01-01_000000.db")
+        body = make_ns(live_db=None, archive=[a, b])["list_service_phase_sessions"]()
+        assert body["success"] is True
+        by_id = {r["session_id"]: r for r in body["sessions"]}
+        assert set(by_id) == {"2026-03-01_093218.db", "2026-01-01_000000.db"}
+        assert by_id["2026-03-01_093218.db"]["date"] == "2026-03-01"
+        assert by_id["2026-03-01_093218.db"]["rows"] == 17
+        assert by_id["2026-03-01_093218.db"]["has_phase"] is True
+
+    def test_the_running_service_is_flagged(self, tmp_path):
+        db = session_db(tmp_path)
+        body = make_ns(live_db=db, archive=[db])["list_service_phase_sessions"]()
+        assert [r["live"] for r in body["sessions"]] == [True]
+        assert body["live_session_id"] == "2026-03-01_093218.db"
+
+    def test_a_just_started_service_still_appears(self, tmp_path):
+        # It has no rows yet, so the sweep drops it — but it is the one an operator
+        # mid-service is looking for.
+        empty = session_db(tmp_path, spec="", name="2026-03-01_093218.db", analyzed=False)
+        body = make_ns(live_db=empty, archive=[empty])["list_service_phase_sessions"]()
+        assert [r["session_id"] for r in body["sessions"]] == ["2026-03-01_093218.db"]
+        assert body["sessions"][0]["live"] is True
+
+    def test_an_unreadable_session_does_not_break_the_listing(self, tmp_path):
+        good = session_db(tmp_path)
+        junk = str(tmp_path / "2026-02-02_000000.db")
+        with open(junk, "wb") as fh:
+            fh.write(b"not a database at all")
+        body = make_ns(live_db=None, archive=[junk, good])["list_service_phase_sessions"]()
+        assert [r["session_id"] for r in body["sessions"]] == ["2026-03-01_093218.db"]

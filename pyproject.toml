@@ -54,6 +54,8 @@ module = [
     "stt.livemap",
     "stt.llm_translate",
     "stt.service_phase",
+    "stt.sermon_summary",
+    "stt.session_index",
     "stt.translation_replay",
     "stt.translation_backfill",
     "stt.tts_queue",
