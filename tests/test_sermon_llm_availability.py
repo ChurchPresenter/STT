@@ -346,3 +346,92 @@ class TestBlockedRunDoesNoWork:
         assert entry["status"] == STATUS_ERROR
         assert "returned nothing" in entry["error"]
 
+
+class TestPeerResponses:
+    """How the caller reads what the paired machine said.
+
+    The distinction being pinned is the one that cost real time on .62: a machine that
+    answers and refuses has been *reached*, and reporting that as a transport failure sends
+    whoever is diagnosing it to the network. The peer's own words are the only explanation
+    that survives the hop, because its log is not reachable from the machine that called it.
+    """
+
+    def call(self, status, body, *, has_json=True):
+        calls = []
+
+        class Resp:
+            status_code = status
+
+            def json(self):
+                if not has_json:
+                    raise ValueError("not json")
+                return body
+
+        def peer_request(method, endpoint, path, **kw):
+            calls.append(path)
+            return Resp()
+
+        ns = extract_definitions(
+            "speech_to_text.py",
+            ["_PeerBusy", "_SermonUnavailable", "_sermon_peer_endpoint", "_sermon_llm_target",
+             "_sermon_llm_generate"],
+            extra_globals={
+                "os": os,
+                "config": {"live_translation": OFFLOADED},
+                "MODELS_DIR": "/models",
+                "local_llm_available": lambda: True,
+                "_llm_local_model_path": lambda d, r, n: os.path.join(d, r, n),
+                "_get_remote_endpoint_safe": lambda: "http://192.168.2.52:8080",
+                "_peer_request": peer_request,
+                "get_local_llm": lambda cfg=None: None,
+                "_local_llm_gen_lock": __import__("threading").Lock(),
+                "_llm_extract_text": lambda d: "",
+                "_llm_chat_payload": lambda *a, **k: {},
+            })
+        return ns, calls
+
+    def run(self, ns):
+        return ns["_sermon_llm_generate"]("sys", "user", 220, {})
+
+    def test_a_good_reply_returns_its_text(self):
+        ns, calls = self.call(200, {"success": True, "text": "a gist"})
+        assert self.run(ns) == "a gist"
+        assert calls == ["/api/llm/summarize"]
+
+    def test_busy_is_raised_only_when_the_peer_says_busy(self):
+        ns, _ = self.call(503, {"success": False, "busy": True, "error": "captions"})
+        with pytest.raises(ns["_PeerBusy"]):
+            self.run(ns)
+
+    def test_a_refusal_is_not_treated_as_busy(self):
+        """The one that would have hung.
+
+        Every 503 used to mean busy, so a refusal the peer could never recover from would be
+        retried forty times over ten minutes for every part of the sermon.
+        """
+        ns, _ = self.call(503, {"success": False, "busy": False,
+                                "error": "the local model failed: RuntimeError: llama_decode returned -3"})
+        with pytest.raises(ns["_SermonUnavailable"]) as got:
+            self.run(ns)
+        assert "llama_decode" in str(got.value)
+
+    def test_a_500_surfaces_the_peers_own_reason(self):
+        ns, _ = self.call(500, {"success": False, "error": "the local model failed: out of memory"})
+        with pytest.raises(ns["_SermonUnavailable"]) as got:
+            self.run(ns)
+        assert "out of memory" in str(got.value)
+        # It was reached; saying otherwise is what sent the last diagnosis to the network.
+        assert "could not reach" not in str(got.value)
+
+    def test_a_500_with_no_body_falls_back_to_the_status(self):
+        ns, _ = self.call(500, None, has_json=False)
+        with pytest.raises(ns["_SermonUnavailable"]) as got:
+            self.run(ns)
+        assert "500" in str(got.value)
+
+    def test_a_200_that_says_it_failed_is_still_a_refusal(self):
+        ns, _ = self.call(200, {"success": False, "error": "no model on this machine"})
+        with pytest.raises(ns["_SermonUnavailable"]) as got:
+            self.run(ns)
+        assert "no model on this machine" in str(got.value)
+

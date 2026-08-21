@@ -8464,9 +8464,17 @@ def summarize_remote():
 
     _register_translation_client(request.remote_addr)
     max_tokens = coerce_int(data.get("max_tokens"), 220, lo=16, hi=4096)
-    text = _sermon_llm_generate(system_prompt, user_text, max_tokens, llm_cfg)
+    try:
+        text = _sermon_llm_generate(system_prompt, user_text, max_tokens, llm_cfg)
+    except _SermonUnavailable as e:
+        # The caller cannot read this machine's log, so what this machine knows has to travel
+        # back over the wire or it is lost. Uncaught, this became a 500 and the caller
+        # reported a network fault for a model that would not run.
+        print(f"[SERMON] refusing a peer request: {e}", flush=True)
+        return jsonify({"success": False, "busy": False, "error": str(e)}), 503
     if not text:
-        return jsonify({"success": False, "error": "The model returned nothing"}), 502
+        return jsonify({"success": False, "busy": False,
+                        "error": "the model returned nothing"}), 502
     return jsonify({"success": True, "text": text, "model": _sermon_model_label(llm_cfg)})
 
 
@@ -16832,13 +16840,21 @@ def _sermon_llm_generate(system_prompt, user_text, max_tokens, llm_cfg):
         try:
             resp = _peer_request("POST", detail, "/api/llm/summarize", timeout=180, json={
                 "system": system_prompt, "user": user_text, "max_tokens": max_tokens})
-            if resp.status_code == 503:
+            try:
+                data = resp.json()
+            except Exception:
+                data = {}
+            # Busy only when the peer says so. Treating every 503 as busy meant a refusal it
+            # could never recover from would be retried for ten minutes a part.
+            if data.get("busy"):
                 raise _PeerBusy()
-            resp.raise_for_status()
-            data = resp.json()
-            if not data.get("success"):
+            if resp.status_code >= 400 or not data.get("success"):
+                # Its own words if it gave any: being answered and refused is not the same as
+                # not being reached, and this is the only place that distinction survives.
+                reason = data.get("error")
                 raise _SermonUnavailable(
-                    f"the paired machine refused: {data.get('error') or 'no reason given'}")
+                    f"the paired machine at {detail} refused: {reason}" if reason else
+                    f"the paired machine at {detail} answered {resp.status_code}")
             return data.get("text") or None
         except (_PeerBusy, _SermonUnavailable):
             raise
