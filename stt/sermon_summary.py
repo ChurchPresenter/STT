@@ -391,6 +391,30 @@ def ready_sermons(blocks: Sequence[dict], *, now_ms: int, settle_seconds: int = 
     return out
 
 
+def explain_no_sermons(blocks: Sequence[dict], *, min_minutes: int = 8,
+                       label_prefix: str = SERMON_LABEL_PREFIX) -> str:
+    """Why nothing was queued, in the operator's terms.
+
+    "No sermon block to summarise" covers four different situations, and the one that
+    actually happens most on an archived service — the detector never ran over it, so there
+    are no blocks at all — is the one where the message sends the operator looking in
+    entirely the wrong place. Each case names its own fix.
+    """
+    if not blocks:
+        return ("this service has no detected phases yet — use 'Re-run & save' first, "
+                "then summarise")
+    sermons = [b for b in blocks if (b.get("label") or "").startswith(label_prefix)]
+    if not sermons:
+        labels = sorted({(b.get("label") or "unnamed") for b in blocks})
+        return (f"no block in this service is labelled '{label_prefix}' "
+                f"(found: {', '.join(labels)}) — relabel one, or re-run the detector")
+    longest = max(int(b.get("minutes") or 0) for b in sermons)
+    if longest < int(min_minutes):
+        return (f"the longest sermon block is {longest} min, under the {min_minutes} min "
+                f"minimum — lower sermon_summary.min_minutes to include it")
+    return "every sermon in this service already has a summary"
+
+
 # --- Persistence ------------------------------------------------------------------
 #
 # One table, in the session's own database beside the transcript it was written from. A

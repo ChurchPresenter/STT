@@ -22,6 +22,7 @@ from stt.sermon_summary import (
     chunk_rows,
     delete_summary,
     ensure_tables,
+    explain_no_sermons,
     fingerprint,
     format_offset,
     has_summaries,
@@ -474,3 +475,34 @@ class TestRendering:
     def test_markdown_without_chapters_omits_the_heading(self):
         out = render_markdown({"label": "Sermon 1", "start_ms": BASE, "summary": "Only prose."})
         assert "## Chapters" not in out
+
+
+class TestExplainNoSermons:
+    """Why nothing was queued. One message for four causes sent the operator hunting."""
+
+    def block(self, **kw):
+        base = {"label": "Sermon 1", "kind": "S", "minutes": 30, "ongoing": False,
+                "start_ms": BASE, "end_ms": BASE + 30 * MIN}
+        base.update(kw)
+        return base
+
+    def test_a_service_the_detector_never_ran_over_says_so(self):
+        # The common archived case, and the one the old message hid completely.
+        msg = explain_no_sermons([])
+        assert "no detected phases" in msg and "Re-run & save" in msg
+
+    def test_a_service_with_no_sermon_names_what_it_did_find(self):
+        msg = explain_no_sermons([self.block(label="Songs 1"), self.block(label="Opening")])
+        assert "Songs 1" in msg and "Opening" in msg
+
+    def test_a_sermon_under_the_minimum_reports_the_numbers(self):
+        msg = explain_no_sermons([self.block(minutes=4)], min_minutes=8)
+        assert "4 min" in msg and "8 min" in msg
+
+    def test_otherwise_everything_is_already_summarised(self):
+        assert "already" in explain_no_sermons([self.block()], min_minutes=8)
+
+    def test_an_unnamed_block_is_described_rather_than_dropped(self):
+        msg = explain_no_sermons([self.block(label=None)])
+        assert "unnamed" in msg
+

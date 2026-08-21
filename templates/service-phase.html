@@ -853,7 +853,8 @@
       if (!data.success) { showAlert('Could not queue: ' + data.error, 'error'); return; }
       showAlert(data.queued
         ? 'Queued ' + data.queued + (data.queued === 1 ? ' sermon.' : ' sermons.')
-        : 'No sermon block to summarise in this service.', data.queued ? 'success' : 'info');
+        : (data.reason || 'Nothing to summarise in this service.'),
+        data.queued ? 'success' : 'info');
       loadSermon();
     } catch (e) {
       showAlert('Could not queue: ' + e, 'error');

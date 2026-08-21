@@ -978,6 +978,7 @@ from stt.sermon_summary import (
     chunk_rows as _sermon_chunk_rows,
     delete_summary as _sermon_delete,
     ensure_tables as _sermon_ensure_tables,
+    explain_no_sermons as _sermon_explain,
     fingerprint as _sermon_fingerprint,
     format_offset as _sermon_format_offset,
     has_summaries as _sermon_has_summaries,
@@ -5771,10 +5772,21 @@ def generate_sermon_summary():
     except Exception as e:
         return jsonify({"success": False, "error": f"{type(e).__name__}: {e}"}), 500
 
+    # Refuse before queueing rather than failing per sermon in the worker, where the only
+    # trace would be a line in the log the operator is not reading.
+    blocked = _sermon_llm_unavailable((config.get("live_translation", {}) or {}).get("llm") or {})
+    if blocked:
+        return jsonify({"success": False, "error": f"Cannot summarise: {blocked}."}), 400
+
     before = _sermon_queue.qsize()
     _sermon_summary_scan(blocks, db_path, ignore_settle=True, is_live=is_live)
-    return jsonify({"success": True, "live": is_live,
-                    "queued": max(0, _sermon_queue.qsize() - before)})
+    queued = max(0, _sermon_queue.qsize() - before)
+    cfg = _sermon_summary_config()
+    return jsonify({
+        "success": True, "live": is_live, "queued": queued,
+        "reason": None if queued else _sermon_explain(
+            blocks, min_minutes=coerce_int(cfg.get("min_minutes"), 8, lo=1, hi=240)),
+    })
 
 
 @app.route("/api/service-phase/correct", methods=["POST"])
@@ -16596,6 +16608,30 @@ def _sermon_model_label(llm_cfg):
     return llm_cfg.get("model") or "endpoint"
 
 
+def _sermon_llm_unavailable(llm_cfg):
+    """Why this machine cannot summarise, or None if it can.
+
+    The offload check is the load-bearing one. A machine that hands its captions to a paired
+    server keeps its live_translation.llm block configured but unused, so provider can still
+    read 'local' with a GGUF named beside it — and on a machine that offloads *because* it
+    cannot run that model, loading it is not a degraded summary, it is that machine falling
+    over mid-service. The NLLB path already refuses to load a local model when offloading
+    (see _offload_no_local); this is the same refusal for the LLM path.
+    """
+    lt_cfg = config.get("live_translation", {}) or {}
+    provider = (llm_cfg.get("provider") or "endpoint").strip().lower()
+    if provider == "local":
+        if _translation_is_offloaded(lt_cfg):
+            return ("this machine offloads translation to a paired server and has no local "
+                    "model to summarise with — generate summaries on the machine that holds it")
+        if not local_llm_available():
+            return "llama-cpp-python is not installed"
+        return None
+    if not (llm_cfg.get("endpoint") or "").strip():
+        return "no LLM endpoint is configured in the translation settings"
+    return None
+
+
 def _sermon_llm_generate(system_prompt, user_text, max_tokens, llm_cfg):
     """One summarisation call. Returns the reply text, or None.
 
@@ -16604,6 +16640,10 @@ def _sermon_llm_generate(system_prompt, user_text, max_tokens, llm_cfg):
     fails every one of those checks by design, and folding its multi-second generations into
     the caption-latency EMA would make the health dashboard unreadable.
     """
+    blocked = _sermon_llm_unavailable(llm_cfg)
+    if blocked:
+        print(f"[SERMON] not summarising: {blocked}")
+        return None
     provider = (llm_cfg.get("provider") or "endpoint").strip().lower()
     if provider == "local":
         llm = get_local_llm(llm_cfg)
