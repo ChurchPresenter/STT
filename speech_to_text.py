@@ -5621,6 +5621,32 @@ def _archive_write_done(db_path, is_live):
         return False
 
 
+@app.route("/api/service-phase/settings", methods=["POST"])
+def save_service_phase_settings():
+    """Turn phase detection on or off.
+
+    Until now this flag could only be changed by editing config.json on the machine, which
+    for a detector an operator is meant to be reviewing and correcting is the wrong place to
+    keep its only switch.
+
+    Takes effect on the next tick — _service_phase_tick re-reads the config every run — so
+    there is nothing to restart.
+    """
+    if not check_ip_whitelist():
+        return jsonify({"success": False, "error": "Access Denied"}), 403
+
+    global config
+    data = _control_params(keep_blank=True)
+    if "service_phase" not in config:
+        config["service_phase"] = {}
+
+    raw = data.get("enabled")
+    enabled = raw if isinstance(raw, bool) else str(raw).strip().lower() in ("1", "true", "yes", "on")
+    config["service_phase"]["enabled"] = enabled
+    save_config(config)
+    return jsonify({"success": True, "enabled": enabled})
+
+
 @app.route("/api/service-phase/sessions")
 def list_service_phase_sessions():
     """Every recorded service, newest first — the picker behind both review pages.

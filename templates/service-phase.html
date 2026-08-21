@@ -33,6 +33,15 @@
       .sp-cell._ { background: var(--bg-elevated); }
       .sp-cell.cue { outline: 1px solid var(--warning); outline-offset: -1px; }
 
+      .sp-switch {
+        display: inline-flex; align-items: center; gap: 7px;
+        color: var(--text-secondary); font-size: 0.88em; cursor: pointer;
+      }
+      .sp-switch input { accent-color: var(--accent); width: 15px; height: 15px; cursor: pointer; }
+      /* Permanent, so the row does not reflow when the state changes — the wording is the
+         only thing that moves. */
+      .sp-state { color: var(--text-secondary); font-size: 0.86em; }
+
       /* Which service the write buttons are about to touch. Correcting the wrong
          service is the one mistake this page can make that the operator cannot see. */
       .sp-archived {
@@ -161,6 +170,10 @@
   <button type="button" id="sp-recompute" onclick="loadPhases(true)">Re-run detector</button>
   <button type="button" id="sp-rerun" onclick="rerunAndSave()">Re-run &amp; save</button>
   <button type="button" id="sp-summarise" onclick="generateSummaries()">Generate summaries</button>
+  <label class="sp-switch" title="Takes effect on the next tick — nothing to restart.">
+    <input type="checkbox" id="sp-detect-enabled" onchange="saveDetectEnabled()"> detect phases
+  </label>
+  <span class="sp-state" id="sp-state"></span>
   <span id="sp-status" style="color: var(--text-secondary); font-size: 0.86em;"></span>
 </div>
 
@@ -708,8 +721,8 @@
       }
       spData = data;
       status.textContent = data.session_id + ' · ' + data.bins.length + ' min'
-        + (data.recomputed ? ' · re-run, not saved' : '')
-        + (data.enabled ? '' : ' · detection disabled in settings');
+        + (data.recomputed ? ' · re-run, not saved' : '');
+      renderDetectState(!!data.enabled);
       if (data.recomputed) { markUnsaved(); } else { markSaved(); }
       render();
     } catch (e) {
@@ -733,6 +746,37 @@
   function markSaved() {
     spUnsaved = false;
     document.getElementById('unsaved-bar').classList.remove('is-visible');
+  }
+
+  // Both states say something. The old message only appeared while detection was off, so
+  // "on" was silent and the row reflowed whenever it changed.
+  function renderDetectState(enabled) {
+    document.getElementById('sp-detect-enabled').checked = enabled;
+    document.getElementById('sp-state').textContent = enabled ? 'Detecting phases' : 'Detection off';
+  }
+
+  async function saveDetectEnabled() {
+    const box = document.getElementById('sp-detect-enabled');
+    try {
+      const resp = await pollFetch('/api/service-phase/settings', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ enabled: box.checked }),
+      });
+      const data = await resp.json();
+      if (!data.success) {
+        box.checked = !box.checked;  // the setting did not change; the box must not claim it did
+        showAlert('Could not save: ' + data.error, 'error');
+        return;
+      }
+      renderDetectState(data.enabled);
+      showAlert(data.enabled
+        ? 'Detection on. It resumes on the next tick.'
+        : 'Detection off. The saved timeline stays as it is.', 'success');
+    } catch (e) {
+      box.checked = !box.checked;
+      showAlert('Could not save: ' + e, 'error');
+    }
   }
 
   function fmtDuration(minutes) {

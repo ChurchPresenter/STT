@@ -58,20 +58,22 @@ def session_db(tmp_path, spec="M" * 5 + "S" * 12, name="2026-03-01_093218.db", a
     return path
 
 
-def make_ns(*, live_db=None, params=None, args=None, archive=()):
+def make_ns(*, live_db=None, params=None, args=None, archive=(), saved=None):
     """The routes under test, with the archive enumeration supplied by the caller.
 
     ``archive`` is what _archive_session_paths would have swept: the whitelist a ``session``
     name is matched against. Passing it explicitly is the point — it is the only thing
     standing between a caller-supplied string and a database.
     """
+    saved = {} if saved is None else saved
     ns = extract_definitions(
         "speech_to_text.py",
         ["_service_phase_resolve_db", "get_service_phase", "save_service_phase_correction",
          "delete_service_phase_correction", "group_service_phase_blocks",
          "_service_phase_first_sunday", "_service_phase_config",
          "_archive_session_paths", "_archive_resolve_db", "_archive_write_done",
-         "_archive_open_ro", "rerun_service_phase", "list_service_phase_sessions"],
+         "_archive_open_ro", "rerun_service_phase", "list_service_phase_sessions",
+         "save_service_phase_settings"],
         extra_globals={
             "os": os,
             "_db_iter_databases": lambda dirs: list(archive),
@@ -83,7 +85,8 @@ def make_ns(*, live_db=None, params=None, args=None, archive=()):
             "_session_index": index,
             "_sermon_summary_config": lambda: {},
             "_service_phase_save": save_analysis,
-            "config": {"service_phase": CFG},
+            "save_config": lambda cfg: saved.update(cfg),
+            "config": {"service_phase": dict(CFG)},
             "request": type("R", (), {
                 "remote_addr": "127.0.0.1",
                 "args": args or {},
@@ -576,3 +579,41 @@ class TestListSessions:
             fh.write(b"not a database at all")
         body = make_ns(live_db=None, archive=[junk, good])["list_service_phase_sessions"]()
         assert [r["session_id"] for r in body["sessions"]] == ["2026-03-01_093218.db"]
+
+
+class TestDetectionSwitch:
+    """The flag had no control anywhere — only config.json on the machine itself."""
+
+    def run(self, params):
+        saved = {}
+        ns = make_ns(params=params, saved=saved)
+        return ns["save_service_phase_settings"](), saved
+
+    def test_turning_it_off_is_persisted(self):
+        body, saved = self.run({"enabled": False})
+        assert body["success"] is True and body["enabled"] is False
+        assert saved["service_phase"]["enabled"] is False
+
+    def test_turning_it_on_is_persisted(self):
+        body, saved = self.run({"enabled": True})
+        assert body["enabled"] is True and saved["service_phase"]["enabled"] is True
+
+    @pytest.mark.parametrize("raw,expected", [
+        ("true", True), ("1", True), ("yes", True), ("on", True), ("True", True),
+        ("false", False), ("0", False), ("no", False), ("", False), ("off", False),
+    ])
+    def test_it_accepts_the_string_forms_a_form_post_delivers(self, raw, expected):
+        # _control_params hands query and form values through as strings; only a JSON body
+        # arrives as a real bool, and a surface posting "false" must not read as true.
+        body, saved = self.run({"enabled": raw})
+        assert body["enabled"] is expected
+        assert saved["service_phase"]["enabled"] is expected
+
+    def test_a_missing_value_reads_as_off_rather_than_raising(self):
+        body, _ = self.run({})
+        assert body["enabled"] is False
+
+    def test_it_returns_what_it_stored(self):
+        body, saved = self.run({"enabled": "true"})
+        assert body["enabled"] == saved["service_phase"]["enabled"]
+
