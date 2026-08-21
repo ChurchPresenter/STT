@@ -5750,6 +5750,12 @@ def generate_sermon_summary():
     if err:
         return err
 
+    # Before either branch: regenerating is as impossible as generating when there is no
+    # model, and queueing it only moves the failure somewhere the operator will not look.
+    blocked = _sermon_llm_unavailable((config.get("live_translation", {}) or {}).get("llm") or {})
+    if blocked:
+        return jsonify({"success": False, "error": blocked}), 400
+
     fingerprint_value = (data.get("fingerprint") or "").strip()
     if fingerprint_value:
         try:
@@ -5771,12 +5777,6 @@ def generate_sermon_summary():
             blocks = _service_phase_load(conn).get("blocks", [])
     except Exception as e:
         return jsonify({"success": False, "error": f"{type(e).__name__}: {e}"}), 500
-
-    # Refuse before queueing rather than failing per sermon in the worker, where the only
-    # trace would be a line in the log the operator is not reading.
-    blocked = _sermon_llm_unavailable((config.get("live_translation", {}) or {}).get("llm") or {})
-    if blocked:
-        return jsonify({"success": False, "error": f"Cannot summarise: {blocked}."}), 400
 
     before = _sermon_queue.qsize()
     _sermon_summary_scan(blocks, db_path, ignore_settle=True, is_live=is_live)
@@ -16611,24 +16611,34 @@ def _sermon_model_label(llm_cfg):
 def _sermon_llm_unavailable(llm_cfg):
     """Why this machine cannot summarise, or None if it can.
 
-    The offload check is the load-bearing one. A machine that hands its captions to a paired
-    server keeps its live_translation.llm block configured but unused, so provider can still
-    read 'local' with a GGUF named beside it — and on a machine that offloads *because* it
-    cannot run that model, loading it is not a degraded summary, it is that machine falling
-    over mid-service. The NLLB path already refuses to load a local model when offloading
-    (see _offload_no_local); this is the same refusal for the LLM path.
+    The only question is whether an LLM is actually configured. Offload is deliberately not
+    consulted: it decides where *captions* are translated, and a machine translating with
+    MADLAD while an LLM sits configured beside it can still summarise perfectly well. An
+    earlier version of this refused a local model whenever the machine offloaded, which
+    turned a caption-routing setting into a summariser kill switch.
+
+    The single source of truth for the route and the worker both, so the two cannot disagree
+    about whether a run is worth queueing.
     """
-    lt_cfg = config.get("live_translation", {}) or {}
     provider = (llm_cfg.get("provider") or "endpoint").strip().lower()
+    unset = ("No LLM is configured. Set one in the translation settings "
+             "(a local GGUF, or an endpoint) to generate summaries.")
     if provider == "local":
-        if _translation_is_offloaded(lt_cfg):
-            return ("this machine offloads translation to a paired server and has no local "
-                    "model to summarise with — generate summaries on the machine that holds it")
+        path = (llm_cfg.get("gguf_path") or "").strip()
+        if not path:
+            repo = (llm_cfg.get("gguf_repo") or "").strip()
+            name = (llm_cfg.get("gguf_file") or "").strip()
+            path = _llm_local_model_path(MODELS_DIR, repo, name) if (repo and name) else ""
+        if not path or not os.path.isfile(path):
+            return unset
+        # Reported separately from "nothing configured": the operator picked a model and
+        # the runtime for it is missing, which is a different thing to go and fix.
         if not local_llm_available():
-            return "llama-cpp-python is not installed"
+            return ("llama-cpp-python is not installed, so the configured local model "
+                    "cannot run")
         return None
     if not (llm_cfg.get("endpoint") or "").strip():
-        return "no LLM endpoint is configured in the translation settings"
+        return unset
     return None
 
 
@@ -16640,9 +16650,9 @@ def _sermon_llm_generate(system_prompt, user_text, max_tokens, llm_cfg):
     fails every one of those checks by design, and folding its multi-second generations into
     the caption-latency EMA would make the health dashboard unreadable.
     """
-    blocked = _sermon_llm_unavailable(llm_cfg)
-    if blocked:
-        print(f"[SERMON] not summarising: {blocked}")
+    # Backstop only: every caller checks first, so reaching this means a configuration
+    # changed mid-run. Deliberately silent — it used to log once per chunk.
+    if _sermon_llm_unavailable(llm_cfg):
         return None
     provider = (llm_cfg.get("provider") or "endpoint").strip().lower()
     if provider == "local":
@@ -16818,6 +16828,16 @@ def _sermon_summarize_one(db_path, fingerprint_value, is_live=True):
             stored = _sermon_load(conn, fingerprint_value) or {}
             _sermon_emit(stored, session_id)
             return stored
+
+        # Once, here — not once per chunk inside the loop. A 27k-character sermon chunks
+        # into ~30 calls, and asking a model that cannot run 30 times produced 30 identical
+        # log lines, a sleep between each, and a stored error describing the symptom
+        # ("returned nothing") rather than the cause.
+        blocked = _sermon_llm_unavailable(llm_cfg)
+        if blocked:
+            store(_SERMON_ERROR, error=blocked)
+            print(f"[SERMON] {entry['label']}: {blocked}", flush=True)
+            return
 
         store(_SERMON_RUNNING)
         started = time.perf_counter()
