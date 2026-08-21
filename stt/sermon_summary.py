@@ -219,13 +219,35 @@ def build_map_prompt(chunk: Chunk, *, base_ms: int) -> Tuple[str, str]:
     return MAP_SYSTEM, f"Part {chunk.index + 1} {span}:\n\n{chunk.text}"
 
 
-def _reduce_system(max_chapters: int) -> str:
-    """The reduce instructions, parameterised by the chapter cap.
+def chapter_range(minutes: int, *, min_minutes_per_chapter: int = 4,
+                  max_minutes_per_chapter: int = 10, hard_max: int = 12) -> Tuple[int, int]:
+    """How many chapters this sermon may have, as ``(floor, ceiling)``.
 
-    The 'Major Movements' framing and the cap are deliberate. Asked for chapters without
-    them, a model returns one per point and produces a table of contents nobody scrubs
-    through; the cap forces it to decide what the sermon's actual movements were.
+    A fixed band cannot fit every speaker. One preacher works through eight points in twenty
+    minutes; another develops three across forty, and both are ordinary. Asked for the same
+    3-8 either way, the model splits a movement to reach a floor it cannot honestly fill, or
+    merges two to stay under a ceiling that does not belong to that sermon.
+
+    So duration sets the bounds and the content chooses inside them: at most one chapter per
+    ``min_minutes_per_chapter``, at least one per ``max_minutes_per_chapter``. The hard cap
+    survives because past a dozen markers nobody scrubs the list — it is a table of contents
+    again, which is the thing the cap existed to prevent.
     """
+    minutes = max(0, int(minutes))
+    ceiling = min(int(hard_max), max(2, minutes // max(1, int(min_minutes_per_chapter))))
+    floor = max(2, minutes // max(1, int(max_minutes_per_chapter)))
+    # A short sermon can push the floor above the ceiling; the ceiling is the real limit.
+    floor = min(floor, ceiling)
+    return floor, ceiling
+
+
+def _reduce_system(floor: int, ceiling: int) -> str:
+    """The reduce instructions, parameterised by the range this sermon allows.
+
+    A range rather than a target: asked for a number, a model reaches it, and the last
+    chapter or two of a sermon that had fewer movements than that are invented divisions.
+    """
+    span = f"{floor}" if floor == ceiling else f"between {floor} and {ceiling}"
     return (
         "You are given ordered summaries of consecutive parts of one church sermon, each "
         "with the time range it covers.\n"
@@ -237,7 +259,8 @@ def _reduce_system(max_chapters: int) -> str:
         "the scripture it worked from.\n"
         "\n"
         "### Chapters\n"
-        f"Between 3 and {max_chapters} lines, each `m:ss Title`.\n"
+        f"{span} lines, each `m:ss Title`. Use as many as this sermon actually has — do not "
+        f"split one movement in two to reach a number.\n"
         "Chapters are the sermon's major movements, not every individual point. Each title "
         "is a short phrase describing what that stretch is about.\n"
         "Use only timestamps that appear in the time ranges above. Never invent a time. "
@@ -247,14 +270,14 @@ def _reduce_system(max_chapters: int) -> str:
 
 
 def build_reduce_prompt(gists: Sequence[Tuple[str, str]], *,
-                        max_chapters: int = 8) -> Tuple[str, str]:
+                        floor: int = 3, ceiling: int = 8) -> Tuple[str, str]:
     """``(system, user)`` for the reduce call.
 
     ``gists`` is ``(span_label, gist_text)`` in order — the span label carries the time
     range, which is the only timing information the model is ever shown.
     """
     body = "\n\n".join(f"{span}\n{text}" for span, text in gists if text)
-    return _reduce_system(max_chapters), body
+    return _reduce_system(floor, ceiling), body
 
 
 # --- Parsing ----------------------------------------------------------------------
@@ -413,6 +436,34 @@ def explain_no_sermons(blocks: Sequence[dict], *, min_minutes: int = 8,
         return (f"the longest sermon block is {longest} min, under the {min_minutes} min "
                 f"minimum — lower sermon_summary.min_minutes to include it")
     return "every sermon in this service already has a summary"
+
+
+def unfinished(blocks: Sequence[dict], stored: Sequence[dict], *,
+               min_minutes: int = 8,
+               label_prefix: str = SERMON_LABEL_PREFIX) -> List[dict]:
+    """Sermon blocks with no usable summary yet, for the end-of-session catch-up.
+
+    A row left ``pending`` or ``running`` counts as unfinished: the process that was going to
+    do the work is the one that just stopped, so nothing is coming to finish it. So does
+    ``error`` — the usual cause is a model that was unreachable at the time, and the end of a
+    service is exactly when that has changed.
+
+    Matched on the block's own range rather than on a fingerprint, because the caller is
+    asking "does this sermon have a summary", not "is this specific text summarised".
+    """
+    done = {(int(r.get("start_ms") or 0), (r.get("label") or ""))
+            for r in stored if r.get("status") == STATUS_DONE}
+    out = []
+    for block in blocks:
+        label = (block.get("label") or "")
+        if not label.startswith(label_prefix):
+            continue
+        if int(block.get("minutes") or 0) < int(min_minutes):
+            continue
+        if (int(block.get("start_ms") or 0), label) in done:
+            continue
+        out.append(block)
+    return out
 
 
 # --- Persistence ------------------------------------------------------------------

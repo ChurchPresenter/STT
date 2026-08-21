@@ -19,6 +19,7 @@ from stt.sermon_summary import (
     Row,
     build_map_prompt,
     build_reduce_prompt,
+    chapter_range,
     chunk_rows,
     delete_summary,
     ensure_tables,
@@ -39,6 +40,7 @@ from stt.sermon_summary import (
     snap_chapters,
     supersede,
     transcript_text,
+    unfinished,
 )
 
 BASE = 1_700_000_000_000
@@ -271,11 +273,21 @@ class TestPrompts:
         assert "0:00" in user and chunk.rows[0].text in user
         assert "same language" in system
 
-    def test_reduce_prompt_names_both_sections_and_the_cap(self):
-        system, user = build_reduce_prompt([("[0:00-2:00]", "A point.")], max_chapters=6)
+    def test_reduce_prompt_names_both_sections_and_the_range(self):
+        system, user = build_reduce_prompt([("[0:00-2:00]", "A point.")], floor=3, ceiling=6)
         assert "### Summary" in system and "### Chapters" in system
-        assert "6" in system and "Never invent a time." in system
+        assert "between 3 and 6" in system and "Never invent a time." in system
         assert "A point." in user
+
+    def test_the_reduce_prompt_asks_for_a_range_not_a_target(self):
+        # Asked for a number a model reaches it, and the last movements of a shorter sermon
+        # become invented divisions.
+        system, _ = build_reduce_prompt([("[0:00-2:00]", "A point.")], floor=3, ceiling=9)
+        assert "do not " in system and "reach a number" in system
+
+    def test_a_degenerate_range_reads_as_one_number(self):
+        system, _ = build_reduce_prompt([("[0:00-2:00]", "A point.")], floor=2, ceiling=2)
+        assert "between" not in system and "2 lines" in system
 
     def test_reduce_prompt_skips_empty_gists(self):
         _, user = build_reduce_prompt([("[0:00-1:00]", ""), ("[1:00-2:00]", "Kept.")])
@@ -505,4 +517,89 @@ class TestExplainNoSermons:
     def test_an_unnamed_block_is_described_rather_than_dropped(self):
         msg = explain_no_sermons([self.block(label=None)])
         assert "unnamed" in msg
+
+
+class TestChapterRange:
+    """Density follows the sermon, because speakers do not share a shape.
+
+    One preacher works through eight points in twenty minutes; another develops three across
+    forty. A single fixed band makes the model split a movement to reach a floor it cannot
+    fill, or merge two to stay under a ceiling that is not this sermon's.
+    """
+
+    def test_a_longer_sermon_may_have_more_chapters(self):
+        assert chapter_range(12)[1] < chapter_range(37)[1] < chapter_range(80)[1]
+
+    def test_the_floor_rises_with_length_too(self):
+        assert chapter_range(12)[0] <= chapter_range(37)[0] <= chapter_range(80)[0]
+
+    @pytest.mark.parametrize("minutes", [0, 1, 5, 9, 12, 20, 37, 45, 60, 80, 120, 400])
+    def test_the_floor_never_exceeds_the_ceiling(self, minutes):
+        floor, ceiling = chapter_range(minutes)
+        assert floor <= ceiling, (minutes, floor, ceiling)
+
+    @pytest.mark.parametrize("minutes", [0, 5, 37, 400])
+    def test_at_least_two_are_always_offered(self, minutes):
+        # One "chapter" is not a chapter list; snap_chapters already forces a first marker.
+        assert chapter_range(minutes)[0] >= 2
+
+    def test_the_hard_cap_holds_however_long_the_service(self):
+        # Past a dozen it is a table of contents again, which is what the cap prevents.
+        assert chapter_range(600)[1] == 12
+        assert chapter_range(600, hard_max=6)[1] == 6
+
+    def test_the_intervals_are_configurable(self):
+        wide = chapter_range(60, min_minutes_per_chapter=20, max_minutes_per_chapter=30)
+        tight = chapter_range(60, min_minutes_per_chapter=3, max_minutes_per_chapter=6)
+        assert wide[1] < tight[1]
+
+    def test_a_zero_interval_does_not_divide_by_zero(self):
+        assert chapter_range(37, min_minutes_per_chapter=0, max_minutes_per_chapter=0)
+
+
+class TestUnfinished:
+    """What the end-of-session catch-up still owes."""
+
+    def block(self, **kw):
+        base = {"label": "Sermon 1", "minutes": 30, "start_ms": BASE,
+                "end_ms": BASE + 30 * MIN, "ongoing": False}
+        base.update(kw)
+        return base
+
+    def stored(self, status, **kw):
+        base = {"label": "Sermon 1", "start_ms": BASE, "status": status}
+        base.update(kw)
+        return base
+
+    def test_a_sermon_with_no_row_is_unfinished(self):
+        assert unfinished([self.block()], []) == [self.block()]
+
+    def test_a_done_sermon_is_left_alone(self):
+        assert unfinished([self.block()], [self.stored("done")]) == []
+
+    @pytest.mark.parametrize("status", ["pending", "running", "error"])
+    def test_anything_short_of_done_is_unfinished(self, status):
+        # The process that was going to finish a pending run is the one that just stopped,
+        # and an error is usually a model that was unreachable then and is not now.
+        assert unfinished([self.block()], [self.stored(status)]) == [self.block()]
+
+    def test_a_row_for_a_different_sermon_does_not_count(self):
+        other = self.stored("done", label="Sermon 2", start_ms=BASE + 60 * MIN)
+        assert unfinished([self.block()], [other]) == [self.block()]
+
+    def test_a_row_at_a_different_start_does_not_count(self):
+        # The block moved, so the stored summary describes other material.
+        assert unfinished([self.block()], [self.stored("done", start_ms=BASE + 5 * MIN)]) \
+            == [self.block()]
+
+    def test_non_sermon_blocks_are_never_owed(self):
+        assert unfinished([self.block(label="Songs 1")], []) == []
+
+    def test_a_block_under_the_minimum_is_not_owed(self):
+        assert unfinished([self.block(minutes=3)], [], min_minutes=8) == []
+
+    def test_it_reports_every_outstanding_sermon(self):
+        two = self.block(label="Sermon 2", start_ms=BASE + 60 * MIN, end_ms=BASE + 90 * MIN)
+        out = unfinished([self.block(), two], [self.stored("done")])
+        assert [b["label"] for b in out] == ["Sermon 2"]
 

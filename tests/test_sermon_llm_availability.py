@@ -244,6 +244,7 @@ class TestBlockedRunDoesNoWork:
                 "_sermon_parse_sections": ss.parse_sections,
                 "_sermon_parse_chapters": ss.parse_chapters,
                 "_sermon_snap_chapters": ss.snap_chapters,
+                "_sermon_chapter_range": ss.chapter_range,
                 "_sermon_format_offset": ss.format_offset,
                 "_SERMON_PENDING": ss.STATUS_PENDING,
                 "_SERMON_RUNNING": ss.STATUS_RUNNING,

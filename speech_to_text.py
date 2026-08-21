@@ -992,7 +992,9 @@ from stt.sermon_summary import (
     save_summary as _sermon_save,
     supersede as _sermon_supersede,
     snap_chapters as _sermon_snap_chapters,
+    chapter_range as _sermon_chapter_range,
     transcript_text as _sermon_transcript_text,
+    unfinished as _sermon_unfinished,
 )
 from stt.phase_learn import (
     apply_proposals as _phase_learn_apply,
@@ -12241,6 +12243,17 @@ def start_transcription():
                         {"success": False, "error": "Transcription is already running"}
                     ), 400
 
+            # Don't start while the previous session is still being summarised. Starting
+            # opens a new session database and /api/restart terminates the worker outright,
+            # either of which lands in the middle of a run that has minutes left. The flag
+            # carries its own deadline, so this cannot wedge the machine.
+            if sermon_finalising():
+                return jsonify({
+                    "success": False,
+                    "error": ("Finishing the sermon summaries for the last service. "
+                              "This takes a few minutes; the recording is already saved."),
+                }), 409
+
             # Don't start if still stopping (unless the worker is gone)
             if transcription_state["status"] == "stopping" and not worker_dead:
                 return jsonify(
@@ -12375,6 +12388,10 @@ def stop_transcription():
                 ), 400
 
             # Send stop command through queue
+            # Read before the stop propagates: the worker clears db_name from the
+            # shared state as it tears the session down, and by then there is
+            # nothing left to summarise *from*.
+            _stopping_db_path = _service_phase_session_db()
             control_queue.put({"command": "stop"})
 
             # Update state
@@ -12393,34 +12410,11 @@ def stop_transcription():
             _db_cache["last_entries"] = []
             _db_cache["last_fetch_time"] = 0
 
-        # Unload Live Translation model synchronously to free GPU memory
-        # Do this BEFORE starting cleanup thread to avoid CUDA conflicts
-        if is_live_translation_model_loaded():
-            print("[STOP] Unloading Live Translation model...")
-            unload_live_translation_model()
-            print("[STOP] Live Translation model unloaded")
-
-        # The in-process GGUF is a separate engine with a separate releaser, and it
-        # holds as much memory as the NMT model does. Freeing only the NMT one left
-        # it resident until the process restarted.
-        if _uses_local_llm(config.get("live_translation", {})) and is_local_llm_loaded():
-            print("[STOP] Unloading local LLM translation model...")
-            unload_local_llm()
-
-        # Tell remote Machine B to unload its translation model too
-        remote_cfg = config.get("live_translation", {}).get("remote", {})
-        if remote_cfg.get("enabled") and remote_cfg.get("endpoint"):
-            def _notify_remote_unload():
-                try:
-                    ep = _get_remote_endpoint()
-                    if not ep:
-                        return
-                    r = _peer_request("POST", ep, "/api/translate/unload", timeout=10)
-                    print(f"[STOP] Remote translation unload: {r.json()}")
-                except Exception as e:
-                    print(f"[STOP] Remote translation unload failed: {e}")
-            import threading
-            threading.Thread(target=_notify_remote_unload, daemon=True).start()
+        # Releasing the models is deferred while a sermon still needs summarising: the
+        # summariser's whole reason for running here is that the model is loaded, and this is
+        # the line where it stops being. See _sermon_finalise_session.
+        if not _sermon_begin_finalising(_stopping_db_path):
+            _sermon_release_models()
 
         if is_tts_model_loaded():
             print("[STOP] Unloading TTS model...")
@@ -16664,6 +16658,7 @@ def _service_phase_tick(is_running):
 # rule for when a sermon has settled enough to be worth summarising.
 
 _sermon_queue = Queue()
+_sermon_busy = threading.Event()
 
 # Published by the translation pump each cycle so the summariser can tell whether captions
 # are waiting. It is a hint, not a handshake: a stale count simply makes the summariser
@@ -16873,7 +16868,7 @@ def _sermon_budget(llm_cfg, system_prompt, reply_tokens):
     return _llm_budget_for(llm_cfg, system_prompt, reply_tokens)
 
 
-def _sermon_fold(gists, llm_cfg, cfg, reduce_system, max_chapters):
+def _sermon_fold(gists, llm_cfg, cfg, reduce_system, floor, ceiling):
     """Condense gists until the reduce prompt fits the context window.
 
     A long service can produce more part-summaries than the window holds. Folding adjacent
@@ -16886,7 +16881,7 @@ def _sermon_fold(gists, llm_cfg, cfg, reduce_system, max_chapters):
     map_tokens = coerce_int(cfg.get("map_max_tokens"), 220, lo=64, hi=1024)
 
     for _ in range(3):
-        _, user = _sermon_reduce_prompt(gists, max_chapters=max_chapters)
+        _, user = _sermon_reduce_prompt(gists, floor=floor, ceiling=ceiling)
         if len(gists) <= 1 or _llm_input_fits(user, budget, counter=counter):
             return gists
         folded = []
@@ -17044,7 +17039,13 @@ def _sermon_summarize_one(db_path, fingerprint_value, is_live=True):
         started = time.perf_counter()
 
         map_tokens = coerce_int(cfg.get("map_max_tokens"), 220, lo=64, hi=1024)
-        max_chapters = coerce_int(cfg.get("max_chapters"), 8, lo=2, hi=20)
+        # Derived from this sermon's own length, so a short homily is not asked for as many
+        # movements as an hour of preaching.
+        floor, ceiling = _sermon_chapter_range(
+            round((end_ms - start_ms) / 60000.0),
+            min_minutes_per_chapter=coerce_int(cfg.get("min_minutes_per_chapter"), 4, lo=1, hi=60),
+            max_minutes_per_chapter=coerce_int(cfg.get("max_minutes_per_chapter"), 10, lo=1, hi=120),
+            hard_max=coerce_int(cfg.get("max_chapters"), 12, lo=2, hi=30))
         budget, counter = _sermon_budget(llm_cfg, _SERMON_MAP_SYSTEM, map_tokens)
         chunk_tokens = min(coerce_int(cfg.get("chunk_tokens"), 900, lo=100, hi=8192), budget)
         chunks = _sermon_chunk_rows(rows, chunk_tokens, counter=counter)
@@ -17069,9 +17070,9 @@ def _sermon_summarize_one(db_path, fingerprint_value, is_live=True):
             return
 
         reduce_tokens = coerce_int(cfg.get("reduce_max_tokens"), 700, lo=128, hi=4096)
-        reduce_system, _ = _sermon_reduce_prompt([], max_chapters=max_chapters)
-        gists = _sermon_fold(gists, llm_cfg, cfg, reduce_system, max_chapters)
-        _, reduce_user = _sermon_reduce_prompt(gists, max_chapters=max_chapters)
+        reduce_system, _ = _sermon_reduce_prompt([], floor=floor, ceiling=ceiling)
+        gists = _sermon_fold(gists, llm_cfg, cfg, reduce_system, floor, ceiling)
+        _, reduce_user = _sermon_reduce_prompt(gists, floor=floor, ceiling=ceiling)
         raw = _sermon_generate_waiting(reduce_system, reduce_user, reduce_tokens, llm_cfg)
         if not raw:
             store(_SERMON_ERROR, error="the model returned nothing for the final summary")
@@ -17081,7 +17082,7 @@ def _sermon_summarize_one(db_path, fingerprint_value, is_live=True):
         summary = sections.get("summary") or sections.get("") or ""
         chapters = _sermon_snap_chapters(
             _sermon_parse_chapters(sections.get("chapters", "")), rows,
-            start_ms=start_ms, max_chapters=max_chapters)
+            start_ms=start_ms, max_chapters=ceiling)
         store(_SERMON_DONE, summary=summary.strip(), chapters=chapters,
               generated_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
         print(f"[SERMON] {entry['label']}: {len(chunks)} parts, {len(chapters)} chapters, "
@@ -17107,6 +17108,127 @@ def _sermon_summarize_one(db_path, fingerprint_value, is_live=True):
         _archive_write_done(db_path, is_live)
 
 
+def _sermon_release_models():
+    """Free the translation models, and tell the paired machine it may too.
+
+    Lifted verbatim out of stop_transcription so it can run either at the stop itself or
+    after the end-of-session summaries — the models are exactly what those summaries need,
+    and this is the line that takes them away.
+    """
+    if is_live_translation_model_loaded():
+        print("[STOP] Unloading Live Translation model...")
+        unload_live_translation_model()
+        print("[STOP] Live Translation model unloaded")
+
+    # The in-process GGUF is a separate engine with a separate releaser, and it holds as much
+    # memory as the NMT model does. Freeing only the NMT one left it resident until the
+    # process restarted.
+    if _uses_local_llm(config.get("live_translation", {})) and is_local_llm_loaded():
+        print("[STOP] Unloading local LLM translation model...")
+        unload_local_llm()
+
+    remote_cfg = config.get("live_translation", {}).get("remote", {})
+    if remote_cfg.get("enabled") and remote_cfg.get("endpoint"):
+        def _notify_remote_unload():
+            try:
+                ep = _get_remote_endpoint()
+                if not ep:
+                    return
+                r = _peer_request("POST", ep, "/api/translate/unload", timeout=10)
+                print(f"[STOP] Remote translation unload: {r.json()}")
+            except Exception as e:
+                print(f"[STOP] Remote translation unload failed: {e}")
+        threading.Thread(target=_notify_remote_unload, daemon=True).start()
+
+
+def _sermon_finalise_deadline():
+    return coerce_int(_sermon_summary_config().get("finalise_max_seconds"), 1800, lo=30, hi=14400)
+
+
+def sermon_finalising():
+    """Whether an end-of-session summary run is still owed, honouring its deadline.
+
+    The flag lives in the shared transcription_state because the two processes that care sit
+    either side of it: the web process sets it, the worker process waits on it before handing
+    the session to the file mover.
+
+    A timestamp goes with it because a flag is a promise that something will clear it, and a
+    crashed summariser makes a liar of it. Past the deadline the flag reads as clear, so the
+    worst case is a late delivery rather than a machine that will not start again.
+    """
+    try:
+        if not transcription_state.get("finalising"):
+            return False
+        since = float(transcription_state.get("finalising_since") or 0)
+    except Exception:
+        return False
+    if since and time.time() - since > _sermon_finalise_deadline():
+        return False
+    return True
+
+
+def _sermon_set_finalising(active):
+    try:
+        transcription_state["finalising"] = bool(active)
+        transcription_state["finalising_since"] = time.time() if active else 0
+    except Exception:
+        pass  # a shared-state write must never break the stop path
+
+
+def _sermon_begin_finalising(db_path):
+    """Queue any sermon this session still owes. True if the models must stay loaded.
+
+    Called from the stop path with the session that is ending. Returning False — the common
+    case — means nothing is outstanding and the stop proceeds exactly as it always did.
+    """
+    cfg = _sermon_summary_config()
+    if not cfg.get("enabled", False) or not db_path or not os.path.exists(db_path):
+        return False
+    try:
+        with _archive_open_ro(db_path, is_live=True) as conn:
+            blocks = _service_phase_load(conn).get("blocks", [])
+            stored = _sermon_load_all(conn)
+        owed = _sermon_unfinished(
+            blocks, stored,
+            min_minutes=coerce_int(cfg.get("min_minutes"), 8, lo=1, hi=240))
+        if not owed:
+            return False
+        if _sermon_llm_unavailable((config.get("live_translation", {}) or {}).get("llm") or {}):
+            return False  # nothing to keep loaded for
+        _sermon_set_finalising(True)
+        print(f"[SERMON] finishing {len(owed)} sermon(s) before the session is delivered",
+              flush=True)
+        socketio.start_background_task(_sermon_finalise_session, db_path, owed)
+        return True
+    except Exception as e:
+        print(f"[SERMON] could not start the end-of-session run ({type(e).__name__}: {e})")
+        _sermon_set_finalising(False)
+        return False
+
+
+def _sermon_finalise_session(db_path, owed):
+    """Summarise what the session still owes, then release the models.
+
+    The models are released here rather than at the stop, so the order the whole feature
+    depends on is in one place: summarise, then unload. The finally is not decoration — the
+    flag holds up file delivery, so anything that escapes here would delay a session for the
+    full deadline.
+    """
+    try:
+        _sermon_summary_scan(owed, db_path, ignore_settle=True, is_live=True)
+        while not _sermon_queue.empty() and sermon_finalising():
+            socketio.sleep(2)
+        # The queue empties when the last item is *taken*, not when it finishes.
+        while _sermon_busy.is_set() and sermon_finalising():
+            socketio.sleep(2)
+    except Exception as e:
+        print(f"[SERMON] end-of-session run failed ({type(e).__name__}: {e})")
+    finally:
+        _sermon_set_finalising(False)
+        _sermon_release_models()
+        print("[SERMON] end-of-session run complete; models released", flush=True)
+
+
 def _sermon_summary_worker():
     """Background task draining the sermon queue, one sermon at a time.
 
@@ -17121,10 +17243,13 @@ def _sermon_summary_worker():
         except Exception:
             socketio.sleep(1.0)
             continue
+        _sermon_busy.set()
         try:
             _sermon_summarize_one(db_path, fp, is_live)
         except Exception as e:
             print(f"[SERMON] worker error ({type(e).__name__}: {e})")
+        finally:
+            _sermon_busy.clear()
 
 
 # Caches keyed by database row id. Ids restart low in every new session
@@ -21430,6 +21555,18 @@ def thread1_function(ts, cq, cfq, cal_state, cal_data, cal_step1, asq):
                         print("[FILE MOVER] Waiting 10 seconds for all file handles to close...")
                         set_file_mover_running("auto")
                         sleep(10)
+                        # The session is about to be copied to the NAS and deleted here, so
+                        # a summary still being written would be lost rather than merely
+                        # late. Bounded by its own deadline: a stuck summariser delays a
+                        # delivery, it must never prevent one.
+                        _waited = 0
+                        while sermon_finalising() and _waited < _sermon_finalise_deadline():
+                            if _waited == 0:
+                                print("[FILE MOVER] Waiting for end-of-session summaries...")
+                            sleep(5)
+                            _waited += 5
+                        if _waited:
+                            print(f"[FILE MOVER] Waited {_waited}s for summaries")
                         print("[FILE MOVER] Executing file move after final cleanup...")
                         result = execute_file_move_now(lambda cfg=current_config: cfg, APP_DIR)
                         set_file_mover_result("auto", result)
