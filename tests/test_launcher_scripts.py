@@ -115,3 +115,20 @@ class TestInstallerText:
         assert port == 8080
         for name in ("install.ps1", "install.sh"):
             assert f"localhost:{port}" in read(name)
+
+
+class TestInstallShRefusesIntelMacs:
+    """PyTorch ships no macOS x86_64 wheels after 2.2.2, so the pinned torch in
+    requirements.txt cannot resolve on an Intel Mac. The check has to sit in
+    detect_os: detect_gpu runs from install_python_deps, by which point Python,
+    ffmpeg and a venv are already installed for a machine that can never run."""
+
+    def test_the_arch_gate_exits(self):
+        body = read("install.sh")
+        detect_os = body.split("detect_os() {", 1)[1].split("\n}\n", 1)[0]
+        assert 'if [ "$ARCH" != "arm64" ]' in detect_os
+        assert "exit 1" in detect_os.split('!= "arm64"', 1)[1]
+
+    def test_the_message_names_the_supported_hardware(self):
+        body = read("install.sh")
+        assert "Apple Silicon Mac (M1 or newer)" in body

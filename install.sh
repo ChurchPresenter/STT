@@ -52,6 +52,14 @@ detect_os() {
         Darwin)
             OS=macos
             ARCH=$(uname -m)
+            # PyTorch published its last macOS x86_64 wheels with 2.2.2, so the
+            # pinned torch in requirements.txt cannot resolve on an Intel Mac.
+            # Stop here rather than after installing Python, ffmpeg and a venv.
+            if [ "$ARCH" != "arm64" ]; then
+                print_error "This Mac has an Intel processor. STT needs PyTorch, which no longer publishes Intel-Mac builds, so its dependencies cannot be installed here."
+                print_error "Run STT on an Apple Silicon Mac (M1 or newer), or on a Windows or Linux PC."
+                exit 1
+            fi
             print_success "Detected macOS ($ARCH)"
             ;;
         Linux)

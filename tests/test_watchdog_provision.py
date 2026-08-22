@@ -397,3 +397,88 @@ class TestPinLatestRelease:
         _p, resets, seen = self.pin(monkeypatch, ["26.2.158"], on_branch=(), shallow=True)
         assert resets == ["26.2.158"]
         assert "checked" not in seen, "no reachability check is possible on a shallow clone"
+
+
+class TestUnsupportedPlatform:
+    """A Mac that is not Apple Silicon cannot be provisioned at all.
+
+    PyTorch published its last macOS x86_64 wheels with 2.2.2, so the pinned
+    torch never resolves there and uv fails with "no wheels with a matching
+    platform tag" — the field report that produced this gate had retried that
+    same resolution every ten minutes, thirteen times and counting.
+    """
+
+    def _mac(self, monkeypatch, *, hardware_arm64, process="arm64"):
+        monkeypatch.setattr(watchdog.sys, "platform", "darwin")
+        monkeypatch.setattr(watchdog.platform, "machine", lambda: process)
+        monkeypatch.setattr(watchdog, "_mac_hardware_is_arm64",
+                            lambda: hardware_arm64)
+
+    def test_intel_mac_is_refused(self, monkeypatch):
+        self._mac(monkeypatch, hardware_arm64=False, process="x86_64")
+        reason = watchdog._unsupported_platform_reason()
+        assert reason and "Intel" in reason
+        assert "Apple Silicon" in reason
+
+    def test_apple_silicon_is_supported(self, monkeypatch):
+        self._mac(monkeypatch, hardware_arm64=True, process="arm64")
+        assert watchdog._unsupported_platform_reason() is None
+
+    def test_an_intel_build_under_rosetta_gets_its_own_message(self, monkeypatch):
+        # The hardware is fine; the wrong build was installed. Telling this
+        # operator to buy an Apple Silicon Mac would be wrong — they have one.
+        self._mac(monkeypatch, hardware_arm64=True, process="x86_64")
+        reason = watchdog._unsupported_platform_reason()
+        assert reason and "Rosetta" in reason
+        assert "arm64" in reason
+        # A different diagnosis from the Intel-hardware one, not the same text.
+        self._mac(monkeypatch, hardware_arm64=False, process="x86_64")
+        assert reason != watchdog._unsupported_platform_reason()
+
+    @pytest.mark.parametrize("plat,machine", [
+        ("linux", "x86_64"), ("linux", "aarch64"), ("win32", "AMD64"),
+    ])
+    def test_other_platforms_are_never_gated(self, monkeypatch, plat, machine):
+        monkeypatch.setattr(watchdog.sys, "platform", plat)
+        monkeypatch.setattr(watchdog.platform, "machine", lambda: machine)
+        assert watchdog._unsupported_platform_reason() is None
+
+    def test_sysctl_failure_falls_back_to_the_process_arch(self, monkeypatch):
+        def boom(*a, **kw):
+            raise OSError("sysctl: not found")
+
+        monkeypatch.setattr(watchdog.subprocess, "run", boom)
+        monkeypatch.setattr(watchdog.platform, "machine", lambda: "x86_64")
+        assert watchdog._mac_hardware_is_arm64() is False
+        monkeypatch.setattr(watchdog.platform, "machine", lambda: "arm64")
+        assert watchdog._mac_hardware_is_arm64() is True
+
+    def test_sysctl_reports_the_hardware(self, monkeypatch):
+        class Result:
+            def __init__(self, out):
+                self.returncode, self.stdout = 0, out
+
+        monkeypatch.setattr(watchdog.subprocess, "run", lambda *a, **kw: Result("1\n"))
+        monkeypatch.setattr(watchdog.platform, "machine", lambda: "x86_64")
+        assert watchdog._mac_hardware_is_arm64() is True
+
+    def test_run_aborts_before_any_step(self, monkeypatch):
+        p = make_provisioner(monkeypatch, which=None)
+        self._mac(monkeypatch, hardware_arm64=False, process="x86_64")
+        with pytest.raises(watchdog.UnsupportedPlatformError):
+            p.run()
+        assert p.runs == []       # nothing was executed
+        assert p.downloaded == []  # nothing was downloaded
+        assert p.logs == []        # not even a "[1/8]" line
+
+    def test_the_updater_path_is_gated_too(self, monkeypatch):
+        p = make_provisioner(monkeypatch, which=None)
+        self._mac(monkeypatch, hardware_arm64=False, process="x86_64")
+        with pytest.raises(watchdog.UnsupportedPlatformError):
+            p.install_deps_only()
+        assert p.runs == []
+
+    def test_it_is_a_provision_error(self, monkeypatch):
+        # Existing handlers catch ProvisionError; this must not slip past them
+        # as an unhandled crash.
+        assert issubclass(watchdog.UnsupportedPlatformError, watchdog.ProvisionError)

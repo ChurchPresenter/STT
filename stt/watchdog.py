@@ -636,6 +636,54 @@ class ProvisionError(Exception):
     pass
 
 
+class UnsupportedPlatformError(ProvisionError):
+    """A ProvisionError that retrying cannot fix: the machine itself cannot run
+    STT. Subclasses ProvisionError so every existing handler still catches it;
+    the headless loop checks for it to stop retrying a permanent condition."""
+
+
+def _mac_hardware_is_arm64():
+    """True when this Mac's *hardware* is Apple Silicon, regardless of the arch
+    of the running process. platform.machine() reports the process arch, which
+    is x86_64 for an Intel build under Rosetta on an M-series Mac — reading the
+    hardware directly keeps that case from being told to buy a new computer.
+    Falls back to the process arch when sysctl is unavailable."""
+    try:
+        out = subprocess.run(["sysctl", "-n", "hw.optional.arm64"],
+                             capture_output=True, text=True, timeout=10)
+        if out.returncode == 0:
+            return out.stdout.strip() == "1"
+    except Exception:
+        pass
+    return platform.machine() == "arm64"
+
+
+def _unsupported_platform_reason():
+    """None when this machine can run STT, else a user-facing explanation.
+
+    The only unsupported platform is a Mac that is not Apple Silicon: PyTorch
+    published its last macOS x86_64 wheels with 2.2.2, so the pinned torch in
+    requirements.txt can never resolve there and uv fails with "no wheels with a
+    matching platform tag". That is permanent, not a transient setup failure.
+    Every other OS/arch returns None — this is not a general allowlist."""
+    if sys.platform != "darwin":
+        return None
+    if not _mac_hardware_is_arm64():
+        return (
+            "This Mac has an Intel processor. STT needs PyTorch, which no longer "
+            "publishes Intel-Mac builds, so its dependencies cannot be installed "
+            "here. Run STT on an Apple Silicon Mac (M1 or newer), or on a "
+            "Windows or Linux PC."
+        )
+    if platform.machine() != "arm64":
+        return (
+            "This is an Intel build of STT running under Rosetta on an Apple "
+            "Silicon Mac, and its dependencies have no Intel-Mac builds. Install "
+            "the Apple Silicon (arm64) build of STT instead."
+        )
+    return None
+
+
 def is_provisioned():
     """True when SOURCE is checked out with a venv the worker can run from.
 
@@ -886,12 +934,23 @@ class Provisioner:
 
     def run(self):
         """Run every step in order. Raises ProvisionError on the first failure."""
+        self._preflight()
         total = len(self.STEPS)
         for i, (label, meth) in enumerate(self.STEPS, 1):
             self.log(f"[{i}/{total}] {label}...")
             getattr(self, meth)()
         self._write_marker()
         self.log("Setup complete.")
+
+    def _preflight(self):
+        """Refuse a machine that can never finish setup, before anything is
+        downloaded. Deliberately not a ninth STEP: the "[k/8]" labels the GUI
+        parses stay stable, and this has to run ahead of uv/Python/git/ffmpeg
+        and the source checkout, which are minutes of work on the way to a
+        failure that was knowable at launch."""
+        reason = _unsupported_platform_reason()
+        if reason:
+            raise UnsupportedPlatformError(reason)
 
     def _write_marker(self):
         try:
@@ -1442,6 +1501,7 @@ class Provisioner:
         """Resolve uv and (re)install dependencies — reused by the auto-updater."""
         if log:
             self.log = log
+        self._preflight()
         self._uv = _which("uv") or self._uv
         if not self._uv:
             self._step_uv()
@@ -3005,6 +3065,13 @@ def _run_provisioning_headless(max_attempts=None):
         try:
             Provisioner(log=lambda m: logging.info(f"[SETUP] {m}")).run()
             return True
+        except UnsupportedPlatformError as e:
+            # Permanent: retrying re-downloads and re-resolves every 10 minutes
+            # forever on a machine that can never finish. Report once, give up,
+            # and let main() park instead of exiting into a service restart.
+            logging.error(f"[SETUP] Cannot run on this computer: {e}")
+            _sentry_capture(e)
+            raise
         except Exception as e:
             logging.error(f"[SETUP] Provisioning failed (attempt {attempt}): {e}")
             if attempt == 1:
@@ -3071,6 +3138,11 @@ class ProvisionWindow:
             try:
                 Provisioner(log=self._emit).run()
                 self._q.put(("done", True))
+            except UnsupportedPlatformError as e:
+                # Retry is a slower version of the same failure — keep it disabled.
+                self._q.put(("log", f"[ERROR] {e}"))
+                self._q.put(("fatal", str(e)))
+                _sentry_capture(e)
             except Exception as e:
                 self._q.put(("log", f"[ERROR] {e}"))
                 self._q.put(("done", False))
@@ -3092,6 +3164,10 @@ class ProvisionWindow:
                     self._append(payload)
                     if payload.startswith("[") and "/" in payload[:6]:
                         self._step.config(text=payload.lstrip("[0123456789/] "))
+                elif kind == "fatal":
+                    self.success = False
+                    self._bar.stop()
+                    self._step.config(text="STT cannot run on this computer — see log below.")
                 else:  # done
                     self.success = bool(payload)
                     self._bar.stop()
@@ -3115,13 +3191,32 @@ class ProvisionWindow:
 
 
 def run_provisioning(use_gui):
-    """Provision the runtime. GUI shows a progress window; headless logs to stdout."""
+    """Provision the runtime. GUI shows a progress window; headless logs to stdout.
+
+    Raises UnsupportedPlatformError when this machine can never be provisioned."""
     if use_gui:
         try:
             return ProvisionWindow().mainloop()
+        except UnsupportedPlatformError:
+            raise
         except Exception as e:
             logging.warning(f"[SETUP] GUI unavailable ({e}); running headless setup")
     return _run_provisioning_headless()
+
+
+def _park_unsupported(reason):
+    """Idle forever after a permanent setup failure.
+
+    Exiting would be worse than looping: the launchd plist and the systemd unit
+    both restart the watchdog unconditionally, which turns a 10-minute retry
+    loop into a ~10-second respawn loop. Staying alive and idle keeps one Sentry
+    report, a quiet log, and no CPU."""
+    logging.error(f"[SETUP] {reason}")
+    logging.error("[SETUP] Setup cannot continue; idling. Uninstall STT or move "
+                  "it to a supported computer.")
+    while True:
+        time.sleep(3600)
+        logging.error(f"[SETUP] Still unable to run on this computer: {reason}")
 
 
 def main():
@@ -3264,7 +3359,12 @@ def main():
     # First-run (or repair): provision the local runtime before starting the app.
     if args.reprovision or not is_provisioned():
         logging.info("[WATCHDOG] Runtime not provisioned; running first-time setup...")
-        if not run_provisioning(use_gui):
+        try:
+            provisioned = run_provisioning(use_gui)
+        except UnsupportedPlatformError as e:
+            _park_unsupported(str(e))
+            return
+        if not provisioned:
             logging.error("[WATCHDOG] Setup did not complete; exiting.")
             sys.exit(1)
 

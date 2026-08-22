@@ -412,6 +412,20 @@ class TestHeadlessProvisioningRetry:
         assert max(sleeps) == 600
         assert sleeps == [30, 60, 120, 240, 480, 600, 600, 600]
 
+    def test_an_unsupported_platform_is_not_retried(self, monkeypatch):
+        """The failure that produced this test retried a resolution that could
+        never succeed — an Intel Mac cannot install the pinned torch — every ten
+        minutes forever. Permanent means give up, report once, don't sleep."""
+        sleeps, captured = [], []
+        self._patch(monkeypatch,
+                    [watchdog.UnsupportedPlatformError("no Intel-Mac torch")],
+                    sleeps)
+        monkeypatch.setattr(watchdog, "_sentry_capture", captured.append)
+        with pytest.raises(watchdog.UnsupportedPlatformError):
+            watchdog._run_provisioning_headless()
+        assert sleeps == []
+        assert len(captured) == 1
+
 
 class TestProgressNoiseFilter:
     """winget writes \\r-redrawn spinner/progress frames that universal
