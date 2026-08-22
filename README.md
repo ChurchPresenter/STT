@@ -160,7 +160,7 @@ Run once at startup via Task Scheduler:
 ### Transcription only (minimum)
 - **CPU:** 6 cores | **RAM:** 12 GB | **Storage:** 15 GB
 - **Python:** 3.9 - 3.13
-- **OS:** Linux, Windows, or macOS (Intel & Apple Silicon)
+- **OS:** Linux, Windows, or macOS (Apple Silicon only — PyTorch no longer publishes Intel-Mac builds, so setup refuses an Intel Mac)
 
 ### Transcription + Translation (minimum)
 - **CPU:** 8 cores | **RAM:** 16 GB | **Storage:** 25 GB
