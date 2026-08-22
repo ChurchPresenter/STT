@@ -19,6 +19,7 @@ from stt.sermon_summary import (
     Row,
     build_map_prompt,
     build_reduce_prompt,
+    build_translate_prompt,
     chapter_range,
     chunk_rows,
     delete_summary,
@@ -33,6 +34,7 @@ from stt.sermon_summary import (
     parse_chapters,
     parse_offset,
     parse_sections,
+    parse_translation,
     progress_text,
     read_sermon_rows,
     ready_sermons,
@@ -343,8 +345,9 @@ class TestPersistence:
                      generated_at="2026-08-20 11:00:00")
         loaded = load_summary(conn, "fp1")
         assert loaded["summary"] == "A summary."
-        assert loaded["chapters"] == [{"ts_ms": BASE, "title": "Opening"},
-                                      {"ts_ms": BASE + MIN, "title": "The turn"}]
+        assert loaded["chapters"] == [
+            {"ts_ms": BASE, "title": "Opening", "title_translated": ""},
+            {"ts_ms": BASE + MIN, "title": "The turn", "title_translated": ""}]
         assert loaded["status"] == STATUS_DONE
 
     def test_same_fingerprint_updates_in_place(self, conn):
@@ -650,6 +653,10 @@ class TestProgress:
     def test_the_reduce_step_has_its_own_wording(self):
         assert progress_text(15, 15, reducing=True) == "writing the summary"
 
+    def test_the_translation_step_says_so_too(self):
+        # Six minutes of summarising followed by silent translating reads as a stall.
+        assert progress_text(15, 15, translating=True) == "translating the summary"
+
     def test_an_unknown_total_still_says_something(self):
         assert progress_text(0, 0) == "starting"
 
@@ -832,4 +839,112 @@ class TestSermonRanges:
                                   "start_ms": BASE, "end_ms": BASE + 30 * MIN}])[0]
         for key in ("label", "start_ms", "end_ms", "minutes", "ongoing", "kind"):
             assert key in got
+
+
+class TestTranslationPrompt:
+    def test_it_names_the_language_and_the_count(self):
+        system, user = build_translate_prompt("A summary.", ["One", "Two", "Three"], "Spanish")
+        assert "Spanish" in system and "3" in system
+        assert "One" in user and "Three" in user
+
+    def test_titles_are_numbered_so_they_can_be_matched_back(self):
+        # By position, because a translated title against the wrong timestamp is worse than
+        # no translation at all.
+        _, user = build_translate_prompt("s", ["First", "Second"], "German")
+        assert "1. First" in user and "2. Second" in user
+
+    def test_it_asks_for_a_translation_not_another_summary(self):
+        system, _ = build_translate_prompt("s", ["One"], "French")
+        assert "Translate only" in system and "Do not summarise" in system
+
+
+class TestParseTranslation:
+    def test_it_reads_the_summary_and_the_titles(self):
+        raw = "### Summary\nUn resumen.\n\n### Chapters\n1. Primero\n2. Segundo"
+        summary, titles = parse_translation(raw, 2)
+        assert summary == "Un resumen." and titles == ["Primero", "Segundo"]
+
+    def test_it_keeps_the_order_the_numbers_give_not_the_order_they_arrive(self):
+        raw = "### Summary\nX\n\n### Chapters\n2. Segundo\n1. Primero"
+        _, titles = parse_translation(raw, 2)
+        assert titles == ["Primero", "Segundo"]
+
+    @pytest.mark.parametrize("chapters", [
+        "1. Only one",                      # short
+        "1. One\n3. Three",                 # a gap
+        "Primero\nSegundo",                 # unnumbered
+        "",                                 # nothing
+    ])
+    def test_a_list_that_does_not_line_up_is_discarded_whole(self, chapters):
+        """All or nothing.
+
+        A short or gapped list would pair translations with the wrong timestamps, which is
+        the failure this feature exists to avoid. Better to publish one language than two
+        that disagree about when something was said.
+        """
+        raw = "### Summary\nUn resumen.\n\n### Chapters\n" + chapters
+        summary, titles = parse_translation(raw, 2)
+        assert titles == []
+        assert summary == "Un resumen."   # the summary is still usable on its own
+
+    def test_extra_titles_are_tolerated_if_the_expected_ones_are_all_there(self):
+        raw = "### Summary\nX\n\n### Chapters\n1. One\n2. Two\n3. Spare"
+        _, titles = parse_translation(raw, 2)
+        assert titles == ["One", "Two"]
+
+    def test_decoration_is_stripped(self):
+        raw = "### Summary\nX\n\n### Chapters\n1. **Primero**\n2) Segundo"
+        _, titles = parse_translation(raw, 2)
+        assert titles == ["Primero", "Segundo"]
+
+
+class TestTranslationStorage:
+    @pytest.fixture()
+    def conn(self, tmp_path):
+        c = sqlite3.connect(tmp_path / "session.db")
+        ensure_tables(c)
+        yield c
+        c.close()
+
+    def test_a_translation_rides_with_its_chapter(self, conn):
+        save_summary(conn, fingerprint="fp1", label="Sermon 1", start_ms=BASE,
+                     end_ms=BASE + 30 * MIN, status=STATUS_DONE, summary="Original.",
+                     chapters=[Chapter(BASE, "Opening"), Chapter(BASE + MIN, "The turn")],
+                     summary_translated="Traducido.",
+                     titles_translated=["Apertura", "El giro"])
+        got = load_summary(conn, "fp1")
+        assert got["summary_translated"] == "Traducido."
+        assert got["chapters"][0] == {"ts_ms": BASE, "title": "Opening",
+                                      "title_translated": "Apertura"}
+        assert got["chapters"][1]["title_translated"] == "El giro"
+
+    def test_without_a_translation_the_field_is_simply_empty(self, conn):
+        save_summary(conn, fingerprint="fp1", label="Sermon 1", start_ms=BASE,
+                     end_ms=BASE + 30 * MIN, status=STATUS_DONE, summary="Original.",
+                     chapters=[Chapter(BASE, "Opening")])
+        got = load_summary(conn, "fp1")
+        assert got["summary_translated"] == ""
+        assert got["chapters"][0]["title_translated"] == ""
+
+    def test_a_session_summarised_before_the_column_existed_still_reads(self, tmp_path):
+        c = sqlite3.connect(tmp_path / "older.db")
+        c.execute("CREATE TABLE sermon_summaries ("
+                  "id INTEGER PRIMARY KEY AUTOINCREMENT, label TEXT, start_ms INTEGER, "
+                  "end_ms INTEGER, fingerprint TEXT UNIQUE, transcript TEXT, summary TEXT, "
+                  "chapters_json TEXT, model TEXT, status TEXT, error TEXT, generated_at TEXT)")
+        c.execute("INSERT INTO sermon_summaries (fingerprint, label, status) "
+                  "VALUES ('old', 'Sermon 1', 'done')")
+        c.commit()
+        ensure_tables(c)
+        assert load_summary(c, "old")["summary_translated"] == ""
+        c.close()
+
+    def test_markdown_carries_both_under_one_timestamp(self):
+        out = render_markdown({
+            "label": "Sermon 1", "start_ms": BASE, "summary": "Original.",
+            "summary_translated": "Traducido.",
+            "chapters": [{"ts_ms": BASE, "title": "Opening", "title_translated": "Apertura"}],
+        })
+        assert "Original." in out and "Traducido." in out
+        assert "- 0:00 Opening" in out and "0:00 Apertura" in out
 

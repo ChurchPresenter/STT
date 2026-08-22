@@ -280,6 +280,66 @@ def build_reduce_prompt(gists: Sequence[Tuple[str, str]], *,
     return _reduce_system(floor, ceiling), body
 
 
+_TRANSLATE_SYSTEM = (
+    "You are translating a summary of a church sermon into {language}.\n"
+    "Reply with exactly these two sections and nothing else:\n"
+    "\n"
+    "### Summary\n"
+    "The summary, translated into {language}.\n"
+    "\n"
+    "### Chapters\n"
+    "The chapter titles, translated into {language}, one per line, numbered `1.` to `{n}` "
+    "and in the same order. Give exactly {n} lines — one for each title, translated, and "
+    "nothing else on the line.\n"
+    "\n"
+    "Translate only. Do not summarise further, add, explain or reorder."
+)
+
+
+def build_translate_prompt(summary: str, titles: Sequence[str],
+                           language: str) -> Tuple[str, str]:
+    """``(system, user)`` for translating a finished summary and its chapter titles.
+
+    A separate pass rather than asking the reduce step for both languages at once. The
+    timestamps are already settled and snapped to real rows by then, so translating cannot
+    disturb them — whereas a model asked for two chapter lists in one reply will sooner or
+    later return two that differ, and there is no honest way to decide which times belong to
+    which titles.
+
+    The titles are numbered so the reply can be matched back by position: a translated title
+    against the wrong timestamp is worse than no translation at all.
+    """
+    numbered = "\n".join(f"{i + 1}. {t}" for i, t in enumerate(titles))
+    system = _TRANSLATE_SYSTEM.format(language=language, n=len(titles))
+    return system, f"### Summary\n{summary}\n\n### Chapters\n{numbered}"
+
+
+_NUMBERED = re.compile(r"^\s*(?:[-*•]\s*)?(\d{1,3})[.)]\s*(.+?)\s*$")
+
+
+def parse_translation(raw: str, expected: int) -> Tuple[str, List[str]]:
+    """``(summary, titles)`` from a translation reply, or ``("", [])`` if it does not fit.
+
+    All or nothing on the titles. A short or reordered list would pair translations with the
+    wrong timestamps, and a chapter marker that points at the wrong moment is the failure
+    this whole feature is built to avoid — so a reply that does not yield exactly ``expected``
+    numbered lines is discarded rather than salvaged.
+    """
+    sections = parse_sections(raw)
+    summary = (sections.get("summary") or "").strip()
+    found: Dict[int, str] = {}
+    for line in (sections.get("chapters") or "").splitlines():
+        m = _NUMBERED.match(line)
+        if not m:
+            continue
+        title = m.group(2).strip().strip("*_").strip()
+        if title:
+            found[int(m.group(1))] = title
+    titles = [found[i + 1] for i in range(expected)] if len(found) >= expected and all(
+        (i + 1) in found for i in range(expected)) else []
+    return summary, titles
+
+
 # --- Parsing ----------------------------------------------------------------------
 
 _HEADING_RE = re.compile(r"^\s{0,3}#{1,6}\s*(.+?)\s*#*\s*$")
@@ -530,7 +590,7 @@ def unfinished(blocks: Sequence[dict], stored: Sequence[dict], *,
 
 
 def progress_text(done: int, total: int, *, waiting: bool = False,
-                  reducing: bool = False) -> str:
+                  reducing: bool = False, translating: bool = False) -> str:
     """What a run in flight should say about itself.
 
     A sermon takes minutes, and "summarising" alone for all of them is indistinguishable
@@ -538,6 +598,8 @@ def progress_text(done: int, total: int, *, waiting: bool = False,
     defers to its captions, so a part can sit for minutes having asked and been told to come
     back — which is correct behaviour and looks identical to a hang unless it says so.
     """
+    if translating:
+        return "translating the summary"
     if reducing:
         return "writing the summary"
     if total <= 0:
@@ -563,7 +625,8 @@ _DDL = (
 # Columns added after the table first shipped. CREATE TABLE IF NOT EXISTS is a no-op on an
 # existing table, so a session summarised under an earlier build keeps the older shape and
 # the write would fail on the missing column.
-_ADDED_COLUMNS = (("sermon_summaries", "progress", "TEXT"),)
+_ADDED_COLUMNS = (("sermon_summaries", "progress", "TEXT"),
+                  ("sermon_summaries", "summary_translated", "TEXT"))
 
 STATUS_PENDING = "pending"
 STATUS_RUNNING = "running"
@@ -605,7 +668,9 @@ def save_summary(conn: "sqlite3.Connection", *, fingerprint: str, label: str,
                  start_ms: int, end_ms: int, status: str,
                  transcript: str = "", summary: str = "",
                  chapters: Sequence[Chapter] = (), model: str = "",
-                 error: str = "", generated_at: str = "") -> int:
+                 error: str = "", generated_at: str = "",
+                 summary_translated: str = "",
+                 titles_translated: Sequence[str] = ()) -> int:
     """Upsert one sermon's summary, keyed by fingerprint. Returns the row id.
 
     Keyed on the fingerprint rather than the block index so that a re-derived block whose
@@ -613,20 +678,24 @@ def save_summary(conn: "sqlite3.Connection", *, fingerprint: str, label: str,
     its pending -> running -> done progression.
     """
     ensure_tables(conn)
-    chapters_json = json.dumps([{"ts_ms": c.ts_ms, "title": c.title} for c in chapters],
-                               ensure_ascii=False)
+    # The translation is stored on the chapter, not in a list beside it: a parallel array
+    # can fall out of step with the timestamps, and this pairing cannot.
+    chapters_json = json.dumps(
+        [{"ts_ms": c.ts_ms, "title": c.title,
+          "title_translated": titles_translated[i] if i < len(titles_translated) else ""}
+         for i, c in enumerate(chapters)], ensure_ascii=False)
     conn.execute(
         "INSERT INTO sermon_summaries (fingerprint, label, start_ms, end_ms, transcript, "
-        "summary, chapters_json, model, status, error, generated_at) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+        "summary, chapters_json, model, status, error, generated_at, summary_translated) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
         "ON CONFLICT(fingerprint) DO UPDATE SET label=excluded.label, "
         "start_ms=excluded.start_ms, end_ms=excluded.end_ms, "
         "transcript=excluded.transcript, summary=excluded.summary, "
         "chapters_json=excluded.chapters_json, model=excluded.model, "
         "status=excluded.status, error=excluded.error, generated_at=excluded.generated_at, "
-        "progress=''",
+        "summary_translated=excluded.summary_translated, progress=''",
         (fingerprint, label, int(start_ms), int(end_ms), transcript, summary,
-         chapters_json, model, status, error, generated_at))
+         chapters_json, model, status, error, generated_at, summary_translated))
     conn.commit()
     row = conn.execute("SELECT id FROM sermon_summaries WHERE fingerprint = ?",
                        (fingerprint,)).fetchone()
@@ -645,12 +714,13 @@ def _to_dict(r: Sequence) -> dict:
         "model": r[8] or "", "status": r[9] or "", "error": r[10] or "",
         "generated_at": r[11] or "",
         "progress": (r[12] if len(r) > 12 else "") or "",
+        "summary_translated": (r[13] if len(r) > 13 else "") or "",
     }
 
 
 _SELECT = ("SELECT id, fingerprint, label, start_ms, end_ms, transcript, summary, "
-           "chapters_json, model, status, error, generated_at, progress "
-           "FROM sermon_summaries")
+           "chapters_json, model, status, error, generated_at, progress, "
+           "summary_translated FROM sermon_summaries")
 
 
 def load_summaries(conn: "sqlite3.Connection") -> List[dict]:
@@ -741,10 +811,17 @@ def render_markdown(entry: dict) -> str:
     lines = [f"# {entry.get('label') or 'Sermon'}", ""]
     if entry.get("summary"):
         lines += [entry["summary"], ""]
+    if entry.get("summary_translated"):
+        lines += [entry["summary_translated"], ""]
     chapters = entry.get("chapters") or []
     if chapters:
         lines.append("## Chapters")
         for c in chapters:
-            lines.append(f"- {format_offset(int(c.get('ts_ms') or 0), base)} {c.get('title') or ''}")
+            at = format_offset(int(c.get("ts_ms") or 0), base)
+            lines.append(f"- {at} {c.get('title') or ''}")
+            # Indented under its own timestamp rather than as a second list: one chapter,
+            # named twice, is not two chapters.
+            if c.get("title_translated"):
+                lines.append(f"  - {at} {c['title_translated']}")
         lines.append("")
     return "\n".join(lines).strip() + "\n"

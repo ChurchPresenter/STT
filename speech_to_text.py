@@ -975,6 +975,7 @@ from stt.sermon_summary import (
     STATUS_RUNNING as _SERMON_RUNNING,
     build_map_prompt as _sermon_map_prompt,
     build_reduce_prompt as _sermon_reduce_prompt,
+    build_translate_prompt as _sermon_translate_prompt,
     chunk_rows as _sermon_chunk_rows,
     delete_summary as _sermon_delete,
     ensure_tables as _sermon_ensure_tables,
@@ -987,6 +988,7 @@ from stt.sermon_summary import (
     mark_error as _sermon_mark_error,
     parse_chapters as _sermon_parse_chapters,
     parse_sections as _sermon_parse_sections,
+    parse_translation as _sermon_parse_translation,
     progress_text as _sermon_progress_text,
     set_progress as _sermon_set_progress,
     read_sermon_rows as _sermon_read_rows,
@@ -17126,7 +17128,29 @@ def _sermon_summarize_one(db_path, fingerprint_value, is_live=True):
         chapters = _sermon_snap_chapters(
             _sermon_parse_chapters(sections.get("chapters", "")), rows,
             start_ms=start_ms, max_chapters=ceiling)
+        # The translated summary is what a media team publishes, so it is worth the one
+        # extra call — and worth making after the timestamps are settled rather than asking
+        # the reduce step for two chapter lists that could disagree about them.
+        summary_translated, titles_translated = "", []
+        lt_cfg = config.get("live_translation", {}) or {}
+        target = (lt_cfg.get("target_language") or "").strip()
+        if chapters and cfg.get("translate", True) and target:
+            note(_sermon_progress_text(len(chunks), len(chunks), translating=True))
+            # The catalogue the Translations page already names languages from, so the
+            # prompt says "Spanish" where the operator chose Spanish.
+            language = TRANSLATION_LANGUAGES.get(target, target)
+            t_sys, t_user = _sermon_translate_prompt(
+                summary.strip(), [c.title for c in chapters], language)
+            t_raw = _sermon_generate_waiting(t_sys, t_user, reduce_tokens, llm_cfg)
+            if t_raw:
+                summary_translated, titles_translated = _sermon_parse_translation(
+                    t_raw, len(chapters))
+                if not titles_translated:
+                    print(f"[SERMON] {entry['label']}: translation did not line up with the "
+                          f"chapters; keeping the original only", flush=True)
+
         store(_SERMON_DONE, summary=summary.strip(), chapters=chapters,
+              summary_translated=summary_translated, titles_translated=titles_translated,
               generated_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
         print(f"[SERMON] {entry['label']}: {len(chunks)} parts, {len(chapters)} chapters, "
               f"{time.perf_counter() - started:.0f}s", flush=True)

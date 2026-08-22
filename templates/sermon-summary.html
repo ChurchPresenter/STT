@@ -78,6 +78,12 @@
       @media (prefers-reduced-motion: reduce) {
         .ss-progress::before { animation: none; }
       }
+      /* Secondary to the original, not competing with it: the sermon was preached in one
+         language and this is the same thing said again. */
+      .ss-translated {
+        display: block; margin-top: 5px; color: var(--text-muted);
+        border-left: 2px solid var(--border); padding-left: 10px;
+      }
       .ss-chapters { list-style: none; padding: 0; margin: 0 0 14px; }
       .ss-chapters li {
         display: flex; gap: 14px; padding: 6px 0; border-top: 1px solid var(--border);
@@ -156,16 +162,24 @@
 
   function renderOne(entry) {
     const state = entry.status || '';
+    // The translation sits under its own title, sharing the one timestamp: a chapter named
+    // twice is not two chapters.
     const chapters = (entry.chapters || []).map(c =>
       '<li><span class="ss-at">' + esc(fmtOffset(c.ts_ms, entry.start_ms)) + '</span>'
-      + '<span>' + esc(c.title) + '</span></li>').join('');
+      + '<span>' + esc(c.title)
+      + (c.title_translated
+          ? '<span class="ss-translated">' + esc(c.title_translated) + '</span>' : '')
+      + '</span></li>').join('');
     // A run takes minutes, so "summarising" on its own is indistinguishable from stuck.
     const running = state === 'running' || state === 'pending';
     const body = state === 'error'
       ? '<div class="ss-summary">' + esc(entry.error || 'Failed.') + '</div>'
       : running
         ? '<div class="ss-progress">' + esc(entry.progress || 'starting') + '</div>'
-        : '<div class="ss-summary">' + esc(entry.summary || '') + '</div>';
+        : '<div class="ss-summary">' + esc(entry.summary || '')
+          + (entry.summary_translated
+              ? '<div class="ss-translated">' + esc(entry.summary_translated) + '</div>' : '')
+          + '</div>';
     return '<div class="ss-card">'
       + '<div class="ss-head">'
       +   '<span class="ss-label">' + esc(entry.label || 'Sermon') + '</span>'
