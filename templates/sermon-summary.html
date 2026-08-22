@@ -108,6 +108,8 @@
 {% endblock %}
 
 {% block content %}
+<div id="alert_message" class="alert" role="status" aria-live="polite"></div>
+
 <div class="ss-note">
   Each sermon is summarised in its own language a few minutes after it ends, using the same
   local model as translation — nothing is sent off this machine. Chapter times are snapped to
@@ -138,6 +140,58 @@
 
 {% block scripts %}
 <script>
+  // Copying has to work on this box, and this box is served over plain http on a LAN
+  // address — not a secure context, so navigator.clipboard is simply absent there. The
+  // textarea path is the one that will actually run in the room; the modern API is the
+  // fallback, not the other way round.
+  function copyText(text, what) {
+    const done = () => showAlert((what || 'Summary') + ' copied.', 'success');
+    try {
+      const ta = document.createElement('textarea');
+      ta.value = text;
+      ta.setAttribute('readonly', '');
+      ta.style.cssText = 'position:fixed; top:-1000px; opacity:0;';
+      document.body.appendChild(ta);
+      ta.select();
+      ta.setSelectionRange(0, text.length);   // iOS ignores select() on its own
+      const ok = document.execCommand('copy');
+      document.body.removeChild(ta);
+      if (ok) { done(); return; }
+    } catch (e) { /* fall through to the modern API */ }
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).then(done).catch(
+        () => showAlert('Could not copy — select the text and copy it by hand.', 'error'));
+      return;
+    }
+    showAlert('Could not copy — select the text and copy it by hand.', 'error');
+  }
+
+  // Plain text rather than markdown: it is pasted into a description box or a message, and
+  // a stray # or - there is noise. The translation sits under its own timestamp, so one
+  // chapter stays one chapter wherever it lands.
+  function summaryAsText(entry, offsetOf) {
+    const out = [entry.label || 'Sermon', ''];
+    if (entry.summary) out.push(entry.summary, '');
+    if (entry.summary_translated) out.push(entry.summary_translated, '');
+    (entry.chapters || []).forEach(c => {
+      const at = offsetOf(c.ts_ms, entry.start_ms);
+      out.push(at + '  ' + (c.title || ''));
+      if (c.title_translated) out.push(at + '  ' + c.title_translated);
+    });
+    return out.join('\n').trim() + '\n';
+  }
+
+  // The same in-flow banner every other page uses, against the same .alert classes. The
+  // base fallback floats one instead, and those background tokens are semi-transparent —
+  // fine sitting on the page, wrong laid over content.
+  function showAlert(message, type) {
+    const el = document.getElementById('alert_message');
+    el.textContent = message;
+    el.className = 'alert ' + (type || 'info') + ' show';
+    clearTimeout(showAlert._timer);
+    showAlert._timer = setTimeout(() => el.classList.remove('show'), 5000);
+  }
+
   const SS_STATE = { pending: 'queued', running: 'summarising', done: 'done', error: 'failed' };
 
   let ssLive = false;
@@ -187,7 +241,11 @@
       +   '<span class="ss-meta">' + minutesOf(entry) + ' min'
       +     (entry.model ? ' · ' + esc(entry.model) : '')
       +     (entry.generated_at ? ' · ' + esc(entry.generated_at) : '') + '</span>'
-      +   '<button type="button" style="margin-left: auto;" onclick="regenerate(\'' + esc(entry.fingerprint) + '\')">Regenerate</button>'
+      +   '<span style="margin-left: auto; display: inline-flex; gap: 8px;">'
+      +     (state === 'done'
+              ? '<button type="button" onclick="copySummary(\'' + esc(entry.fingerprint) + '\')">Copy</button>' : '')
+      +     '<button type="button" onclick="regenerate(\'' + esc(entry.fingerprint) + '\')">Regenerate</button>'
+      +   '</span>' 
       + '</div>'
       + body
       + (chapters ? '<ul class="ss-chapters">' + chapters + '</ul>' : '')
@@ -199,7 +257,11 @@
       + '</div>';
   }
 
+  // Kept so a Copy click can find the entry it belongs to without re-fetching.
+  let ssData = [];
+
   function render(summaries) {
+    ssData = summaries || [];
     const list = document.getElementById('ss-list');
     if (!summaries.length) {
       list.innerHTML = '<div class="ss-empty">No sermon has been summarised for this service.</div>';
@@ -350,6 +412,12 @@
     } catch (e) {
       showAlert('Could not queue: ' + e, 'error');
     }
+  }
+
+  function copySummary(fingerprint) {
+    const entry = (ssData || []).find(x => x.fingerprint === fingerprint);
+    if (!entry) { showAlert('Nothing to copy.', 'error'); return; }
+    copyText(summaryAsText(entry, fmtOffset), entry.label);
   }
 
   async function regenerate(fingerprint) {

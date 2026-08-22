@@ -63,6 +63,11 @@
       }
       .sp-sermon-state { font-size: 0.78em; color: var(--text-secondary); font-weight: 400; }
       .sp-sermon-body { color: var(--text-secondary); line-height: 1.6; margin-bottom: 10px; }
+      /* Secondary to the original, matching /sermon-summary. */
+      .sp-translated {
+        display: block; margin-top: 5px; color: var(--text-muted);
+        border-left: 2px solid var(--border); padding-left: 10px;
+      }
       .sp-chapters { list-style: none; padding: 0; margin: 0; }
       .sp-chapters li {
         display: flex; gap: 12px; padding: 4px 0;
@@ -158,6 +163,8 @@
 {% endblock %}
 
 {% block content %}
+<div id="alert_message" class="alert" role="status" aria-live="polite"></div>
+
 <div class="sp-note">
   Detection is a proof of concept. Structure (songs / speaking / quiet) comes from the PANNs
   audio labels already stored on every row and is the reliable part; the <em>name</em> beside
@@ -222,6 +229,8 @@
   <h3>
     <span id="sp-sermon-label">Sermon</span>
     <span class="sp-sermon-state" id="sp-sermon-state"></span>
+    <button type="button" id="sp-sermon-copy" onclick="copySermon()"
+            style="margin-left: auto; display: none;">Copy</button>
   </h3>
   <div class="sp-sermon-body" id="sp-sermon-body"></div>
   <ul class="sp-chapters" id="sp-sermon-chapters"></ul>
@@ -236,6 +245,58 @@
 
 {% block scripts %}
 <script>
+  // Copying has to work on this box, and this box is served over plain http on a LAN
+  // address — not a secure context, so navigator.clipboard is simply absent there. The
+  // textarea path is the one that will actually run in the room; the modern API is the
+  // fallback, not the other way round.
+  function copyText(text, what) {
+    const done = () => showAlert((what || 'Summary') + ' copied.', 'success');
+    try {
+      const ta = document.createElement('textarea');
+      ta.value = text;
+      ta.setAttribute('readonly', '');
+      ta.style.cssText = 'position:fixed; top:-1000px; opacity:0;';
+      document.body.appendChild(ta);
+      ta.select();
+      ta.setSelectionRange(0, text.length);   // iOS ignores select() on its own
+      const ok = document.execCommand('copy');
+      document.body.removeChild(ta);
+      if (ok) { done(); return; }
+    } catch (e) { /* fall through to the modern API */ }
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).then(done).catch(
+        () => showAlert('Could not copy — select the text and copy it by hand.', 'error'));
+      return;
+    }
+    showAlert('Could not copy — select the text and copy it by hand.', 'error');
+  }
+
+  // Plain text rather than markdown: it is pasted into a description box or a message, and
+  // a stray # or - there is noise. The translation sits under its own timestamp, so one
+  // chapter stays one chapter wherever it lands.
+  function summaryAsText(entry, offsetOf) {
+    const out = [entry.label || 'Sermon', ''];
+    if (entry.summary) out.push(entry.summary, '');
+    if (entry.summary_translated) out.push(entry.summary_translated, '');
+    (entry.chapters || []).forEach(c => {
+      const at = offsetOf(c.ts_ms, entry.start_ms);
+      out.push(at + '  ' + (c.title || ''));
+      if (c.title_translated) out.push(at + '  ' + c.title_translated);
+    });
+    return out.join('\n').trim() + '\n';
+  }
+
+  // The same in-flow banner every other page uses, against the same .alert classes. The
+  // base fallback floats one instead, and those background tokens are semi-transparent —
+  // fine sitting on the page, wrong laid over content.
+  function showAlert(message, type) {
+    const el = document.getElementById('alert_message');
+    el.textContent = message;
+    el.className = 'alert ' + (type || 'info') + ' show';
+    clearTimeout(showAlert._timer);
+    showAlert._timer = setTimeout(() => el.classList.remove('show'), 5000);
+  }
+
   // The detector's own vocabulary. Kept in sync with stt/service_phase.py by hand: the
   // page only ever offers labels the detector can also produce, so a correction stays
   // comparable with what it is correcting.
@@ -983,8 +1044,22 @@
   // to that sermon's own start, which is what someone scrubbing a recording of it needs.
   const SERMON_STATE = { pending: 'queued', running: 'summarising…', error: 'failed' };
 
+  // The summary currently on the panel, so Copy has something to reach for.
+  let spSermon = null;
+
+  function copySermon() {
+    if (!spSermon) { showAlert('Nothing to copy.', 'error'); return; }
+    copyText(summaryAsText(spSermon, (ms, base) => {
+      const t = Math.max(0, Math.round((ms - base) / 1000));
+      const h = Math.floor(t / 3600), m = Math.floor((t % 3600) / 60), sec = t % 60;
+      return (h ? h + ':' : '') + (h ? String(m).padStart(2, '0') : m) + ':'
+        + String(sec).padStart(2, '0');
+    }), spSermon.label);
+  }
+
   function renderSermon(entry) {
     const box = document.getElementById('sp-sermon');
+    spSermon = entry || null;
     if (!entry) { box.style.display = 'none'; return; }
     box.style.display = '';
     document.getElementById('sp-sermon-label').textContent = entry.label || 'Sermon';
@@ -992,12 +1067,21 @@
     document.getElementById('sp-sermon-state').textContent =
       entry.status === 'done' ? '' : (SERMON_STATE[entry.status] || entry.status || '');
     // While it runs, the part count is the only thing that distinguishes working from stuck.
-    document.getElementById('sp-sermon-body').innerHTML = esc(
-      running ? (entry.progress || 'starting') : (entry.summary || entry.error || ''));
+    document.getElementById('sp-sermon-body').innerHTML = running
+      ? esc(entry.progress || 'starting')
+      : esc(entry.summary || entry.error || '')
+        + (entry.summary_translated
+            ? '<div class="sp-translated">' + esc(entry.summary_translated) + '</div>' : '');
+    // Only once there is something worth copying.
+    document.getElementById('sp-sermon-copy').style.display =
+      entry.status === 'done' ? '' : 'none';
     const list = document.getElementById('sp-sermon-chapters');
     list.innerHTML = (entry.chapters || []).map(c =>
       '<li><span class="sp-chapter-at">' + esc(fmtClock(c.ts_ms, entry.start_ms)) + '</span>'
-      + '<span>' + esc(c.title) + '</span></li>').join('');
+      + '<span>' + esc(c.title)
+      + (c.title_translated
+          ? '<span class="sp-translated">' + esc(c.title_translated) + '</span>' : '')
+      + '</span></li>').join('');
   }
 
   async function loadSermon() {
