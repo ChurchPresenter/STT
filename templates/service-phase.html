@@ -51,34 +51,6 @@
         border: 1px solid var(--warning);
       }
 
-      /* Sermon summary panel. Read-only here — the full view, the archive and the
-         regenerate button live on /sermon-summary. */
-      .sp-sermon {
-        padding: 16px 18px; background: var(--bg-card); border: 1px solid var(--border);
-        border-radius: var(--radius-md); margin-bottom: 14px;
-      }
-      .sp-sermon h3 {
-        margin: 0 0 8px; font-size: 1em; color: var(--text-primary);
-        display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap;
-      }
-      .sp-sermon-state { font-size: 0.78em; color: var(--text-secondary); font-weight: 400; }
-      .sp-sermon-body { color: var(--text-secondary); line-height: 1.6; margin-bottom: 10px; }
-      /* Secondary to the original, matching /sermon-summary. */
-      .sp-translated {
-        display: block; margin-top: 5px; color: var(--text-muted);
-        border-left: 2px solid var(--border); padding-left: 10px;
-      }
-      .sp-chapters { list-style: none; padding: 0; margin: 0; }
-      .sp-chapters li {
-        display: flex; gap: 12px; padding: 4px 0;
-        border-top: 1px solid var(--border); color: var(--text-primary);
-      }
-      .sp-chapters li:first-child { border-top: none; }
-      .sp-chapter-at {
-        font-variant-numeric: tabular-nums; color: var(--text-muted);
-        min-width: 56px; flex-shrink: 0;
-      }
-
       /* Timeline beside the words it is describing. Collapses rather than squeezing: below
          this the block rows wrap and .sp-flag/.sp-was lose the indent they hang off. */
       .sp-split { display: grid; grid-template-columns: 1fr 360px; gap: 16px; align-items: start; }
@@ -202,23 +174,12 @@
       .sp-block.sp-group { border-color: var(--accent); background: var(--accent-subtle); }
       /* Same treatment as /sermon-summary: the two pages are one job and should not look
          like two products. */
-      .sp-note {
-        padding: 12px 14px; background: var(--info-bg); border: 1px solid var(--info);
-        border-radius: var(--radius-sm); color: var(--text-secondary);
-        font-size: 0.88em; line-height: 1.6; margin-bottom: 14px;
-      }
+      /* An empty timeline is a quiet statement of fact, not something to announce. */
+      .sp-empty { color: var(--text-muted); font-size: 0.88em; padding: 14px 4px; }
 {% endblock %}
 
 {% block content %}
 <div id="alert_message" class="alert" role="status" aria-live="polite"></div>
-
-<div class="sp-note">
-  Detection is a proof of concept. Structure (songs / speaking / quiet) comes from the PANNs
-  audio labels already stored on every row and is the reliable part; the <em>name</em> beside
-  it is a guess from position, duration and word cues. Correct anything that is wrong — the
-  corrections are stored separately from the detector's own output, so they survive it
-  re-running, and they are what the logic gets tuned against.
-</div>
 
 <div class="sp-toolbar">
   <label for="sp-session" style="color: var(--text-secondary); font-size: 0.88em;">Service</label>
@@ -272,17 +233,6 @@
 
 <div class="sp-notes" id="sp-notes" style="display: none;"></div>
 
-<div class="sp-sermon" id="sp-sermon" style="display: none;">
-  <h3>
-    <span id="sp-sermon-label">Sermon</span>
-    <span class="sp-sermon-state" id="sp-sermon-state"></span>
-    <button type="button" id="sp-sermon-copy" onclick="copySermon()"
-            style="margin-left: auto; display: none;">Copy</button>
-  </h3>
-  <div class="sp-sermon-body" id="sp-sermon-body"></div>
-  <ul class="sp-chapters" id="sp-sermon-chapters"></ul>
-</div>
-
 <div class="sp-strip" id="sp-strip"></div>
 
 <div class="sp-split">
@@ -303,47 +253,6 @@
 
 {% block scripts %}
 <script>
-  // Copying has to work on this box, and this box is served over plain http on a LAN
-  // address — not a secure context, so navigator.clipboard is simply absent there. The
-  // textarea path is the one that will actually run in the room; the modern API is the
-  // fallback, not the other way round.
-  function copyText(text, what) {
-    const done = () => showAlert((what || 'Summary') + ' copied.', 'success');
-    try {
-      const ta = document.createElement('textarea');
-      ta.value = text;
-      ta.setAttribute('readonly', '');
-      ta.style.cssText = 'position:fixed; top:-1000px; opacity:0;';
-      document.body.appendChild(ta);
-      ta.select();
-      ta.setSelectionRange(0, text.length);   // iOS ignores select() on its own
-      const ok = document.execCommand('copy');
-      document.body.removeChild(ta);
-      if (ok) { done(); return; }
-    } catch (e) { /* fall through to the modern API */ }
-    if (navigator.clipboard && navigator.clipboard.writeText) {
-      navigator.clipboard.writeText(text).then(done).catch(
-        () => showAlert('Could not copy — select the text and copy it by hand.', 'error'));
-      return;
-    }
-    showAlert('Could not copy — select the text and copy it by hand.', 'error');
-  }
-
-  // Plain text rather than markdown: it is pasted into a description box or a message, and
-  // a stray # or - there is noise. The translation sits under its own timestamp, so one
-  // chapter stays one chapter wherever it lands.
-  function summaryAsText(entry, offsetOf) {
-    const out = [entry.label || 'Sermon', ''];
-    if (entry.summary) out.push(entry.summary, '');
-    if (entry.summary_translated) out.push(entry.summary_translated, '');
-    (entry.chapters || []).forEach(c => {
-      const at = offsetOf(c.ts_ms, entry.start_ms);
-      out.push(at + '  ' + (c.title || ''));
-      if (c.title_translated) out.push(at + '  ' + c.title_translated);
-    });
-    return out.join('\n').trim() + '\n';
-  }
-
   // The same in-flow banner every other page uses, against the same .alert classes. The
   // base fallback floats one instead, and those background tokens are semi-transparent —
   // fine sitting on the page, wrong laid over content.
@@ -532,7 +441,7 @@
     const host = document.getElementById('sp-blocks');
     host.innerHTML = '';
     if (!spData.blocks.length) {
-      host.innerHTML = '<div class="sp-note">Nothing detected yet.</div>';
+      host.innerHTML = '<div class="sp-empty">Nothing detected yet.</div>';
       return;
     }
     const anchor = serviceStartMs();
@@ -1132,7 +1041,6 @@
     picked.clear();
     markSaved();  // the pill belongs to the service that was on screen, not the new one
     loadPhases();
-    loadSermon();
   }
 
   // The way back. It refreshes the list first: a service that started after this page
@@ -1200,74 +1108,13 @@
         ? 'Queued ' + data.queued + (data.queued === 1 ? ' sermon.' : ' sermons.')
         : (data.reason || 'Nothing to summarise in this service.'),
         data.queued ? 'success' : 'info');
-      loadSermon();
     } catch (e) {
       showAlert('Could not queue: ' + e, 'error');
     }
   }
 
-  // The most recent sermon summary, if there is one. Chapter times are rendered relative
-  // to that sermon's own start, which is what someone scrubbing a recording of it needs.
-  const SERMON_STATE = { pending: 'queued', running: 'summarising…', error: 'failed' };
-
-  // The summary currently on the panel, so Copy has something to reach for.
-  let spSermon = null;
-
-  function copySermon() {
-    if (!spSermon) { showAlert('Nothing to copy.', 'error'); return; }
-    copyText(summaryAsText(spSermon, (ms, base) => {
-      const t = Math.max(0, Math.round((ms - base) / 1000));
-      const h = Math.floor(t / 3600), m = Math.floor((t % 3600) / 60), sec = t % 60;
-      return (h ? h + ':' : '') + (h ? String(m).padStart(2, '0') : m) + ':'
-        + String(sec).padStart(2, '0');
-    }), spSermon.label);
-  }
-
-  function renderSermon(entry) {
-    const box = document.getElementById('sp-sermon');
-    spSermon = entry || null;
-    if (!entry) { box.style.display = 'none'; return; }
-    box.style.display = '';
-    document.getElementById('sp-sermon-label').textContent = entry.label || 'Sermon';
-    const running = entry.status === 'running' || entry.status === 'pending';
-    document.getElementById('sp-sermon-state').textContent =
-      entry.status === 'done' ? '' : (SERMON_STATE[entry.status] || entry.status || '');
-    // While it runs, the part count is the only thing that distinguishes working from stuck.
-    document.getElementById('sp-sermon-body').innerHTML = running
-      ? esc(entry.progress || 'starting')
-      : esc(entry.summary || entry.error || '')
-        + (entry.summary_translated
-            ? '<div class="sp-translated">' + esc(entry.summary_translated) + '</div>' : '');
-    // Only once there is something worth copying.
-    document.getElementById('sp-sermon-copy').style.display =
-      entry.status === 'done' ? '' : 'none';
-    const list = document.getElementById('sp-sermon-chapters');
-    list.innerHTML = (entry.chapters || []).map(c =>
-      '<li><span class="sp-chapter-at">' + esc(fmtClock(c.ts_ms, entry.start_ms)) + '</span>'
-      + '<span>' + esc(c.title)
-      + (c.title_translated
-          ? '<span class="sp-translated">' + esc(c.title_translated) + '</span>' : '')
-      + '</span></li>').join('');
-  }
-
-  async function loadSermon() {
-    try {
-      const resp = await pollFetch('/api/sermon-summary' + spQuery());
-      const data = await resp.json();
-      if (!data.success) return;
-      renderSermon((data.summaries || []).slice(-1)[0]);
-    } catch (e) {
-      if (e && e.pollingPaused) return;
-      // A missing summary is not an error worth a banner on the phase page.
-    }
-  }
-
   // Live updates straight from the detector tick.
   const socket = io();
-  socket.on('sermon_summary_update', function (data) {
-    if (spSession && data.session_id !== spSession) return;
-    renderSermon(data);
-  });
   socket.on('service_phase_update', function (data) {
     if (spSession) return;  // watching a finished service; the live tick is not about it
     spData.current = data.current;
@@ -1280,7 +1127,6 @@
   document.addEventListener('DOMContentLoaded', async function () {
     await loadSessions();
     loadPhases();
-    loadSermon();
     // Only the live service changes under us; polling a finished one would keep
     // overwriting whatever the operator is part-way through reading.
     setInterval(function () {
