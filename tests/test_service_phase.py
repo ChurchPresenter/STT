@@ -889,3 +889,66 @@ class TestAudioTagFallback:
         b = bin_rows(rows)[0]
         assert b.quiet == 3
 
+
+class TestGroupCorrectionsSupersede:
+    """Adjusting a boundary restates one phase; it does not add opinions about it.
+
+    Moving an edge a minute at a time is the ordinary way to arrive at a range, and every
+    step used to be kept. One real service ended up holding six spans for one sermon — 1, 5,
+    11, 13, 16 and 17 minutes — and phase_learn.read_corrected_phases mines this table as
+    ground truth, so the learner was measuring that sermon against five durations the
+    operator had already rejected.
+    """
+
+    @pytest.fixture()
+    def conn(self, tmp_path):
+        c = sqlite3.connect(tmp_path / "session.db")
+        ensure_tables(c)
+        yield c
+        c.close()
+
+    def rows(self, conn):
+        return [(c["label"], c["start_ms"], c["end_ms"]) for c in load_corrections(conn)]
+
+    def test_adjusting_the_same_phase_leaves_one_row(self, conn):
+        for end in (10 * MIN, 12 * MIN, 17 * MIN):
+            save_group_correction(conn, 0, end, kind="S", label="Sermon 1")
+        assert self.rows(conn) == [("Sermon 1", 0, 17 * MIN)]
+
+    def test_the_row_that_survives_is_the_latest(self, conn):
+        save_group_correction(conn, 0, 20 * MIN, kind="S", label="Sermon 1")
+        save_group_correction(conn, 2 * MIN, 15 * MIN, kind="S", label="Sermon 1")
+        assert self.rows(conn) == [("Sermon 1", 2 * MIN, 15 * MIN)]
+
+    def test_a_second_sermon_elsewhere_is_untouched(self, conn):
+        # Two sermons in one service are two phases and may share a name once numbering is
+        # stripped; only overlap means "the same one, restated".
+        save_group_correction(conn, 0, 20 * MIN, kind="S", label="Sermon 1")
+        save_group_correction(conn, 60 * MIN, 90 * MIN, kind="S", label="Sermon 1")
+        assert len(self.rows(conn)) == 2
+
+    def test_renaming_the_same_span_still_replaces_it(self, conn):
+        # The older contract, and the right one: the same range under a new name is that
+        # claim corrected, not a second claim about the same stretch.
+        save_group_correction(conn, 0, 20 * MIN, kind="S", label="Sermon 1")
+        save_group_correction(conn, 0, 20 * MIN, kind="M", label="Songs 1")
+        assert self.rows(conn) == [("Songs 1", 0, 20 * MIN)]
+
+    def test_a_different_label_on_a_merely_overlapping_span_is_kept(self, conn):
+        # Overlap alone is not enough to call it the same phase; the name has to agree, or an
+        # operator naming an adjacent stretch would silently erase the one before it.
+        save_group_correction(conn, 0, 20 * MIN, kind="S", label="Sermon 1")
+        save_group_correction(conn, 15 * MIN, 30 * MIN, kind="M", label="Songs 1")
+        assert len(self.rows(conn)) == 2
+
+    def test_it_does_not_touch_per_block_corrections(self, conn):
+        save_correction(conn, 3, kind="S", label="Sermon 1")
+        save_group_correction(conn, 0, 20 * MIN, kind="S", label="Sermon 1")
+        assert len(load_corrections(conn)) == 2
+
+    def test_touching_at_an_edge_is_not_overlapping(self, conn):
+        # A phase that ends where the next begins is a neighbour, not the same phase.
+        save_group_correction(conn, 0, 10 * MIN, kind="S", label="Sermon 1")
+        save_group_correction(conn, 10 * MIN, 20 * MIN, kind="S", label="Sermon 1")
+        assert len(self.rows(conn)) == 2
+

@@ -637,6 +637,10 @@
       });
       const data = await resp.json();
       if (!data.success) { showAlert('Could not adjust: ' + data.error, 'error'); return; }
+      // Saying what it now is, not that something happened: the whole reason to move an edge
+      // is the range it lands on, and without this the click looked like it did nothing.
+      showAlert(label + ' now runs ' + fmtWall(start) + ' – ' + fmtWall(end)
+        + ' (' + Math.max(1, Math.round((end - start) / 60000)) + ' min).', 'success');
       spData.corrections = data.corrections || [];
       // The panel follows the edge that just moved, so the tint and the timeline never
       // disagree about where the phase is.

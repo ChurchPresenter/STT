@@ -743,18 +743,34 @@ def save_correction(conn: "sqlite3.Connection", block_index: Optional[int], *,
 def save_group_correction(conn: "sqlite3.Connection", start_ms: int, end_ms: int, *,
                           kind: Optional[str], label: Optional[str],
                           note: str = "", corrected_at: str = "") -> int:
-    """Record one phase spanning several detected blocks, replacing any group on that span.
+    """Record one phase spanning several detected blocks, replacing any it supersedes.
 
     The detector breaks a block wherever the audio kind changes, so a worship set with a
     word between the songs arrives as three blocks and one sermon interrupted by a cough
     arrives as two. This is how an operator says they were one thing. The row carries no
-    block_index — it deliberately does not belong to any single block — and the span is
-    what identifies it, so re-grouping the same range corrects it instead of stacking a
-    second claim on top.
+    block_index — it deliberately does not belong to any single block — and the span is what
+    identifies it.
+
+    Two kinds of restatement are superseded rather than stacked:
+
+    * the same span again, whatever it is now called, because that is a rename of one claim
+      and not a second claim about one stretch;
+    * an *overlapping* span under the same name, because moving a boundary a minute at a
+      time is the ordinary way to arrive at one. Keeping each step left one real service
+      holding six spans for a single sermon — 1, 5, 11, 13, 16 and 17 minutes — and
+      phase_learn.read_corrected_phases mines this table as ground truth, so the learner was
+      measuring that sermon against five durations the operator had already rejected.
+
+    Spans that neither share a range nor overlap under one name are left alone: two sermons
+    in one service are two phases, and touching at an edge makes them neighbours, not one.
     """
     ensure_tables(conn)
-    conn.execute("DELETE FROM service_phase_corrections WHERE block_index IS NULL "
-                 "AND start_ms = ? AND end_ms = ?", (start_ms, end_ms))
+    conn.execute(
+        "DELETE FROM service_phase_corrections WHERE block_index IS NULL AND ("
+        "  (start_ms = ? AND end_ms = ?)"
+        "  OR (label = ? AND start_ms IS NOT NULL AND end_ms IS NOT NULL"
+        "      AND start_ms < ? AND end_ms > ?))",
+        (start_ms, end_ms, label, int(end_ms), int(start_ms)))
     cur = conn.execute(
         "INSERT INTO service_phase_corrections (block_index, start_ms, end_ms, kind, label, "
         "note, corrected_at) VALUES (NULL, ?, ?, ?, ?, ?, ?)",
