@@ -22,6 +22,7 @@ from stt.service_phase import (
     bin_rows,
     classify_bin,
     compile_cues,
+    tag_class,
     delete_correction,
     delete_correction_by_id,
     ensure_tables,
@@ -814,3 +815,77 @@ class TestWriteChurn:
         save_analysis(conn, analyze(typo, cfg))
         assert save_analysis(conn, analyze(fixed, cfg))["bins"] == 6
         assert load_analysis(conn)["bins"][0]["cues"] == {"amen": 1}
+
+
+class TestAudioTagFallback:
+    """PANNs' own label, consulted where the derived one gives up.
+
+    speech_type is not the classifier's answer but a derivation of it: Music only above
+    music_prob_threshold, otherwise Quiet or Speaking on whether audio_db clears
+    quiet_db_threshold. Measured on one live service whose input sat at about -40 dB — the
+    threshold itself — 27 rows tagged "Speech" and 14 tagged "Music" were all recorded as
+    Quiet, and nine minutes of a service became a Quiet block. The tag was right throughout.
+    """
+
+    @pytest.mark.parametrize("tag", [
+        "Music", "music", "Singing", "Choir", "Musical instrument", "Electric guitar",
+        "Piano", "Organ", "Drum kit",
+    ])
+    def test_music_tags_read_as_music(self, tag):
+        assert tag_class(tag) == MUSIC
+
+    @pytest.mark.parametrize("tag", [
+        "Speech", "speech", "Narration, monologue", "Conversation", "Speech synthesizer",
+    ])
+    def test_speech_tags_read_as_speech(self, tag):
+        assert tag_class(tag) == SPEECH
+
+    @pytest.mark.parametrize("tag", [
+        "Silence", "Inside, small room", "Heart sounds, heartbeat", "Sniff", "Patter",
+        "Animal", "", None, "   ",
+    ])
+    def test_everything_else_says_nothing(self, tag):
+        # A tag that means neither must not be forced into one; the row stays Quiet.
+        assert tag_class(tag) is None
+
+    def row(self, ts, speech_type, prob, tag):
+        return (ts, speech_type, prob, "some words here", None, tag)
+
+    def test_singing_the_db_gate_silenced_is_counted_as_music(self):
+        # The live shape: tag Music, probability well under the threshold, label Quiet.
+        rows = [self.row(1_000_000 + i * 1000, "Quiet", 0.13, "Music") for i in range(5)]
+        b = bin_rows(rows)[0]
+        assert (b.music, b.speech, b.quiet) == (5, 0, 0)
+
+    def test_speech_the_db_gate_silenced_is_counted_as_speech(self):
+        rows = [self.row(1_000_000 + i * 1000, "Quiet", 0.05, "Speech") for i in range(5)]
+        b = bin_rows(rows)[0]
+        assert (b.music, b.speech, b.quiet) == (0, 5, 0)
+
+    def test_genuine_silence_is_still_quiet(self):
+        rows = [self.row(1_000_000 + i * 1000, "Quiet", 0.04, "Silence") for i in range(5)]
+        b = bin_rows(rows)[0]
+        assert (b.music, b.speech, b.quiet) == (0, 0, 5)
+
+    def test_a_confident_speech_type_is_never_overruled(self):
+        """Where the derived label is sure, it stays authoritative.
+
+        The dwell settings were measured against it, so the tag only fills the gap it
+        leaves — it does not get a vote on rows the pipeline already classified.
+        """
+        rows = [self.row(1_000_000, "Speaking", 0.02, "Music"),
+                self.row(1_001_000, "Music", 0.9, "Speech")]
+        b = bin_rows(rows)[0]
+        assert (b.music, b.speech) == (1, 1)
+
+    def test_it_can_be_switched_off(self):
+        rows = [self.row(1_000_000 + i * 1000, "Quiet", 0.13, "Music") for i in range(5)]
+        b = bin_rows(rows, use_audio_tag=False)[0]
+        assert (b.music, b.speech, b.quiet) == (0, 0, 5)
+
+    def test_rows_without_a_tag_column_still_work(self):
+        # Sessions recorded before the column, and the four-tuple fallback in read_rows.
+        rows = [(1_000_000 + i * 1000, "Quiet", 0.1, "text") for i in range(3)]
+        b = bin_rows(rows)[0]
+        assert b.quiet == 3
+

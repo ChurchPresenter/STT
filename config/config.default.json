@@ -582,6 +582,8 @@
     "_interval_seconds_comment": "How often the detector re-runs. It re-reads the whole session each tick (~180 bins for a 3-hour service), so this is cheap; lower values only shorten the lag on the display, not the detection lag.",
     "bin_seconds": 60,
     "_bin_seconds_comment": "Width of one analysis bucket in seconds. One minute matches the dwell settings below; changing it invalidates their tuning.",
+    "use_audio_tag": true,
+    "_use_audio_tag_comment": "Consult the PANNs top tag (audio_tag) for rows the pipeline labelled Quiet. speech_type is a derivation, not the classifier's answer: it calls a row Music only above music_prob_threshold and otherwise decides Quiet or Speaking purely on whether audio_db clears speech_type_detection.quiet_db_threshold. On a quiet feed that gate silences almost everything — measured on one service running at about -40 dB, the threshold itself, 27 rows tagged 'Speech' and 14 tagged 'Music' were all recorded as Quiet and nine minutes of the service became a Quiet block. Only rows already labelled Quiet are reconsidered, so where speech_type is confident it stays authoritative and the dwell settings keep the meaning they were tuned with. If the detector is misreading your services, check quiet_db_threshold against your actual input level before changing this.",
     "dominance": 0.35,
     "_dominance_comment": "Share (0.0-1.0) of a bucket's rows that must be Music or Speaking for the bucket to count as that. A share, not a majority: a minute of preaching still contains pauses tagged Quiet.",
     "enter_minutes": 2,

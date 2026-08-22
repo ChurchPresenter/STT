@@ -147,8 +147,38 @@ def compile_cues(phrases: Dict[str, Sequence[str]]) -> Dict[str, "re.Pattern[str
     return out
 
 
+# PANNs' own top label, consulted when the derived speech_type says Quiet.
+#
+# speech_type is not the classifier's answer — it is a derivation of it:
+# segments.panns_label_from_prob calls a row Music only above music_prob_threshold, and
+# otherwise Quiet or Speaking purely on whether audio_db clears quiet_db_threshold. On a
+# quiet feed that gate silences almost everything. Measured on one live service: 27 rows
+# tagged "Speech" and 14 tagged "Music" were all recorded as Quiet, because the input sat at
+# about -40 dB — the threshold itself — while the smoothed music probability averaged 0.22
+# through the singing.
+#
+# The tag is the signal that survived. Matched loosely because PANNs emits a vocabulary, not
+# a class: "Music", "Singing", "Choir", "Musical instrument" are all the congregation
+# singing, and "Speech", "Narration, monologue" are all the preacher.
+_MUSIC_TAGS = ("music", "sing", "choir", "instrument", "guitar", "piano", "organ", "drum")
+_SPEECH_TAGS = ("speech", "narration", "monologue", "conversation", "speaking")
+
+
+def tag_class(audio_tag: Optional[str]) -> Optional[str]:
+    """MUSIC, SPEECH, or None for a PANNs tag that says neither."""
+    tag = (audio_tag or "").strip().lower()
+    if not tag:
+        return None
+    if any(k in tag for k in _MUSIC_TAGS):
+        return MUSIC
+    if any(k in tag for k in _SPEECH_TAGS):
+        return SPEECH
+    return None
+
+
 def bin_rows(rows: Sequence[Tuple], bin_seconds: int = 60, *,
              music_prob_threshold: float = 0.5,
+             use_audio_tag: bool = True,
              cues: Optional[Dict[str, "re.Pattern[str]"]] = None,
              cues_translated: Optional[Dict[str, "re.Pattern[str]"]] = None) -> List[Bin]:
     """Bucket finalized rows into fixed-width bins.
@@ -182,13 +212,23 @@ def bin_rows(rows: Sequence[Tuple], bin_seconds: int = 60, *,
     for row in usable:
         ts_ms, speech_type, music_prob, text = row[0], row[1], row[2], row[3]
         translated = row[4] if len(row) > 4 else None
+        audio_tag = row[5] if len(row) > 5 else None
         b = bins[min(count - 1, (int(ts_ms) - t0) // width)]
         if speech_type == "Music" or (music_prob or 0.0) > music_prob_threshold:
             b.music += 1
         elif speech_type == "Speaking":
             b.speech += 1
         else:
-            b.quiet += 1
+            # Quiet is the label this pipeline reaches for when it is unsure, so it is the
+            # one worth a second opinion. Deliberately only here: where speech_type is
+            # confident it stays authoritative, and the dwell settings were tuned against it.
+            fallback = tag_class(audio_tag) if use_audio_tag else None
+            if fallback == MUSIC:
+                b.music += 1
+            elif fallback == SPEECH:
+                b.speech += 1
+            else:
+                b.quiet += 1
         body = text or ""
         b.words += len(body.split())
         for name in set(cues or {}) | set(cues_translated or {}):
@@ -462,6 +502,7 @@ def analyze(rows: Sequence[Tuple], cfg: Optional[dict] = None, *,
         rows,
         bin_seconds=int(cfg.get("bin_seconds", 60)),
         music_prob_threshold=float(cfg.get("music_prob_threshold", 0.5)),
+        use_audio_tag=bool(cfg.get("use_audio_tag", True)),
         cues=cues,
         cues_translated=cues_translated,
     )
@@ -561,7 +602,8 @@ def read_rows(conn: "sqlite3.Connection") -> List[Tuple]:
     """
     try:
         return list(conn.execute(
-            "SELECT ts_ms, speech_type, music_prob, text, translated_text FROM transcriptions "
+            "SELECT ts_ms, speech_type, music_prob, text, translated_text, audio_tag "
+            "FROM transcriptions "
             "WHERE is_final = 1 AND ts_ms IS NOT NULL ORDER BY ts_ms"))
     except sqlite3.Error:
         # A session recorded before translation existed has no such column; the cue
