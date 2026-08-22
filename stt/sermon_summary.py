@@ -461,8 +461,19 @@ def sermon_ranges(blocks: Sequence[dict], corrections: Sequence[dict] = (), *,
     """
     by_index = {c["block_index"]: c for c in corrections
                 if c.get("block_index") is not None}
-    spans = [c for c in corrections
-             if c.get("block_index") is None and c.get("start_ms") and c.get("end_ms")]
+    # Newest wins where drawn spans overlap. A grouping correction is always an insert, so
+    # an operator adjusting the same boundary twice leaves both on record — and taking both
+    # would summarise one sermon twice, from two ranges they have already superseded. The
+    # older rows stay in the table, because corrections are the operator's record and the
+    # learner reads them; they simply stop defining a range.
+    spans: List[dict] = []
+    for c in sorted((c for c in corrections
+                     if c.get("block_index") is None and c.get("start_ms") and c.get("end_ms")),
+                    key=lambda c: c.get("id") or 0, reverse=True):
+        if any(int(c["start_ms"]) < int(k["end_ms"]) and int(c["end_ms"]) > int(k["start_ms"])
+               for k in spans):
+            continue
+        spans.append(c)
 
     out: List[dict] = []
     for i, block in enumerate(blocks):

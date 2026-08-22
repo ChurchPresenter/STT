@@ -803,6 +803,30 @@ class TestSermonRanges:
                                               "start_ms": None, "end_ms": None}])
         assert [b["label"] for b in got] == ["Sermon 1"]
 
+    def test_adjusting_the_same_boundary_twice_keeps_only_the_latest(self):
+        """A grouping correction is always an insert, so both adjustments are on record.
+
+        Taking both would summarise one sermon twice, from two ranges the operator has
+        already superseded — which is what makes the boundary un-adjustable in practice.
+        """
+        got = sermon_ranges([self.block()], [
+            {"id": 1, "block_index": None, "label": "Sermon 1", "kind": "S",
+             "start_ms": BASE - 2 * MIN, "end_ms": BASE + 30 * MIN},
+            {"id": 2, "block_index": None, "label": "Sermon 1", "kind": "S",
+             "start_ms": BASE - 4 * MIN, "end_ms": BASE + 30 * MIN},
+        ])
+        assert len(got) == 1
+        assert got[0]["start_ms"] == BASE - 4 * MIN, "the older adjustment won"
+
+    def test_two_spans_that_do_not_overlap_are_both_kept(self):
+        got = sermon_ranges([], [
+            {"id": 1, "block_index": None, "label": "Sermon 1", "kind": "S",
+             "start_ms": BASE, "end_ms": BASE + 30 * MIN},
+            {"id": 2, "block_index": None, "label": "Sermon 2", "kind": "S",
+             "start_ms": BASE + 60 * MIN, "end_ms": BASE + 90 * MIN},
+        ])
+        assert [b["label"] for b in got] == ["Sermon 1", "Sermon 2"]
+
     def test_the_shape_matches_a_block_so_callers_cannot_tell(self):
         got = sermon_ranges([], [{"block_index": None, "label": "Sermon 1", "kind": "S",
                                   "start_ms": BASE, "end_ms": BASE + 30 * MIN}])[0]
