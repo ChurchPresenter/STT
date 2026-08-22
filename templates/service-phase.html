@@ -141,6 +141,9 @@
         display: inline-flex; align-items: center; gap: 6px;
         text-decoration: none; color: var(--info);
       }
+      .sp-nudge { display: inline-flex; align-items: center; gap: 3px; margin-left: 6px; }
+      .sp-nudge-lbl { color: var(--text-muted); font-size: 0.78em; margin-left: 4px; }
+      .sp-nudge button { padding: 2px 7px; font-size: 0.86em; line-height: 1.2; min-width: 24px; }
       .sp-pick { width: 16px; height: 16px; accent-color: var(--accent); flex-shrink: 0; }
       .sp-pick-gap { width: 16px; flex-shrink: 0; }
       .sp-custom, .sp-note-in { min-width: 120px; }
@@ -304,9 +307,18 @@
   // over it — so the rules can return the same shape a group has. The operator's wins where
   // they overlap, because it is the one that was made on purpose.
   function groups() {
-    const mine = spData.corrections
+    // Newest wins where the operator's spans overlap, matching sermon_ranges() on the
+    // server. A grouping correction is always an insert, so adjusting an edge leaves every
+    // earlier position on record; drawing them all would stack a row per click.
+    const mine = [];
+    spData.corrections
       .filter(c => c.block_index === null && c.start_ms && c.end_ms)
-      .map(c => Object.assign({ detected: false }, c));
+      .slice()
+      .sort((a, b) => (b.id || 0) - (a.id || 0))
+      .forEach(c => {
+        if (mine.some(k => c.start_ms < k.end_ms && c.end_ms > k.start_ms)) return;
+        mine.push(Object.assign({ detected: false }, c));
+      });
     const found = (spData.spans || [])
       .filter(s => !mine.some(g => s.start_ms < g.end_ms && g.start_ms < s.end_ms))
       .map((s, i) => Object.assign({ id: 'span-' + i, detected: true, note: '' }, s));
@@ -449,6 +461,7 @@
           '<input type="text" id="sp-note-' + b.index + '" class="sp-note-in" placeholder="note (optional)">' +
           '<button type="button" onclick="correctBlock(' + b.index + ', \'' + b.kind + '\')">Correct</button>' +
           (fix ? '<button type="button" class="sp-undo" onclick="undoCorrection(' + b.index + ')">Undo</button>' : '') +
+          nudger(b.start_ms, b.end_ms, shown, b.kind) +
         '</span>' +
         (flags.length ? '<span class="sp-flag">&#9888; ' + flags.join(' · ') + '</span>' : '') +
         (fix ? '<span class="sp-was">corrected to "' + esc(fix.label) + '"' +
@@ -456,6 +469,60 @@
                (fix.corrected_at ? ' at ' + esc(fix.corrected_at) : '') + '</span>' : '');
       host.appendChild(row);
     });
+  }
+
+  // Moving an edge a minute at a time.
+  //
+  // Grouping snaps to whole blocks and needs at least two of them, so until now a sermon's
+  // start and end could not be moved at all — and those edges are what decides whether the
+  // summary reads the introduction or the end of the song before it. The detector is right
+  // about the structure and approximate about the edges; this is where that gets fixed.
+  //
+  // Each click writes the whole corrected range, so the same control works whether it is
+  // adjusting the detector's block or an adjustment already made.
+  const NUDGE_MS = 60000;
+
+  function nudger(startMs, endMs, label, kind) {
+    const a = [startMs, endMs, esc(label || ''), kind || 'S'];
+    const call = (ds, de) => 'nudgeRange(' + a[0] + ',' + a[1] + ',' + ds + ',' + de
+      + ',\'' + a[2].replace(/'/g, "\\'") + '\',\'' + a[3] + '\')';
+    return '<span class="sp-nudge" title="Move this phase\'s edges a minute at a time. '
+      + 'What you set here is what gets summarised.">'
+      + '<span class="sp-nudge-lbl">start</span>'
+      + '<button type="button" onclick="' + call(-NUDGE_MS, 0) + '">−</button>'
+      + '<button type="button" onclick="' + call(NUDGE_MS, 0) + '">+</button>'
+      + '<span class="sp-nudge-lbl">end</span>'
+      + '<button type="button" onclick="' + call(0, -NUDGE_MS) + '">−</button>'
+      + '<button type="button" onclick="' + call(0, NUDGE_MS) + '">+</button>'
+      + '</span>';
+  }
+
+  async function nudgeRange(startMs, endMs, dStart, dEnd, label, kind) {
+    const start = startMs + dStart;
+    const end = endMs + dEnd;
+    if (end - start < NUDGE_MS) {
+      showAlert('A phase has to be at least a minute long.', 'error');
+      return;
+    }
+    if (!label) {
+      showAlert('Name the phase first, then adjust its edges.', 'error');
+      return;
+    }
+    try {
+      const resp = await fetch('/api/service-phase/group', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: spBody({ start_ms: start, end_ms: end, kind: kind, label: label,
+                       note: 'edge adjusted' })
+      });
+      const data = await resp.json();
+      if (!data.success) { showAlert('Could not adjust: ' + data.error, 'error'); return; }
+      spData.corrections = data.corrections || [];
+      renderBlocks();
+      renderNow();
+    } catch (e) {
+      showAlert('Could not adjust: ' + e, 'error');
+    }
   }
 
   // One row standing in for every block the operator grouped, spanning their whole range.
@@ -481,6 +548,7 @@
           ? '<input type="text" id="sp-span-' + esc(g.id) + '" class="sp-custom" placeholder="rename">'
             + '<button type="button" onclick="acceptSpan(\'' + esc(g.id) + '\')">Correct</button>'
           : '<button type="button" class="sp-undo" onclick="ungroup(' + g.id + ')">Ungroup</button>') +
+        nudger(g.start_ms, g.end_ms, g.label, g.kind || 'S') +
       '</span>' +
       (g.note ? '<span class="sp-was">' + esc(g.note) + '</span>' : '');
     return row;
