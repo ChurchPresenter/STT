@@ -533,6 +533,22 @@
   let spCaps = [];       // rows in the padded window
   const CAP_PAD_MS = 8 * 60000;   // enough either side to move a boundary without refetching
 
+  // Corrected span first, then one the detector grouped, then a bare block. Whatever the
+  // operator has said outranks what was derived, which is the same order everything else
+  // on this page and in the summariser resolves in.
+  function sermonToOpen() {
+    const named = groups().filter(g => (g.label || '').startsWith('Sermon'));
+    const corrected = named.find(g => !g.detected);
+    if (corrected) return corrected;
+    if (named.length) return named[0];
+    const block = (spData.blocks || []).find(b => (effectiveLabel(b) || '').startsWith('Sermon'))
+      || (spData.blocks || [])[0];
+    return block
+      ? { start_ms: block.start_ms, end_ms: block.end_ms,
+          label: effectiveLabel(block), kind: block.kind }
+      : null;
+  }
+
   function selectPhase(start_ms, end_ms, label, kind) {
     spSel = { start_ms: start_ms, end_ms: end_ms, label: label || '', kind: kind || 'S' };
     renderBlocks();
@@ -953,11 +969,13 @@
       renderDetectState(!!data.enabled);
       if (data.recomputed) { markUnsaved(); } else { markSaved(); }
       render();
-      // The sermon is what an operator came to check, so it is what the panel opens on.
+      // The sermon is what an operator came to check, so it is what the panel opens on —
+      // and it opens on the range they corrected it to, not the one the detector guessed.
+      // Reading blocks alone meant a refresh after moving an edge quietly went back to the
+      // old boundaries while the timeline beside it showed the new ones.
       if (!spSel) {
-        const first = (spData.blocks || []).find(b => (effectiveLabel(b) || '').startsWith('Sermon'))
-          || (spData.blocks || [])[0];
-        if (first) selectPhase(first.start_ms, first.end_ms, effectiveLabel(first), first.kind);
+        const pick = sermonToOpen();
+        if (pick) selectPhase(pick.start_ms, pick.end_ms, pick.label, pick.kind);
       }
     } catch (e) {
       // A paused poll is not an error to report — the last loaded view stays.
