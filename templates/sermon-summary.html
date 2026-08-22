@@ -174,9 +174,6 @@
     showAlert('Could not copy — select the text and copy it by hand.', 'error');
   }
 
-  // Plain text rather than markdown: it is pasted into a description box or a message, and
-  // a stray # or - there is noise. The translation sits under its own timestamp, so one
-  // chapter stays one chapter wherever it lands.
   // One language, because that is what gets pasted somewhere. Plain text rather than
   // markdown: it lands in a description box or a message, where a stray # is noise.
   function summaryAsText(entry, offsetOf, which) {
@@ -191,6 +188,129 @@
     return out.join('\n').trim() + '\n';
   }
 
+  // The same in-flow banner every other page uses, against the same .alert classes. The
+  // base fallback floats one instead, and those background tokens are semi-transparent —
+  // fine sitting on the page, wrong laid over content.
+  function showAlert(message, type) {
+    const el = document.getElementById('alert_message');
+    el.textContent = message;
+    el.className = 'alert ' + (type || 'info') + ' show';
+    clearTimeout(showAlert._timer);
+    showAlert._timer = setTimeout(() => el.classList.remove('show'), 5000);
+  }
+
+  const SS_STATE = { pending: 'queued', running: 'summarising', done: 'done', error: 'failed' };
+
+  let ssLive = false;
+  let ssLang = '';   // what to call the second column, from the server
+
+  // Transcript and operator-facing text go through innerHTML, so they are escaped on the
+  // way out: a caption is verbatim speech and a stray < must not be able to rewrite a page.
+  function esc(s) {
+    return String(s === null || s === undefined ? '' : s).replace(/[&<>"']/g, c => (
+      { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  }
+
+  function fmtOffset(ms, base) {
+    const s = Math.max(0, Math.round((ms - base) / 1000));
+    const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = s % 60;
+    const mm = h ? String(m).padStart(2, '0') : String(m);
+    return (h ? h + ':' : '') + mm + ':' + String(sec).padStart(2, '0');
+  }
+
+  function minutesOf(entry) {
+    return Math.max(1, Math.round(((entry.end_ms || 0) - (entry.start_ms || 0)) / 60000));
+  }
+
+  // One language per column, each complete and each copyable on its own. A media team
+  // publishes one language at a time, so the useful unit is a column rather than the pair —
+  // and stacking them made the second read as a footnote to the first rather than the same
+  // sermon said again.
+  function languageColumn(entry, which) {
+    const translated = which === 'translated';
+    const body = translated ? entry.summary_translated : entry.summary;
+    const name = translated ? (ssLang || 'Translation') : 'Original';
+    const chapters = (entry.chapters || []).map(c => {
+      const title = translated ? c.title_translated : c.title;
+      if (!title) return '';
+      return '<li><span class="ss-at">' + esc(fmtOffset(c.ts_ms, entry.start_ms)) + '</span>'
+        + '<span>' + esc(title) + '</span></li>';
+    }).join('');
+    if (!body && !chapters) return '';
+    return '<div class="ss-col">'
+      + '<div class="ss-col-head"><span>' + esc(name) + '</span>'
+      +   '<button type="button" onclick="copySummary(\'' + esc(entry.fingerprint)
+      +     '\', \'' + which + '\')">Copy</button></div>'
+      + '<div class="ss-summary">' + esc(body || '') + '</div>'
+      + (chapters ? '<ul class="ss-chapters">' + chapters + '</ul>' : '')
+      + '</div>';
+  }
+
+  function renderOne(entry) {
+    const state = entry.status || '';
+    const running = state === 'running' || state === 'pending';
+    let body;
+    if (state === 'error') {
+      body = '<div class="ss-summary">' + esc(entry.error || 'Failed.') + '</div>';
+    } else if (running) {
+      // A run takes minutes, so "summarising" alone is indistinguishable from stuck.
+      body = '<div class="ss-progress">' + esc(entry.progress || 'starting') + '</div>';
+    } else {
+      const cols = [languageColumn(entry, 'original'), languageColumn(entry, 'translated')]
+        .filter(Boolean);
+      // One column takes the full width rather than sitting beside an empty half, which is
+      // every sermon summarised before translation existed.
+      body = '<div class="ss-cols' + (cols.length < 2 ? ' single' : '') + '">'
+        + cols.join('') + '</div>';
+    }
+    return '<div class="ss-card">'
+      + '<div class="ss-head">'
+      +   '<span class="ss-label">' + esc(entry.label || 'Sermon') + '</span>'
+      +   '<span class="ss-state ' + esc(state) + '">' + esc(SS_STATE[state] || state) + '</span>'
+      +   '<span class="ss-meta">' + minutesOf(entry) + ' min'
+      +     (entry.model ? ' · ' + esc(entry.model) : '')
+      +     (entry.generated_at ? ' · ' + esc(entry.generated_at) : '') + '</span>'
+      +   '<span style="margin-left: auto; display: inline-flex; gap: 8px;">'
+      +     '<button type="button" onclick="regenerate(\'' + esc(entry.fingerprint) + '\')">Regenerate</button>'
+      +   '</span>'
+      + '</div>'
+      + body
+      + (entry.transcript
+          ? '<details class="ss-transcript"><summary>Transcript ('
+            + entry.transcript.split(/\s+/).length + ' words)</summary>'
+            + '<div class="ss-transcript-body">' + esc(entry.transcript) + '</div></details>'
+          : '')
+      + '</div>';
+  }
+
+  // Kept so a Copy click can find the entry it belongs to without re-fetching.
+  let ssData = [];
+
+  function render(summaries) {
+    ssData = summaries || [];
+    const list = document.getElementById('ss-list');
+    if (!summaries.length) {
+      list.innerHTML = '<div class="ss-empty">No sermon has been summarised for this service.</div>';
+      return;
+    }
+    list.innerHTML = summaries.map(renderOne).join('');
+  }
+
+  function fmtDuration(minutes) {
+    const h = Math.floor((minutes || 0) / 60), m = (minutes || 0) % 60;
+    return (h ? h + 'h' : '') + m + 'm';
+  }
+
+  // Shares /api/service-phase/sessions with the phase page, so both list the same services
+  // in the same order. Every recorded service is offered, not only those already
+  // summarised — generating a summary for one that has none is the point of the page.
+  // Whether a service is running at all. Without one there is no live view to return to,
+  // and 'Back to live' has to say so rather than appearing to do nothing.
+  let ssHasLive = false;
+
+  // Safe to call repeatedly: the chosen service is preserved. Letting the selection fall
+  // back to the first option would move an operator off the service they were reading — and
+  // since Regenerate carries the selection, aim their next write somewhere else.
   async function loadSessions() {
     const select = document.getElementById('ss-session');
     const previous = select.value || '';
@@ -255,7 +375,9 @@
       render(data.summaries || []);
     } catch (e) {
       if (e && e.pollingPaused) return;
-      status.textContent = 'Could not load: ' + e;
+      // Deliberately the real error. A friendlier line here would dress a broken page as an
+      // empty one, which is how a missing column once read as "no sermon has been summarised".
+      status.textContent = 'This page failed to load: ' + e;
     }
   }
 

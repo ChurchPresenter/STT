@@ -61,3 +61,55 @@ def test_inline_javascript_parses(path):
 def test_templates_are_actually_being_checked():
     """Guard against the parametrization silently collapsing to nothing."""
     assert len(TEMPLATES) >= 8, "expected the template set to be found"
+
+
+# Read out of the HTML attribute rather than by parsing the JavaScript around it. A general
+# "called but never defined" checker was tried and rejected: stripping string literals
+# desynchronises on a regex literal like /[&<>"']/g, after which it loses whole regions and
+# reports functions as missing that are plainly there. A gate that cries wolf gets turned off.
+#
+# This one cannot: an on* attribute names a page-local function, so a name with no definition
+# is always a fault. It is the shape the damage takes when a careless edit removes a span of
+# script — the markup keeps pointing at what is no longer there, and the button does nothing
+# but log to a console nobody has open.
+_HANDLER = re.compile(r"""\bon[a-z]+\s*=\s*["']([^"']+)["']""")
+_CALLED = re.compile(r"(?<![.\w$])([a-zA-Z_$][\w$]*)\s*\(")
+_DEFINED = re.compile(
+    r"(?:function\s+(\w+)\s*\()"
+    r"|(?:(?:const|let|var)\s+(\w+)\s*=\s*(?:async\s*)?(?:function\b|\())"
+    # corrections.html hangs its handlers off window on purpose, so they survive the page
+    # being re-rendered; without this they read as undefined.
+    r"|(?:window\.(\w+)\s*=)")
+
+# Provided by the browser or by base.html rather than by the page under test.
+_PROVIDED = {"toggleTheme", "refreshSysreqBanner", "showAlert", "return", "this", "event"}
+
+# A handler may hold a whole statement — file.html keys off `if (event.key === 'Enter')` —
+# so control flow and the browser's own functions are not calls to page code.
+_NOT_CALLS = {"if", "for", "while", "switch", "return", "typeof", "catch", "function",
+              "setTimeout", "setInterval", "confirm", "alert", "prompt", "fetch",
+              "parseInt", "parseFloat", "encodeURIComponent", "decodeURIComponent"}
+
+
+@pytest.mark.parametrize("path", TEMPLATES, ids=lambda p: p.name)
+def test_inline_handlers_name_a_function_the_page_defines(path):
+    src = path.read_text(encoding="utf-8")
+    js = _inline_js(path)
+    defined = {a or b or c for a, b, c in _DEFINED.findall(js)} | _PROVIDED
+    # base.html defines the shared ones every page inherits.
+    base = REPO / "templates" / "base.html"
+    if path != base:
+        defined |= {a or b or c for a, b, c in _DEFINED.findall(_inline_js(base))}
+
+    missing = set()
+    for handler in _HANDLER.findall(src):
+        for name in _CALLED.findall(handler):
+            if name in _NOT_CALLS:
+                continue
+            if name not in defined:
+                missing.add(name)
+
+    assert not missing, (
+        f"{path.name} has on* handlers calling {sorted(missing)}, which its script does not "
+        f"define — the markup outlived the code behind it")
+
