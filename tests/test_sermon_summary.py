@@ -948,3 +948,85 @@ class TestTranslationStorage:
         assert "Original." in out and "Traducido." in out
         assert "- 0:00 Opening" in out and "0:00 Apertura" in out
 
+
+LEGACY_DDL = ("CREATE TABLE sermon_summaries ("
+              "id INTEGER PRIMARY KEY AUTOINCREMENT, label TEXT, start_ms INTEGER, "
+              "end_ms INTEGER, fingerprint TEXT UNIQUE, transcript TEXT, summary TEXT, "
+              "chapters_json TEXT, model TEXT, status TEXT, error TEXT, generated_at TEXT)")
+
+
+class TestReadingAnOlderSchema:
+    """Reading a session whose table predates a column, without migrating it first.
+
+    This is how production reads: the archive is opened read-only through _archive_open_ro,
+    so ensure_tables cannot run and the reader meets whatever columns that database happens to
+    have. An earlier test built the old table, migrated it, and *then* read — which proves the
+    migration works and says nothing about the case that breaks. It passed on .62 while every
+    session summarised before summary_translated existed reported "No sermon has been
+    summarised for this service".
+    """
+
+    def legacy(self, tmp_path, name="older.db", extra=()):
+        c = sqlite3.connect(tmp_path / name)
+        c.execute(LEGACY_DDL)
+        for column in extra:
+            c.execute(f"ALTER TABLE sermon_summaries ADD COLUMN {column} TEXT")
+        c.execute("INSERT INTO sermon_summaries (fingerprint, label, start_ms, end_ms, "
+                  "summary, chapters_json, status) VALUES "
+                  "('old', 'Sermon 1', 100, 200, 'It was summarised.', "
+                  "'[{\"ts_ms\": 100, \"title\": \"Opening\"}]', 'done')")
+        c.commit()
+        return c
+
+    def test_a_table_missing_every_later_column_still_reads(self, tmp_path):
+        # No ensure_tables: exactly what the read-only archive path meets.
+        c = self.legacy(tmp_path)
+        got = load_summaries(c)
+        assert len(got) == 1, "the row is there; the reader refused to see it"
+        assert got[0]["summary"] == "It was summarised."
+        assert got[0]["label"] == "Sermon 1"
+        c.close()
+
+    def test_the_shape_that_actually_shipped(self, tmp_path):
+        # .62: progress present, summary_translated absent.
+        c = self.legacy(tmp_path, extra=("progress",))
+        assert len(load_summaries(c)) == 1
+        c.close()
+
+    def test_columns_it_does_not_have_read_as_empty(self, tmp_path):
+        c = self.legacy(tmp_path)
+        got = load_summaries(c)[0]
+        assert got["progress"] == "" and got["summary_translated"] == ""
+        assert got["chapters"] == [{"ts_ms": 100, "title": "Opening", "title_translated": ""}]
+        c.close()
+
+    def test_one_summary_reads_the_same_way(self, tmp_path):
+        c = self.legacy(tmp_path)
+        got = load_summary(c, "old")
+        assert got is not None and got["summary"] == "It was summarised."
+        c.close()
+
+    def test_the_listing_and_the_read_agree(self, tmp_path):
+        """has_summaries said True while load_summaries said empty.
+
+        That disagreement is what made the symptom baffling: the picker offered a service and
+        the page then said nothing had been summarised for it.
+        """
+        c = self.legacy(tmp_path)
+        assert has_summaries(c) is True
+        assert len(load_summaries(c)) == 1
+        c.close()
+
+    def test_a_column_added_tomorrow_cannot_break_reading_today(self, tmp_path):
+        # The other direction: a database ahead of the reader.
+        c = sqlite3.connect(tmp_path / "newer.db")
+        c.execute(LEGACY_DDL)
+        for column in ("progress", "summary_translated", "some_future_column"):
+            c.execute(f"ALTER TABLE sermon_summaries ADD COLUMN {column} TEXT")
+        c.execute("INSERT INTO sermon_summaries (fingerprint, label, summary, status) "
+                  "VALUES ('new', 'Sermon 1', 'From the future.', 'done')")
+        c.commit()
+        got = load_summaries(c)
+        assert len(got) == 1 and got[0]["summary"] == "From the future."
+        c.close()
+

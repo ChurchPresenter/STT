@@ -32,7 +32,7 @@ import hashlib
 import json
 import re
 import sqlite3
-from typing import Callable, Dict, List, NamedTuple, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, NamedTuple, Optional, Sequence, Tuple
 
 from stt.llm_translate import estimate_tokens
 
@@ -702,42 +702,72 @@ def save_summary(conn: "sqlite3.Connection", *, fingerprint: str, label: str,
     return int(row[0]) if row else 0
 
 
-def _to_dict(r: Sequence) -> dict:
+def _to_dict(row: Dict[str, Any]) -> dict:
+    """One stored row as the API shape, reading by name with defaults.
+
+    Deliberately not positional. The archive is opened read-only, so a reader meets whatever
+    columns that database happens to have and cannot migrate it — and a summary written before
+    a column existed is the normal case, not an edge one. Indexing by offset made every added
+    column a way to fail the whole read: naming summary_translated in the SELECT made every
+    session summarised before it report as having no summaries at all.
+    """
     try:
-        chapters = json.loads(r[7] or "[]")
+        chapters = json.loads(str(row.get("chapters_json") or "[]"))
     except (ValueError, TypeError):
         chapters = []
+    # Chapters gained their translation the same way, so they get the same treatment.
+    chapters = [{"ts_ms": int(c.get("ts_ms") or 0), "title": c.get("title") or "",
+                 "title_translated": c.get("title_translated") or ""}
+                for c in chapters if isinstance(c, dict)]
     return {
-        "id": int(r[0]), "fingerprint": r[1], "label": r[2],
-        "start_ms": int(r[3] or 0), "end_ms": int(r[4] or 0),
-        "transcript": r[5] or "", "summary": r[6] or "", "chapters": chapters,
-        "model": r[8] or "", "status": r[9] or "", "error": r[10] or "",
-        "generated_at": r[11] or "",
-        "progress": (r[12] if len(r) > 12 else "") or "",
-        "summary_translated": (r[13] if len(r) > 13 else "") or "",
+        "id": int(row.get("id") or 0),
+        "fingerprint": row.get("fingerprint") or "",
+        "label": row.get("label") or "",
+        "start_ms": int(row.get("start_ms") or 0),
+        "end_ms": int(row.get("end_ms") or 0),
+        "transcript": row.get("transcript") or "",
+        "summary": row.get("summary") or "",
+        "chapters": chapters,
+        "model": row.get("model") or "",
+        "status": row.get("status") or "",
+        "error": row.get("error") or "",
+        "generated_at": row.get("generated_at") or "",
+        "progress": row.get("progress") or "",
+        "summary_translated": row.get("summary_translated") or "",
     }
 
 
-_SELECT = ("SELECT id, fingerprint, label, start_ms, end_ms, transcript, summary, "
-           "chapters_json, model, status, error, generated_at, progress, "
-           "summary_translated FROM sermon_summaries")
+def _rows(cur: "sqlite3.Cursor") -> List[Dict[str, Any]]:
+    """Fetched rows as dicts keyed by the column names this database actually has."""
+    names = [d[0] for d in (cur.description or ())]
+    return [dict(zip(names, r)) for r in cur.fetchall()]
+
+
+# SELECT * rather than a column list, so a column added later cannot break reading a session
+# written earlier, nor a session written later break an older reader. Ordering is stated
+# explicitly because SELECT * says nothing about it.
+_SELECT = "SELECT * FROM sermon_summaries"
 
 
 def load_summaries(conn: "sqlite3.Connection") -> List[dict]:
     """Every stored summary for this session, in service order."""
     try:
-        return [_to_dict(r) for r in conn.execute(_SELECT + " ORDER BY start_ms, id")]
-    except sqlite3.Error:
-        return []  # a session recorded before this feature simply has none
+        return [_to_dict(r) for r in _rows(conn.execute(_SELECT + " ORDER BY start_ms, id"))]
+    except sqlite3.Error as e:
+        # Never break the page over one session — but say why, because swallowing this
+        # silently is what turned a missing column into "no sermon has been summarised".
+        print(f"[SERMON] could not read summaries ({type(e).__name__}: {e})")
+        return []
 
 
 def load_summary(conn: "sqlite3.Connection", fingerprint: str) -> Optional[dict]:
     """One stored summary by fingerprint, or None."""
     try:
-        row = conn.execute(_SELECT + " WHERE fingerprint = ?", (fingerprint,)).fetchone()
-    except sqlite3.Error:
+        rows = _rows(conn.execute(_SELECT + " WHERE fingerprint = ?", (fingerprint,)))
+    except sqlite3.Error as e:
+        print(f"[SERMON] could not read summary ({type(e).__name__}: {e})")
         return None
-    return _to_dict(row) if row else None
+    return _to_dict(rows[0]) if rows else None
 
 
 def delete_summary(conn: "sqlite3.Connection", fingerprint: str) -> int:
