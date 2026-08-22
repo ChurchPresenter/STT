@@ -45,11 +45,13 @@ def session_db(tmp_path, spec="M" * 5 + "S" * 12, name="2026-03-01_093218.db", a
     path = str(tmp_path / name)
     conn = sqlite3.connect(path)
     conn.execute("CREATE TABLE transcriptions (id INTEGER PRIMARY KEY AUTOINCREMENT, "
-                 "ts_ms INTEGER, speech_type TEXT, music_prob REAL, text TEXT, is_final INTEGER)")
+                 "ts_ms INTEGER, speech_type TEXT, music_prob REAL, text TEXT, is_final INTEGER, "
+                 "denied INTEGER DEFAULT 0)")
     conn.executemany(
         "INSERT INTO transcriptions (ts_ms, speech_type, music_prob, text, is_final) "
         "VALUES (?, ?, ?, ?, 1)",
-        [(1_000_000 + i * MIN, {"M": "Music", "S": "Speaking"}[c], 0.9 if c == "M" else 0.0, "")
+        [(1_000_000 + i * MIN, {"M": "Music", "S": "Speaking"}[c], 0.9 if c == "M" else 0.0,
+          f"caption {i}")
          for i, c in enumerate(spec)])
     conn.commit()
     if analyzed:
@@ -73,7 +75,7 @@ def make_ns(*, live_db=None, params=None, args=None, archive=(), saved=None):
          "_service_phase_first_sunday", "_service_phase_config",
          "_archive_session_paths", "_archive_resolve_db", "_archive_write_done",
          "_archive_open_ro", "rerun_service_phase", "list_service_phase_sessions",
-         "save_service_phase_settings"],
+         "save_service_phase_settings", "get_service_phase_transcript"],
         extra_globals={
             "os": os,
             "_db_iter_databases": lambda dirs: list(archive),
@@ -85,6 +87,7 @@ def make_ns(*, live_db=None, params=None, args=None, archive=(), saved=None):
             "_session_index": index,
             "_sermon_summary_config": lambda: {},
             "_service_phase_save": save_analysis,
+            "_sermon_read_rows": __import__("stt.sermon_summary", fromlist=["x"]).read_sermon_rows,
             "save_config": lambda cfg: saved.update(cfg),
             "config": {"service_phase": dict(CFG)},
             "request": type("R", (), {
@@ -616,4 +619,85 @@ class TestDetectionSwitch:
     def test_it_returns_what_it_stored(self):
         body, saved = self.run({"enabled": "true"})
         assert body["enabled"] == saved["service_phase"]["enabled"]
+
+
+class TestTranscriptWindow:
+    """The captions behind the edge controls.
+
+    Deliberately the summariser's own query, so what the operator reads while moving an edge
+    is the material the summary would be written from. A panel that showed anything else
+    would let the page and the summary disagree about the same sermon.
+    """
+
+    def db(self, tmp_path, **kw):
+        return session_db(tmp_path, **kw)
+
+    def get(self, tmp_path, args, archive=(), live=None):
+        db = self.db(tmp_path) if live is None else live
+        return make_ns(live_db=db, archive=archive, args=args)["get_service_phase_transcript"](), db
+
+    def test_it_returns_rows_in_the_window(self, tmp_path):
+        body, _ = self.get(tmp_path, {"start_ms": 1_000_000, "end_ms": 1_000_000 + 3 * MIN})
+        assert body["success"] is True
+        assert [r["text"] for r in body["rows"]] == ["caption 0", "caption 1", "caption 2",
+                                                     "caption 3"]
+
+    def test_rows_carry_the_stamp_the_edges_are_set_from(self, tmp_path):
+        body, _ = self.get(tmp_path, {"start_ms": 1_000_000, "end_ms": 1_000_000 + MIN})
+        assert body["rows"][0]["ts_ms"] == 1_000_000
+        assert "id" in body["rows"][0]
+
+    def test_the_window_excludes_what_is_outside_it(self, tmp_path):
+        body, _ = self.get(tmp_path, {"start_ms": 1_000_000 + 5 * MIN,
+                                      "end_ms": 1_000_000 + 6 * MIN})
+        assert [r["text"] for r in body["rows"]] == ["caption 5", "caption 6"]
+
+    def test_a_window_padded_past_the_phase_reads_the_captions_either_side(self, tmp_path):
+        # Moving a start earlier means reading rows currently outside the phase, which is the
+        # whole reason the caller widens the window.
+        db = self.db(tmp_path)
+        narrow, _ = self.get(tmp_path, {"start_ms": 1_000_000 + 5 * MIN,
+                                        "end_ms": 1_000_000 + 6 * MIN}, live=db)
+        padded, _ = self.get(tmp_path, {"start_ms": 1_000_000 + 2 * MIN,
+                                        "end_ms": 1_000_000 + 9 * MIN}, live=db)
+        assert len(padded["rows"]) > len(narrow["rows"])
+
+    def test_an_archived_session_can_be_read_by_name(self, tmp_path):
+        old = self.db(tmp_path, name="2026-01-01_000000.db")
+        live = self.db(tmp_path)
+        body = make_ns(live_db=live, archive=[old],
+                       args={"session": "2026-01-01_000000.db", "start_ms": 1_000_000,
+                             "end_ms": 1_000_000 + MIN})["get_service_phase_transcript"]()
+        assert body["session_id"] == "2026-01-01_000000.db" and body["live"] is False
+        assert body["rows"]
+
+    def test_an_unknown_session_is_refused(self, tmp_path):
+        db = self.db(tmp_path)
+        _, status = make_ns(live_db=db, archive=[db],
+                            args={"session": "nope.db", "start_ms": 1, "end_ms": 2}
+                            )["get_service_phase_transcript"]()
+        assert status == 404
+
+    def test_no_session_means_the_running_one(self, tmp_path):
+        body, db = self.get(tmp_path, {"start_ms": 1_000_000, "end_ms": 1_000_000 + MIN})
+        assert body["live"] is True
+        assert body["session_id"] == os.path.basename(db)
+
+    @pytest.mark.parametrize("args", [
+        {"start_ms": 1_000_000, "end_ms": 1_000_000},          # zero width
+        {"start_ms": 1_000_000, "end_ms": 999_000},            # inverted
+        {"start_ms": 1_000_000},                               # no end at all
+    ])
+    def test_a_window_with_no_span_is_rejected(self, tmp_path, args):
+        _, status = self.get(tmp_path, args)[0]
+        assert status == 400
+
+    def test_the_limit_caps_and_says_so(self, tmp_path):
+        body, _ = self.get(tmp_path, {"start_ms": 1_000_000, "end_ms": 1_000_000 + 99 * MIN,
+                                      "limit": 3})
+        assert len(body["rows"]) == 3 and body["truncated"] is True
+
+    def test_a_window_inside_the_limit_is_not_flagged(self, tmp_path):
+        body, _ = self.get(tmp_path, {"start_ms": 1_000_000, "end_ms": 1_000_000 + 2 * MIN})
+        assert body["truncated"] is False
 

@@ -5694,6 +5694,49 @@ def list_service_phase_sessions():
                     "live_session_id": os.path.basename(live) if live else None})
 
 
+@app.route("/api/service-phase/transcript")
+def get_service_phase_transcript():
+    """The captions under a stretch of a service, for the operator moving its edges.
+
+    Deliberately the summariser's own query — read_sermon_rows, is_final and not denied — so
+    the panel shows the material a summary would actually be written from. Anything close but
+    different would let the page and the summary disagree about the same sermon, which is
+    worse than showing nothing.
+
+    ``start_ms``/``end_ms`` are the window to read, and the caller widens them past the phase
+    on purpose: moving a start *earlier* means reading captions that are currently outside it.
+    Deciding which rows are inside the phase is the caller's job; this returns what is there.
+    """
+    if not check_ip_whitelist():
+        return jsonify({"success": False, "error": "Access denied"}), 403
+
+    db_path, is_live, err = _archive_resolve_db(request.args.get("session"))
+    if err:
+        return err
+
+    start_ms = coerce_int(request.args.get("start_ms"), 0, lo=0, hi=2 ** 62)
+    end_ms = coerce_int(request.args.get("end_ms"), 0, lo=0, hi=2 ** 62)
+    if end_ms <= start_ms:
+        return jsonify({"success": False, "error": "A window needs an end after its start"}), 400
+    # A whole service is a few thousand captions; the cap is against a runaway range rather
+    # than a real one, and the caller is told when it bit so it can say so.
+    limit = coerce_int(request.args.get("limit"), 1500, lo=1, hi=5000)
+
+    try:
+        with _archive_open_ro(db_path, is_live) as conn:
+            rows = _sermon_read_rows(conn, start_ms, end_ms)
+    except Exception as e:
+        return jsonify({"success": False, "error": f"{type(e).__name__}: {e}"}), 500
+
+    return jsonify({
+        "success": True,
+        "session_id": os.path.basename(db_path),
+        "live": is_live,
+        "truncated": len(rows) > limit,
+        "rows": [{"id": r.id, "ts_ms": r.ts_ms, "text": r.text} for r in rows[:limit]],
+    })
+
+
 @app.route("/api/service-phase/rerun", methods=["POST"])
 def rerun_service_phase():
     """Re-run the detector over a session and save the result.

@@ -1,6 +1,7 @@
 {% extends "base.html" %}
 
 {% block title %}Service Phase - Speech to Text{% endblock %}
+{% block max_width %}1720px{% endblock %}
 {% block page_title %}Service Phase{% endblock %}
 
 {% block extra_css %}
@@ -78,6 +79,50 @@
         font-variant-numeric: tabular-nums; color: var(--text-muted);
         min-width: 56px; flex-shrink: 0;
       }
+
+      /* Timeline beside the words it is describing. Collapses rather than squeezing: below
+         this the block rows wrap and .sp-flag/.sp-was lose the indent they hang off. */
+      .sp-split { display: grid; grid-template-columns: 1fr 430px; gap: 18px; align-items: start; }
+      @media (max-width: 1200px) { .sp-split { grid-template-columns: 1fr; } }
+
+      .sp-tr {
+        background: var(--bg-card); border: 1px solid var(--border);
+        border-radius: var(--radius-md); overflow: hidden; position: sticky; top: 12px;
+      }
+      .sp-tr-head {
+        display: flex; align-items: baseline; gap: 10px; padding: 10px 14px;
+        border-bottom: 1px solid var(--border); background: var(--bg-base);
+      }
+      .sp-tr-head span:first-child { color: var(--text-primary); font-weight: 600; font-size: 0.94em; }
+      .sp-tr-hint { color: var(--text-muted); font-size: 0.82em; margin-left: auto; }
+      .sp-tr-body { max-height: 70vh; overflow-y: auto; }
+
+      .sp-cap {
+        display: flex; gap: 10px; align-items: flex-start;
+        padding: 6px 14px; border-top: 1px solid var(--border);
+        color: var(--text-muted); font-size: 0.88em; line-height: 1.45;
+      }
+      .sp-cap:first-child { border-top: none; }
+      /* The tint is the range: where it starts and stops is where the phase does. */
+      .sp-cap.inside { background: var(--accent-subtle); color: var(--text-primary); }
+      .sp-cap-at {
+        font-variant-numeric: tabular-nums; flex: none; min-width: 52px;
+        color: var(--text-muted); font-size: 0.92em;
+      }
+      .sp-cap-text { flex: 1; }
+      /* Named, not inferred from where the tint stops. */
+      .sp-cap-edge {
+        display: inline-block; margin-left: 6px; padding: 0 6px; border-radius: var(--radius-sm);
+        font-size: 0.72em; letter-spacing: 0.04em; text-transform: uppercase;
+        color: var(--accent); background: rgba(41,121,255,0.16);
+      }
+      .sp-cap-set { display: flex; gap: 4px; flex: none; opacity: 0; transition: opacity 0.12s; }
+      .sp-cap:hover .sp-cap-set, .sp-cap:focus-within .sp-cap-set { opacity: 1; }
+      .sp-cap-set button { padding: 1px 6px; font-size: 0.78em; line-height: 1.3; }
+      @media (prefers-reduced-motion: reduce) { .sp-cap-set { transition: none; } }
+
+      .sp-block.selected { border-color: var(--accent); background: var(--accent-subtle); }
+      .sp-cell.inrange { outline: 1px solid var(--accent); outline-offset: -1px; }
 
       /* Block timeline */
       .sp-block {
@@ -238,9 +283,20 @@
 
 <div class="sp-strip" id="sp-strip"></div>
 
-<div class="sp-head"><span class="sp-pick-gap"></span><span>clock</span><span>into service</span></div>
+<div class="sp-split">
+  <div>
+    <div class="sp-head"><span class="sp-pick-gap"></span><span>clock</span><span>into service</span></div>
+    <div id="sp-blocks"></div>
+  </div>
 
-<div id="sp-blocks"></div>
+  <div class="sp-tr" id="sp-transcript">
+    <div class="sp-tr-head">
+      <span id="sp-tr-title">Transcript</span>
+      <span class="sp-tr-hint" id="sp-tr-hint">Pick a phase to see its words</span>
+    </div>
+    <div class="sp-tr-body" id="sp-tr-body"></div>
+  </div>
+</div>
 {% endblock %}
 
 {% block scripts %}
@@ -458,7 +514,11 @@
     spData.bins.forEach((b, i) => {
       const cell = document.createElement('div');
       const hasCue = b.cues && Object.keys(b.cues).length > 0;
-      cell.className = 'sp-cell ' + (classes[i] || '_') + (hasCue ? ' cue' : '');
+      // Outlined while it falls inside the selected phase, so the minute strip and the
+      // transcript agree about where that phase is.
+      const inSel = spSel && b.end_ms > spSel.start_ms && b.start_ms < spSel.end_ms;
+      cell.className = 'sp-cell ' + (classes[i] || '_') + (hasCue ? ' cue' : '')
+        + (inSel ? ' inrange' : '');
       const cues = hasCue ? Object.entries(b.cues).map(([k, v]) => k + '×' + v).join(', ') : 'no cues';
       cell.title = 'minute ' + i + ' · ' + (SP_KINDS[classes[i]] || '?')
         + ' · ' + b.speech + ' speech / ' + b.music + ' music / ' + b.quiet + ' quiet · ' + cues;
@@ -491,8 +551,14 @@
       const shown = fix && fix.label ? fix.label : (songs[b.index] || b.label);
       const row = document.createElement('div');
       const flags = b.unusual || [];
+      const isSel = spSel && spSel.start_ms === b.start_ms && spSel.end_ms === b.end_ms;
       row.className = 'sp-block' + (fix ? ' corrected' : '') + (b.ongoing ? ' ongoing' : '')
-        + (flags.length ? ' unusual' : '');
+        + (flags.length ? ' unusual' : '') + (isSel ? ' selected' : '');
+      // Anywhere but the controls: the row is the handle for "show me these words".
+      row.addEventListener('click', ev => {
+        if (ev.target.closest('button, select, input, a')) return;
+        selectPhase(b.start_ms, b.end_ms, shown, b.kind);
+      });
 
       const cues = Object.entries(b.cues || {}).map(([k, v]) => k + '×' + v).join(' ');
       // "Songs 2" is not in the vocabulary but "Songs" is; without this the dropdown falls
@@ -532,6 +598,86 @@
     });
   }
 
+  // The phase whose words are on screen, and the captions around it.
+  //
+  // The panel exists because the edge controls were blind: you moved a boundary a minute and
+  // nothing told you which sentence you had just taken in or left out — while those edges are
+  // what decides the material a summary is written from.
+  let spSel = null;      // {start_ms, end_ms, label, kind}
+  let spCaps = [];       // rows in the padded window
+  const CAP_PAD_MS = 8 * 60000;   // enough either side to move a boundary without refetching
+
+  function selectPhase(start_ms, end_ms, label, kind) {
+    spSel = { start_ms: start_ms, end_ms: end_ms, label: label || '', kind: kind || 'S' };
+    renderBlocks();
+    renderStrip();
+    loadCaptions(true);
+  }
+
+  async function loadCaptions(scroll) {
+    if (!spSel) return;
+    const body = document.getElementById('sp-tr-body');
+    try {
+      const qs = spQuery({ start_ms: spSel.start_ms - CAP_PAD_MS,
+                           end_ms: spSel.end_ms + CAP_PAD_MS });
+      const resp = await pollFetch('/api/service-phase/transcript' + qs);
+      const data = await resp.json();
+      if (!data.success) { body.innerHTML = '<div class="sp-cap">' + esc(data.error) + '</div>'; return; }
+      spCaps = data.rows || [];
+      renderCaptions(scroll);
+    } catch (e) {
+      if (e && e.pollingPaused) return;
+      body.innerHTML = '<div class="sp-cap">Could not load the transcript: ' + esc(e) + '</div>';
+    }
+  }
+
+  function renderCaptions(scroll) {
+    const body = document.getElementById('sp-tr-body');
+    document.getElementById('sp-tr-title').textContent = spSel ? (spSel.label || 'Phase') : 'Transcript';
+    document.getElementById('sp-tr-hint').textContent = spSel
+      ? 'Click ⇤ or ⇥ on a line to move an edge there'
+      : 'Pick a phase to see its words';
+    if (!spSel) { body.innerHTML = ''; return; }
+    if (!spCaps.length) {
+      body.innerHTML = '<div class="sp-cap">No captions in this stretch.</div>';
+      return;
+    }
+    const inside = spCaps.filter(r => r.ts_ms >= spSel.start_ms && r.ts_ms <= spSel.end_ms);
+    const firstIn = inside.length ? inside[0].ts_ms : null;
+    const lastIn = inside.length ? inside[inside.length - 1].ts_ms : null;
+
+    body.innerHTML = spCaps.map(r => {
+      const isIn = r.ts_ms >= spSel.start_ms && r.ts_ms <= spSel.end_ms;
+      const edge = r.ts_ms === firstIn ? 'start' : (r.ts_ms === lastIn ? 'end' : '');
+      return '<div class="sp-cap' + (isIn ? ' inside' : '') + '" id="sp-cap-' + r.id + '">'
+        + '<span class="sp-cap-at">' + esc(fmtWall(r.ts_ms)) + '</span>'
+        + '<span class="sp-cap-text">' + esc(r.text)
+        + (edge ? '<span class="sp-cap-edge">' + edge + '</span>' : '') + '</span>'
+        + '<span class="sp-cap-set">'
+        +   '<button type="button" title="Start the phase here" '
+        +     'onclick="setEdge(' + r.ts_ms + ', null)">⇤</button>'
+        +   '<button type="button" title="End the phase here" '
+        +     'onclick="setEdge(null, ' + r.ts_ms + ')">⇥</button>'
+        + '</span></div>';
+    }).join('');
+
+    if (scroll && firstIn !== null) {
+      const el = body.querySelector('.sp-cap.inside');
+      if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    }
+  }
+
+  // Clicking a line and nudging with ± are the same correction aimed two ways, so they go
+  // through one path: the whole range, written to the grouping route.
+  function setEdge(startAt, endAt) {
+    if (!spSel) return;
+    // A caption's stamp is where it *begins*, so ending "here" has to include it — a minute,
+    // the width of a bin, rather than a hairline that would cut the line it names.
+    const start = startAt === null ? spSel.start_ms : startAt;
+    const end = endAt === null ? spSel.end_ms : endAt + 60000;
+    writeRange(start, end, spSel.label, spSel.kind);
+  }
+
   // Moving an edge a minute at a time.
   //
   // Grouping snaps to whole blocks and needs at least two of them, so until now a sermon's
@@ -558,9 +704,11 @@
       + '</span>';
   }
 
-  async function nudgeRange(startMs, endMs, dStart, dEnd, label, kind) {
-    const start = startMs + dStart;
-    const end = endMs + dEnd;
+  function nudgeRange(startMs, endMs, dStart, dEnd, label, kind) {
+    return writeRange(startMs + dStart, endMs + dEnd, label, kind);
+  }
+
+  async function writeRange(start, end, label, kind) {
     if (end - start < NUDGE_MS) {
       showAlert('A phase has to be at least a minute long.', 'error');
       return;
@@ -579,8 +727,13 @@
       const data = await resp.json();
       if (!data.success) { showAlert('Could not adjust: ' + data.error, 'error'); return; }
       spData.corrections = data.corrections || [];
+      // The panel follows the edge that just moved, so the tint and the timeline never
+      // disagree about where the phase is.
+      if (spSel) { spSel.start_ms = start; spSel.end_ms = end; }
       renderBlocks();
       renderNow();
+      renderStrip();
+      renderCaptions(false);
     } catch (e) {
       showAlert('Could not adjust: ' + e, 'error');
     }
@@ -589,7 +742,12 @@
   // One row standing in for every block the operator grouped, spanning their whole range.
   function groupRow(g, anchor) {
     const row = document.createElement('div');
-    row.className = 'sp-block corrected sp-group';
+    const isSel = spSel && spSel.start_ms === g.start_ms && spSel.end_ms === g.end_ms;
+    row.className = 'sp-block corrected sp-group' + (isSel ? ' selected' : '');
+    row.addEventListener('click', ev => {
+      if (ev.target.closest('button, select, input, a')) return;
+      selectPhase(g.start_ms, g.end_ms, g.label, g.kind || 'S');
+    });
     const into = (anchor !== null && g.start_ms >= anchor)
       ? fmtClock(g.start_ms, anchor) + ' – ' + fmtClock(g.end_ms, anchor)
       : '—';
@@ -860,6 +1018,12 @@
       renderDetectState(!!data.enabled);
       if (data.recomputed) { markUnsaved(); } else { markSaved(); }
       render();
+      // The sermon is what an operator came to check, so it is what the panel opens on.
+      if (!spSel) {
+        const first = (spData.blocks || []).find(b => (effectiveLabel(b) || '').startsWith('Sermon'))
+          || (spData.blocks || [])[0];
+        if (first) selectPhase(first.start_ms, first.end_ms, effectiveLabel(first), first.kind);
+      }
     } catch (e) {
       // A paused poll is not an error to report — the last loaded view stays.
       if (e && e.pollingPaused) return;
