@@ -131,7 +131,18 @@ def _write_marker(marker: str, text: str) -> None:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             f.write(text)
         os.chmod(tmp, 0o644)  # mkstemp is 0600; the marker is not a secret
-        os.replace(tmp, marker)
+        try:
+            os.replace(tmp, marker)
+        except PermissionError:
+            # Windows refuses to replace a destination carrying the read-only
+            # attribute, where POSIX consults only the directory — so without
+            # this the healing above is a promise the module keeps everywhere
+            # except Windows, and that box resyncs on every update check
+            # forever. Clearing the bit on our own marker and retrying once is
+            # the whole fix; if it is unwritable for any other reason the
+            # second attempt raises and the caller logs it as before.
+            os.chmod(marker, 0o644)
+            os.replace(tmp, marker)
     except BaseException:
         try:
             os.unlink(tmp)

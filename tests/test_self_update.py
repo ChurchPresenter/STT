@@ -326,6 +326,9 @@ def test_unwritable_marker_is_replaced(tmp_path, synced_calls):
     assert len(synced_calls) == 1  # healed: no second sync
 
 
+@pytest.mark.skipif(os.name == "nt",
+                    reason="chmod cannot make a directory unwritable on Windows, so the "
+                           "precondition this test needs does not exist there")
 @pytest.mark.skipif(os.geteuid() == 0 if hasattr(os, "geteuid") else False,
                     reason="root ignores directory permissions")
 def test_marker_write_failure_is_logged_not_raised(tmp_path, synced_calls, caplog):
@@ -344,6 +347,39 @@ def test_marker_write_failure_is_logged_not_raised(tmp_path, synced_calls, caplo
     assert "could not write sync marker" in caplog.text
     assert not (venv / ".requirements-synced").exists()
     assert list(venv.iterdir()) == []  # no temp file left behind
+
+
+def test_a_read_only_marker_is_replaced_after_clearing_the_attribute(tmp_path, synced_calls,
+                                                                     monkeypatch):
+    """The Windows path, exercised everywhere.
+
+    Windows fails os.replace onto a read-only destination where POSIX succeeds, so
+    on Windows alone a foreign marker used to survive and force a dependency resync
+    on every update check. The platform difference is simulated rather than skipped
+    — one refusal, then the retry must succeed — so the branch cannot rot on the
+    machines where it is not reachable.
+    """
+    (tmp_path / "requirements.txt").write_text("flask\n")
+    (tmp_path / ".venv").mkdir()
+    marker = tmp_path / ".venv" / ".requirements-synced"
+    marker.write_text("stalehash\n")
+
+    real_replace = os.replace
+    refusals = []
+
+    def replace_once_refusing(src, dst):
+        if not refusals:
+            refusals.append((src, dst))
+            raise PermissionError(13, "Access is denied")
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(self_update.os, "replace", replace_once_refusing)
+    self_update._sync_deps_if_needed(str(tmp_path))
+
+    assert len(refusals) == 1, "the first replace must have been the one that was refused"
+    assert marker.read_text(encoding="utf-8").strip() == \
+        self_update._requirements_hash(str(tmp_path))
+    assert [p.name for p in (tmp_path / ".venv").iterdir()] == [".requirements-synced"]
 
 
 # --- git_describe ------------------------------------------------------------
