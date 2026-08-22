@@ -78,12 +78,20 @@
       @media (prefers-reduced-motion: reduce) {
         .ss-progress::before { animation: none; }
       }
-      /* Secondary to the original, not competing with it: the sermon was preached in one
-         language and this is the same thing said again. */
-      .ss-translated {
-        display: block; margin-top: 5px; color: var(--text-muted);
-        border-left: 2px solid var(--border); padding-left: 10px;
+      /* Peers, not a footnote: the same sermon in two languages, either of which a media
+         team may be the one to publish. */
+      .ss-cols { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
+      .ss-cols.single { grid-template-columns: 1fr; }
+      @media (max-width: 900px) { .ss-cols { grid-template-columns: 1fr; } }
+      .ss-col-head {
+        display: flex; align-items: center; gap: 10px; margin-bottom: 8px;
+        padding-bottom: 6px; border-bottom: 1px solid var(--border);
       }
+      .ss-col-head span {
+        color: var(--text-muted); font-size: 0.78em;
+        letter-spacing: 0.04em; text-transform: uppercase;
+      }
+      .ss-col-head button { margin-left: auto; padding: 3px 10px; font-size: 0.82em; }
       .ss-chapters { list-style: none; padding: 0; margin: 0 0 14px; }
       .ss-chapters li {
         display: flex; gap: 14px; padding: 6px 0; border-top: 1px solid var(--border);
@@ -169,122 +177,20 @@
   // Plain text rather than markdown: it is pasted into a description box or a message, and
   // a stray # or - there is noise. The translation sits under its own timestamp, so one
   // chapter stays one chapter wherever it lands.
-  function summaryAsText(entry, offsetOf) {
+  // One language, because that is what gets pasted somewhere. Plain text rather than
+  // markdown: it lands in a description box or a message, where a stray # is noise.
+  function summaryAsText(entry, offsetOf, which) {
+    const translated = which === 'translated';
     const out = [entry.label || 'Sermon', ''];
-    if (entry.summary) out.push(entry.summary, '');
-    if (entry.summary_translated) out.push(entry.summary_translated, '');
+    const body = translated ? entry.summary_translated : entry.summary;
+    if (body) out.push(body, '');
     (entry.chapters || []).forEach(c => {
-      const at = offsetOf(c.ts_ms, entry.start_ms);
-      out.push(at + '  ' + (c.title || ''));
-      if (c.title_translated) out.push(at + '  ' + c.title_translated);
+      const title = translated ? c.title_translated : c.title;
+      if (title) out.push(offsetOf(c.ts_ms, entry.start_ms) + '  ' + title);
     });
     return out.join('\n').trim() + '\n';
   }
 
-  // The same in-flow banner every other page uses, against the same .alert classes. The
-  // base fallback floats one instead, and those background tokens are semi-transparent —
-  // fine sitting on the page, wrong laid over content.
-  function showAlert(message, type) {
-    const el = document.getElementById('alert_message');
-    el.textContent = message;
-    el.className = 'alert ' + (type || 'info') + ' show';
-    clearTimeout(showAlert._timer);
-    showAlert._timer = setTimeout(() => el.classList.remove('show'), 5000);
-  }
-
-  const SS_STATE = { pending: 'queued', running: 'summarising', done: 'done', error: 'failed' };
-
-  let ssLive = false;
-
-  // Transcript and operator-facing text go through innerHTML, so they are escaped on the
-  // way out: a caption is verbatim speech and a stray < must not be able to rewrite a page.
-  function esc(s) {
-    return String(s === null || s === undefined ? '' : s).replace(/[&<>"']/g, c => (
-      { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-  }
-
-  function fmtOffset(ms, base) {
-    const s = Math.max(0, Math.round((ms - base) / 1000));
-    const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = s % 60;
-    const mm = h ? String(m).padStart(2, '0') : String(m);
-    return (h ? h + ':' : '') + mm + ':' + String(sec).padStart(2, '0');
-  }
-
-  function minutesOf(entry) {
-    return Math.max(1, Math.round(((entry.end_ms || 0) - (entry.start_ms || 0)) / 60000));
-  }
-
-  function renderOne(entry) {
-    const state = entry.status || '';
-    // The translation sits under its own title, sharing the one timestamp: a chapter named
-    // twice is not two chapters.
-    const chapters = (entry.chapters || []).map(c =>
-      '<li><span class="ss-at">' + esc(fmtOffset(c.ts_ms, entry.start_ms)) + '</span>'
-      + '<span>' + esc(c.title)
-      + (c.title_translated
-          ? '<span class="ss-translated">' + esc(c.title_translated) + '</span>' : '')
-      + '</span></li>').join('');
-    // A run takes minutes, so "summarising" on its own is indistinguishable from stuck.
-    const running = state === 'running' || state === 'pending';
-    const body = state === 'error'
-      ? '<div class="ss-summary">' + esc(entry.error || 'Failed.') + '</div>'
-      : running
-        ? '<div class="ss-progress">' + esc(entry.progress || 'starting') + '</div>'
-        : '<div class="ss-summary">' + esc(entry.summary || '')
-          + (entry.summary_translated
-              ? '<div class="ss-translated">' + esc(entry.summary_translated) + '</div>' : '')
-          + '</div>';
-    return '<div class="ss-card">'
-      + '<div class="ss-head">'
-      +   '<span class="ss-label">' + esc(entry.label || 'Sermon') + '</span>'
-      +   '<span class="ss-state ' + esc(state) + '">' + esc(SS_STATE[state] || state) + '</span>'
-      +   '<span class="ss-meta">' + minutesOf(entry) + ' min'
-      +     (entry.model ? ' · ' + esc(entry.model) : '')
-      +     (entry.generated_at ? ' · ' + esc(entry.generated_at) : '') + '</span>'
-      +   '<span style="margin-left: auto; display: inline-flex; gap: 8px;">'
-      +     (state === 'done'
-              ? '<button type="button" onclick="copySummary(\'' + esc(entry.fingerprint) + '\')">Copy</button>' : '')
-      +     '<button type="button" onclick="regenerate(\'' + esc(entry.fingerprint) + '\')">Regenerate</button>'
-      +   '</span>' 
-      + '</div>'
-      + body
-      + (chapters ? '<ul class="ss-chapters">' + chapters + '</ul>' : '')
-      + (entry.transcript
-          ? '<details class="ss-transcript"><summary>Transcript ('
-            + entry.transcript.split(/\s+/).length + ' words)</summary>'
-            + '<div class="ss-transcript-body">' + esc(entry.transcript) + '</div></details>'
-          : '')
-      + '</div>';
-  }
-
-  // Kept so a Copy click can find the entry it belongs to without re-fetching.
-  let ssData = [];
-
-  function render(summaries) {
-    ssData = summaries || [];
-    const list = document.getElementById('ss-list');
-    if (!summaries.length) {
-      list.innerHTML = '<div class="ss-empty">No sermon has been summarised for this service.</div>';
-      return;
-    }
-    list.innerHTML = summaries.map(renderOne).join('');
-  }
-
-  function fmtDuration(minutes) {
-    const h = Math.floor((minutes || 0) / 60), m = (minutes || 0) % 60;
-    return (h ? h + 'h' : '') + m + 'm';
-  }
-
-  // Shares /api/service-phase/sessions with the phase page, so both list the same services
-  // in the same order. Every recorded service is offered, not only those already
-  // summarised — generating a summary for one that has none is the point of the page.
-  // Whether a service is running at all. Without one there is no live view to return to,
-  // and 'Back to live' has to say so rather than appearing to do nothing.
-  let ssHasLive = false;
-
-  // Safe to call repeatedly: the chosen service is preserved. Letting the selection fall
-  // back to the first option would move an operator off the service they were reading — and
-  // since Regenerate carries the selection, aim their next write somewhere else.
   async function loadSessions() {
     const select = document.getElementById('ss-session');
     const previous = select.value || '';
@@ -339,6 +245,7 @@
         return;
       }
       ssLive = !!data.live;
+      ssLang = data.target_language_name || data.target_language || '';
       renderSummaryState(!!data.enabled);
       // Which service the Regenerate buttons are about to write to. Silent ambiguity here
       // is the one mistake this page can make that the operator cannot see.
@@ -414,10 +321,11 @@
     }
   }
 
-  function copySummary(fingerprint) {
+  function copySummary(fingerprint, which) {
     const entry = (ssData || []).find(x => x.fingerprint === fingerprint);
     if (!entry) { showAlert('Nothing to copy.', 'error'); return; }
-    copyText(summaryAsText(entry, fmtOffset), entry.label);
+    const name = which === 'translated' ? (ssLang || 'translation') : 'original';
+    copyText(summaryAsText(entry, fmtOffset, which), entry.label + ' (' + name + ')');
   }
 
   async function regenerate(fingerprint) {

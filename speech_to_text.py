@@ -5794,6 +5794,7 @@ def get_sermon_summary():
         return err
 
     cfg = _sermon_summary_config()
+    target = ((config.get("live_translation", {}) or {}).get("target_language") or "").strip()
     try:
         with _archive_open_ro(db_path, is_live) as conn:
             summaries = _sermon_load_all(conn)
@@ -5805,6 +5806,10 @@ def get_sermon_summary():
         "session_id": os.path.basename(db_path),
         "live": is_live,
         "enabled": bool(cfg.get("enabled", False)),
+        # Named so the page can label the second column and its copy button with the
+        # language rather than "translated", which tells a media team nothing.
+        "target_language": target,
+        "target_language_name": TRANSLATION_LANGUAGES.get(target, target),
         "summaries": summaries,
     })
 
