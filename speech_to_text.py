@@ -5833,10 +5833,8 @@ def generate_sermon_summary():
     except Exception as e:
         return jsonify({"success": False, "error": f"{type(e).__name__}: {e}"}), 500
 
-    before = _sermon_queue.qsize()
-    _sermon_summary_scan(blocks, db_path, ignore_settle=True, is_live=is_live,
-                         corrections=corrections)
-    queued = max(0, _sermon_queue.qsize() - before)
+    queued = _sermon_summary_scan(blocks, db_path, ignore_settle=True, is_live=is_live,
+                                  corrections=corrections)
     cfg = _sermon_summary_config()
     return jsonify({
         "success": True, "live": is_live, "queued": queued,
@@ -16972,7 +16970,7 @@ def _sermon_summary_scan(blocks, db_path, ignore_settle=False, is_live=True,
     """
     cfg = _sermon_summary_config()
     if not cfg.get("enabled", False) and not ignore_settle:
-        return
+        return 0
     ready = _sermon_ready(
         _sermon_ranges(blocks, corrections,
                        min_minutes=coerce_int(cfg.get("min_minutes"), 8, lo=1, hi=240)),
@@ -16981,11 +16979,12 @@ def _sermon_summary_scan(blocks, db_path, ignore_settle=False, is_live=True,
         include_ongoing=ignore_settle,
         min_minutes=coerce_int(cfg.get("min_minutes"), 8, lo=1, hi=240))
     if not ready:
-        return
+        return 0
+    queued = 0
     try:
         conn = sqlite3.connect(db_path, timeout=5)
     except sqlite3.Error:
-        return
+        return 0
     try:
         _sermon_ensure_tables(conn)
         for block in ready:
@@ -17000,14 +16999,17 @@ def _sermon_summary_scan(blocks, db_path, ignore_settle=False, is_live=True,
                          status=_SERMON_PENDING,
                          transcript=_sermon_transcript_text(rows))
             _sermon_supersede(conn, label=block.get("label") or "Sermon",
-                              start_ms=block.get("start_ms") or 0, keep=fp)
+                              start_ms=block.get("start_ms") or 0,
+                              end_ms=block.get("end_ms") or 0, keep=fp)
             _sermon_queue.put((db_path, fp, is_live))
+            queued += 1
             print(f"[SERMON] queued {block.get('label')} "
                   f"({block.get('minutes')} min, {len(rows)} rows)", flush=True)
     except Exception as e:
         print(f"[SERMON] scan failed ({type(e).__name__}: {e})")
     finally:
         conn.close()
+    return queued
 
 
 def _sermon_emit(entry, session_id):

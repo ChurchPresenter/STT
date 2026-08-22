@@ -321,7 +321,8 @@ class TestDegradedInputs:
     def test_writes_survive_a_missing_table(self, tmp_path):
         c = sqlite3.connect(tmp_path / "old.db")
         assert delete_summary(c, "fp1") == 0
-        assert supersede(c, label="Sermon 1", start_ms=BASE, keep="fp1") == 0
+        assert supersede(c, label="Sermon 1", start_ms=BASE, end_ms=BASE + MIN,
+                         keep="fp1") == 0
         assert mark_error(c, "fp1", "boom") == 0
         c.close()
 
@@ -380,8 +381,26 @@ class TestPersistence:
                      end_ms=BASE + 10 * MIN, status=STATUS_DONE, summary="Half of it.")
         save_summary(conn, fingerprint="complete", label="Sermon 1", start_ms=BASE,
                      end_ms=BASE + 30 * MIN, status=STATUS_DONE, summary="All of it.")
-        assert supersede(conn, label="Sermon 1", start_ms=BASE, keep="complete") == 1
+        assert supersede(conn, label="Sermon 1", start_ms=BASE, end_ms=BASE + 30 * MIN,
+                         keep="complete") == 1
         assert [x["summary"] for x in load_summaries(conn)] == ["All of it."]
+
+    def test_a_corrected_boundary_supersedes_the_summary_it_replaced(self, conn):
+        """Measured on .62: correcting the start produced a second summary beside the first.
+
+        The old one describes a range the operator has said is wrong, so leaving it gives one
+        sermon two summaries that disagree and no way to tell which is current.
+        """
+        save_summary(conn, fingerprint="detector", label="Sermon 1", start_ms=BASE,
+                     end_ms=BASE + 9 * MIN, status=STATUS_DONE, summary="Nine minutes.")
+        # The operator moved the start two minutes earlier; the ranges overlap.
+        save_summary(conn, fingerprint="corrected", label="Sermon 1", start_ms=BASE - 2 * MIN,
+                     end_ms=BASE + 9 * MIN, status=STATUS_DONE, summary="Thirteen minutes.")
+        assert supersede(conn, label="Sermon 1", start_ms=BASE - 2 * MIN,
+                         end_ms=BASE + 9 * MIN, keep="corrected") == 1
+        assert [x["summary"] for x in load_summaries(conn)] == ["Thirteen minutes."]
+
+
 
     def test_mark_error_keeps_the_sermon_it_describes(self, conn):
         # The failure handler knows only the fingerprint; an upsert from its defaults
@@ -403,17 +422,20 @@ class TestPersistence:
                      end_ms=BASE + 30 * MIN, status=STATUS_DONE)
         save_summary(conn, fingerprint="two", label="Sermon 2", start_ms=BASE + 60 * MIN,
                      end_ms=BASE + 90 * MIN, status=STATUS_DONE)
-        assert supersede(conn, label="Sermon 2", start_ms=BASE + 60 * MIN, keep="two") == 0
+        assert supersede(conn, label="Sermon 2", start_ms=BASE + 60 * MIN,
+                         end_ms=BASE + 90 * MIN, keep="two") == 0
         assert len(load_summaries(conn)) == 2
 
-    def test_supersede_keeps_a_rerun_of_a_moved_block(self, conn):
-        # Same label, different start: the boundaries moved, so it is other material.
+    def test_supersede_replaces_a_moved_block_that_still_overlaps(self, conn):
+        # Same label, moved start: the same sermon seen differently, not other material.
         save_summary(conn, fingerprint="a", label="Sermon 1", start_ms=BASE,
                      end_ms=BASE + 30 * MIN, status=STATUS_DONE)
         save_summary(conn, fingerprint="b", label="Sermon 1", start_ms=BASE + 5 * MIN,
                      end_ms=BASE + 30 * MIN, status=STATUS_DONE)
-        assert supersede(conn, label="Sermon 1", start_ms=BASE + 5 * MIN, keep="b") == 0
-        assert len(load_summaries(conn)) == 2
+        # Overlapping ranges now supersede, which is the point of the change.
+        assert supersede(conn, label="Sermon 1", start_ms=BASE + 5 * MIN,
+                         end_ms=BASE + 30 * MIN, keep="b") == 1
+        assert len(load_summaries(conn)) == 1
 
     def test_has_summaries_is_the_archive_filter(self, conn):
         assert has_summaries(conn) is False

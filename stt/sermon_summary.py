@@ -687,22 +687,24 @@ def mark_error(conn: "sqlite3.Connection", fingerprint: str, error: str) -> int:
     return int(cur.rowcount or 0)
 
 
-def supersede(conn: "sqlite3.Connection", *, label: str, start_ms: int,
+def supersede(conn: "sqlite3.Connection", *, label: str, start_ms: int, end_ms: int,
               keep: str) -> int:
     """Drop earlier summaries of the same sermon, keeping fingerprint ``keep``.
 
-    A sermon summarised on request while it was still running, and then again once it
-    closed, produces two rows for one sermon — the first describing only as much of it as
-    had been preached. Same label and same start is the same sermon; the newer row is the
-    complete one. Returns rows removed.
+    Matched by *overlap*, not by an identical start. A summary the operator has superseded by
+    correcting the boundary describes a range that no longer exists, and leaving it beside
+    the new one gives the same sermon two summaries that disagree — the reader has no way to
+    tell which is the current one. Overlap is the test because that is what "the same
+    sermon" means once an operator can move the edges.
 
-    Keyed on the block's start rather than its end because a block's start is fixed when it
-    begins, while its end moves until the following block settles.
+    Same reason a partial summary made on request while the preaching was still going is
+    replaced by the complete one when the block closes.
     """
     try:
         cur = conn.execute(
-            "DELETE FROM sermon_summaries WHERE label = ? AND start_ms = ? AND fingerprint != ?",
-            (label, int(start_ms), keep))
+            "DELETE FROM sermon_summaries WHERE label = ? AND fingerprint != ? "
+            "AND start_ms < ? AND end_ms > ?",
+            (label, keep, int(end_ms), int(start_ms)))
     except sqlite3.Error:
         return 0
     conn.commit()
