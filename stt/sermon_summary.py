@@ -438,6 +438,58 @@ def explain_no_sermons(blocks: Sequence[dict], *, min_minutes: int = 8,
     return "every sermon in this service already has a summary"
 
 
+def sermon_ranges(blocks: Sequence[dict], corrections: Sequence[dict] = (), *,
+                  min_minutes: int = 8,
+                  label_prefix: str = SERMON_LABEL_PREFIX) -> List[dict]:
+    """The stretches to summarise, with the operator's corrections applied.
+
+    The detector decides where a sermon is from audio alone, and it is right about the
+    structure but only approximate about the edges — dwell means a block starts a minute or
+    two after the preaching does, and a boundary is back-dated when the next run begins. For
+    a caption timeline that is fine. For a summary it is not: the first minutes of the
+    introduction, or a stretch of the song before it, change what the model is reading.
+
+    So an operator who has corrected a phase on /service-phase is correcting what gets
+    summarised too. Two kinds of correction matter here and they compose:
+
+    * a correction against a block relabels it — which is how a stretch the detector called
+      "Speaking" becomes a sermon, and how one it wrongly called a sermon stops being one;
+    * a correction carrying its own ``start_ms``/``end_ms`` (the grouping control) states the
+      range outright, and replaces every detector block it overlaps.
+
+    Returned in the shape of blocks, so callers cannot tell the difference.
+    """
+    by_index = {c["block_index"]: c for c in corrections
+                if c.get("block_index") is not None}
+    spans = [c for c in corrections
+             if c.get("block_index") is None and c.get("start_ms") and c.get("end_ms")]
+
+    out: List[dict] = []
+    for i, block in enumerate(blocks):
+        fix = by_index.get(block.get("index", i))
+        label = (fix.get("label") if fix and fix.get("label") else block.get("label")) or ""
+        start, end = int(block.get("start_ms") or 0), int(block.get("end_ms") or 0)
+        # A span the operator drew wins over whatever the detector put under it.
+        if any(int(c["start_ms"]) < end and int(c["end_ms"]) > start for c in spans):
+            continue
+        out.append({**block, "label": label, "source": "correction" if fix else "detector"})
+
+    for c in spans:
+        label = c.get("label") or ""
+        start, end = int(c["start_ms"]), int(c["end_ms"])
+        out.append({
+            "index": None, "kind": c.get("kind") or "S", "label": label,
+            "start_ms": start, "end_ms": end,
+            "minutes": max(1, round((end - start) / 60000.0)),
+            "ongoing": False, "confidence": 1.0, "source": "correction",
+        })
+
+    out.sort(key=lambda b: int(b.get("start_ms") or 0))
+    return [b for b in out
+            if (b.get("label") or "").startswith(label_prefix)
+            and int(b.get("minutes") or 0) >= int(min_minutes)]
+
+
 def unfinished(blocks: Sequence[dict], stored: Sequence[dict], *,
                min_minutes: int = 8,
                label_prefix: str = SERMON_LABEL_PREFIX) -> List[dict]:

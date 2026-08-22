@@ -38,6 +38,7 @@ from stt.sermon_summary import (
     ready_sermons,
     render_markdown,
     save_summary,
+    sermon_ranges,
     set_progress,
     snap_chapters,
     supersede,
@@ -701,4 +702,88 @@ class TestSetProgress:
         assert set_progress(c, "old", "part 1 of 3") == 1
         assert load_summary(c, "old")["progress"] == "part 1 of 3"
         c.close()
+
+
+class TestSermonRanges:
+    """What an operator corrects is what gets summarised.
+
+    The detector finds the structure from audio and is right about it, but only approximate
+    about the edges — dwell starts a block a minute or two after the preaching does. For a
+    caption timeline that is fine; for a summary it decides whether the model reads the
+    introduction or the end of the song before it.
+    """
+
+    def block(self, **kw):
+        base = {"index": 0, "kind": "S", "label": "Sermon 1", "minutes": 30,
+                "start_ms": BASE, "end_ms": BASE + 30 * MIN, "ongoing": False}
+        base.update(kw)
+        return base
+
+    def test_with_no_corrections_it_is_the_detector(self):
+        got = sermon_ranges([self.block()], [])
+        assert len(got) == 1 and got[0]["start_ms"] == BASE
+        assert got[0]["source"] == "detector"
+
+    def test_a_relabel_makes_a_speaking_block_a_sermon(self):
+        # The detector calls a quiet preacher "Speaking"; the operator knows better.
+        blocks = [self.block(label="Speaking")]
+        assert sermon_ranges(blocks, []) == []
+        got = sermon_ranges(blocks, [{"block_index": 0, "label": "Sermon 1",
+                                      "start_ms": None, "end_ms": None}])
+        assert len(got) == 1 and got[0]["source"] == "correction"
+
+    def test_a_relabel_can_also_take_a_sermon_away(self):
+        got = sermon_ranges([self.block()], [{"block_index": 0, "label": "Songs 1",
+                                              "start_ms": None, "end_ms": None}])
+        assert got == []
+
+    def test_a_drawn_span_sets_the_range_outright(self):
+        # This is the fine-tuning: the operator moves the start and end, and the summary
+        # reads exactly that.
+        got = sermon_ranges([self.block()], [
+            {"block_index": None, "label": "Sermon 1", "kind": "S",
+             "start_ms": BASE + 2 * MIN, "end_ms": BASE + 26 * MIN}])
+        assert len(got) == 1
+        assert got[0]["start_ms"] == BASE + 2 * MIN
+        assert got[0]["end_ms"] == BASE + 26 * MIN
+        assert got[0]["source"] == "correction"
+
+    def test_a_drawn_span_replaces_the_block_underneath_it(self):
+        # Otherwise the same sermon is summarised twice, once per definition.
+        got = sermon_ranges([self.block()], [
+            {"block_index": None, "label": "Sermon 1", "kind": "S",
+             "start_ms": BASE + 2 * MIN, "end_ms": BASE + 26 * MIN}])
+        assert len(got) == 1
+
+    def test_a_span_elsewhere_leaves_other_blocks_alone(self):
+        later = self.block(index=1, label="Sermon 2", start_ms=BASE + 60 * MIN,
+                           end_ms=BASE + 90 * MIN)
+        got = sermon_ranges([self.block(), later], [
+            {"block_index": None, "label": "Sermon 3", "kind": "S",
+             "start_ms": BASE + 120 * MIN, "end_ms": BASE + 150 * MIN}])
+        assert [b["label"] for b in got] == ["Sermon 1", "Sermon 2", "Sermon 3"]
+
+    def test_results_come_back_in_service_order(self):
+        got = sermon_ranges([self.block()], [
+            {"block_index": None, "label": "Sermon 0", "kind": "S",
+             "start_ms": BASE - 40 * MIN, "end_ms": BASE - 10 * MIN}])
+        assert [b["start_ms"] for b in got] == sorted(b["start_ms"] for b in got)
+
+    def test_a_corrected_span_still_has_to_be_long_enough(self):
+        got = sermon_ranges([], [{"block_index": None, "label": "Sermon 1", "kind": "S",
+                                  "start_ms": BASE, "end_ms": BASE + 3 * MIN}],
+                            min_minutes=8)
+        assert got == []
+
+    def test_a_span_with_no_range_is_ignored(self):
+        # A relabel without a range is handled by block_index, not as a span.
+        got = sermon_ranges([self.block()], [{"block_index": None, "label": "Sermon 9",
+                                              "start_ms": None, "end_ms": None}])
+        assert [b["label"] for b in got] == ["Sermon 1"]
+
+    def test_the_shape_matches_a_block_so_callers_cannot_tell(self):
+        got = sermon_ranges([], [{"block_index": None, "label": "Sermon 1", "kind": "S",
+                                  "start_ms": BASE, "end_ms": BASE + 30 * MIN}])[0]
+        for key in ("label", "start_ms", "end_ms", "minutes", "ongoing", "kind"):
+            assert key in got
 

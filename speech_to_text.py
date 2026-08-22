@@ -990,6 +990,7 @@ from stt.sermon_summary import (
     progress_text as _sermon_progress_text,
     set_progress as _sermon_set_progress,
     read_sermon_rows as _sermon_read_rows,
+    sermon_ranges as _sermon_ranges,
     ready_sermons as _sermon_ready,
     save_summary as _sermon_save,
     supersede as _sermon_supersede,
@@ -5828,11 +5829,13 @@ def generate_sermon_summary():
     try:
         with _archive_open_ro(db_path, is_live) as conn:
             blocks = _service_phase_load(conn).get("blocks", [])
+            corrections = _service_phase_corrections(conn)
     except Exception as e:
         return jsonify({"success": False, "error": f"{type(e).__name__}: {e}"}), 500
 
     before = _sermon_queue.qsize()
-    _sermon_summary_scan(blocks, db_path, ignore_settle=True, is_live=is_live)
+    _sermon_summary_scan(blocks, db_path, ignore_settle=True, is_live=is_live,
+                         corrections=corrections)
     queued = max(0, _sermon_queue.qsize() - before)
     cfg = _sermon_summary_config()
     return jsonify({
@@ -16638,6 +16641,9 @@ def _service_phase_tick(is_running):
                 first_sunday=_service_phase_first_sunday(db_path),
                 rules=_service_phase_rules())
             _service_phase_save(conn, result)
+            # Read on the same connection: what the operator has corrected decides which
+            # stretches are sermons and where they begin, so the summariser must see it.
+            phase_corrections = _service_phase_corrections(conn)
         finally:
             conn.close()
     except Exception as e:
@@ -16657,7 +16663,7 @@ def _service_phase_tick(is_running):
     except Exception:
         pass  # a diagnostic broadcast must never break the emit loop
 
-    _sermon_summary_scan(result.get("blocks", []), db_path)
+    _sermon_summary_scan(result.get("blocks", []), db_path, corrections=phase_corrections)
 
 
 # --- Sermon summary -----------------------------------------------------------------
@@ -16952,7 +16958,8 @@ def _sermon_generate_waiting(system_prompt, user_text, max_tokens, llm_cfg,
     return None
 
 
-def _sermon_summary_scan(blocks, db_path, ignore_settle=False, is_live=True):
+def _sermon_summary_scan(blocks, db_path, ignore_settle=False, is_live=True,
+                         corrections=()):
     """Queue any sermon that has finished and settled and has no summary yet.
 
     Called from the phase tick, which already holds the freshly derived blocks. Identity is
@@ -16967,7 +16974,8 @@ def _sermon_summary_scan(blocks, db_path, ignore_settle=False, is_live=True):
     if not cfg.get("enabled", False) and not ignore_settle:
         return
     ready = _sermon_ready(
-        blocks,
+        _sermon_ranges(blocks, corrections,
+                       min_minutes=coerce_int(cfg.get("min_minutes"), 8, lo=1, hi=240)),
         now_ms=int(time.time() * 1000),
         settle_seconds=0 if ignore_settle else coerce_int(cfg.get("settle_seconds"), 180, lo=0, hi=3600),
         include_ongoing=ignore_settle,
@@ -17220,10 +17228,12 @@ def _sermon_begin_finalising(db_path):
     try:
         with _archive_open_ro(db_path, is_live=True) as conn:
             blocks = _service_phase_load(conn).get("blocks", [])
+            corrections = _service_phase_corrections(conn)
             stored = _sermon_load_all(conn)
+        min_minutes = coerce_int(cfg.get("min_minutes"), 8, lo=1, hi=240)
         owed = _sermon_unfinished(
-            blocks, stored,
-            min_minutes=coerce_int(cfg.get("min_minutes"), 8, lo=1, hi=240))
+            _sermon_ranges(blocks, corrections, min_minutes=min_minutes), stored,
+            min_minutes=min_minutes)
         if not owed:
             return False
         if _sermon_llm_unavailable((config.get("live_translation", {}) or {}).get("llm") or {}):
@@ -17248,7 +17258,7 @@ def _sermon_finalise_session(db_path, owed):
     full deadline.
     """
     try:
-        _sermon_summary_scan(owed, db_path, ignore_settle=True, is_live=True)
+        _sermon_summary_scan(owed, db_path, ignore_settle=True, is_live=True)  # already corrected
         while not _sermon_queue.empty() and sermon_finalising():
             socketio.sleep(2)
         # The queue empties when the last item is *taken*, not when it finishes.
