@@ -310,12 +310,26 @@ class TestOpenReadonly:
         path = self.delivered_copy(tmp_path, rows=4)
         assert self.header_is_wal(path), "setup no longer reproduces a delivered WAL session"
 
-    def test_a_delivered_wal_database_cannot_be_opened_readonly(self, tmp_path):
+    def test_a_naive_readonly_open_is_never_safe(self, tmp_path):
+        """Why open_readonly exists — stated as the invariant, not as one build's rule.
+
+        What `mode=ro` does with a WAL database whose -shm is absent depends on the
+        SQLite build: 3.51 raises, and 3.50 (the version the provisioned runtime and
+        CI both ship) opens it and writes -wal and -shm next to the file. Asserting
+        either one specifically pins someone else's implementation detail, which is
+        how this test came to fail on every CI platform while passing locally. What
+        holds everywhere is that the naive open is never *both* successful and clean.
+        """
         path = self.delivered_copy(tmp_path)
         assert self.header_is_wal(path)
-        with pytest.raises(sqlite3.Error):
+        try:
             ro = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
             ro.execute("SELECT count(*) FROM sqlite_master").fetchone()
+            ro.close()
+        except sqlite3.Error:
+            return  # refused outright — the strict builds
+        assert os.path.exists(str(path) + "-wal") or os.path.exists(str(path) + "-shm"), \
+            "a naive open that succeeds must at least have left the sidecars that prove why"
 
     def test_open_readonly_reads_it_anyway(self, tmp_path):
         path = self.delivered_copy(tmp_path, rows=4)
@@ -344,13 +358,20 @@ class TestOpenReadonly:
             with pytest.raises(sqlite3.OperationalError):
                 ro.execute("INSERT INTO transcriptions (text) VALUES ('nope')")
 
-    def test_recover_false_refuses_rather_than_retiring_someone_elses_wal(self, tmp_path):
-        # The live session's writer owns its WAL; retiring it from a reader is not ours.
+    def test_recover_false_never_retires_someone_elses_wal(self, tmp_path):
+        """The live session's writer owns its WAL; retiring it from a reader is not ours.
+
+        Whether the open is refused is again the SQLite build's call, so the promise
+        under test is the one this module makes: with recover=False the database is
+        never taken out of WAL mode, however the open turns out.
+        """
         path = self.delivered_copy(tmp_path)
         assert self.header_is_wal(path)
-        with pytest.raises(sqlite3.Error):
-            open_readonly(str(path), recover=False)
-        assert self.header_is_wal(path), "a refused open must not retire the database"
+        try:
+            open_readonly(str(path), recover=False).close()
+        except sqlite3.Error:
+            pass
+        assert self.header_is_wal(path), "recover=False must not retire the database"
 
     def test_a_missing_file_raises(self, tmp_path):
         with pytest.raises(sqlite3.Error):

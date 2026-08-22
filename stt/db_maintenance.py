@@ -58,15 +58,33 @@ def looks_like_sqlite(path: str) -> bool:
         return False
 
 
+def header_says_wal(path: str) -> bool:
+    """Whether the file header records WAL mode, without opening the database.
+
+    ``PRAGMA journal_mode`` would open it read-write and create the very ``-shm``
+    whose absence is the condition being tested — the probe would change what it
+    is probing. Byte 18 of the header is the write format version; 2 means WAL.
+    """
+    try:
+        with open(path, "rb") as handle:
+            header = handle.read(20)
+    except OSError:
+        return False
+    return len(header) >= 20 and header[18] == 2
+
+
 def open_readonly(db_path: str, recover: bool = True,
                   timeout: float = 5.0) -> "sqlite3.Connection":
     """A read-only connection, retiring an un-checkpointed WAL first if that is what blocks.
 
-    ``mode=ro`` cannot open a database still in WAL mode whose ``-shm`` is absent: SQLite
-    must create that shared-memory index to read the WAL, and a read-only connection may
-    not. That is precisely the shape a session left behind when the process died
-    mid-recording — the case this module exists for — so treating the failure as "skip this
-    database" would hide exactly the services most worth reading.
+    A database still in WAL mode whose ``-shm`` is absent is the shape a session leaves
+    behind when the process died mid-recording — the case this module exists for. What
+    ``mode=ro`` does with it depends on the SQLite build: some refuse it (SQLite must
+    create that shared-memory index to read the WAL, and a read-only connection may not),
+    and others open it and create ``-wal`` and ``-shm`` next to the file. Neither outcome
+    is acceptable — the first hides exactly the services most worth reading, the second
+    scatters sidecars beside a delivered database — so the WAL is retired up front and
+    the failure is still handled below.
 
     With ``recover`` the failure is instead treated as "this session was never retired":
     :func:`checkpoint_and_release` folds its WAL in, which is the same thing the end of a
@@ -88,6 +106,18 @@ def open_readonly(db_path: str, recover: bool = True,
             conn.close()
             raise
         return conn
+
+    # Retire a delivered session's WAL from the header, rather than waiting for
+    # the open to fail. Whether mode=ro *can* open a WAL database whose -shm is
+    # absent turns out to be a property of the SQLite build, not a rule: 3.51
+    # refuses, while 3.50 — what the provisioned runtime ships, and what CI runs —
+    # opens it happily and creates -wal and -shm beside the file, leaving behind
+    # exactly the sidecars this module exists to retire. Only a database with no
+    # sidecars at all is touched, so a live writer's WAL is still none of our
+    # business; that case falls through to the open below unchanged.
+    if (recover and looks_like_sqlite(db_path) and header_says_wal(db_path)
+            and not resolve_sidecars(db_path)):
+        checkpoint_and_release(db_path, timeout=timeout)
 
     try:
         return _open()
