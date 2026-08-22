@@ -97,13 +97,17 @@ def read_corrected_phases(conn: "sqlite3.Connection", session: str) -> List[Corr
 
     out: List[CorrectedPhase] = []
     for block_index, start_ms, end_ms, kind, label in corrections:
-        if block_index is not None and block_index in blocks:
+        # A stored span first. Looking the index up in service_phase_blocks reads that
+        # block's *current* times, and blocks renumber whenever the detector's output changes
+        # shape — so a drifted index would teach the learner a phase of the wrong length
+        # under the operator's name. The span is what the operator actually pointed at.
+        if start_ms and end_ms and end_ms > start_ms:
+            out.append(CorrectedPhase(session, label, kind or "", start_ms, end_ms,
+                                      max(1, round((end_ms - start_ms) / 60000.0))))
+        elif block_index is not None and block_index in blocks:
             _, bkind, bstart, bend, bminutes = blocks[block_index]
             out.append(CorrectedPhase(session, label, kind or bkind or "",
                                       bstart, bend, bminutes or 0))
-        elif start_ms and end_ms and end_ms > start_ms:
-            out.append(CorrectedPhase(session, label, kind or "", start_ms, end_ms,
-                                      max(1, round((end_ms - start_ms) / 60000.0))))
     return out
 
 

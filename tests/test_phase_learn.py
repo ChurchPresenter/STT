@@ -235,3 +235,55 @@ class TestApplying:
                               ["cue_fragments.communion_verse"])
         assert "cup" in out["cue_fragments"]["communion_verse"]
         assert len(out["cue_fragments"]["communion_verse"]) == 2
+
+
+class TestAnchoredCorrectionsBeatTheIndex:
+    """What the learner is taught when the blocks have moved under a correction.
+
+    read_corrected_phases used to look a block_index up in service_phase_blocks and take that
+    block's *current* times. Blocks renumber whenever the detector's output changes shape —
+    one real session went from five blocks to six when the audio tag started being read — so
+    a correction could hand the learner a phase of the wrong length under the operator's name,
+    and phase durations are exactly what it measures.
+    """
+
+    def db(self, tmp_path, correction, blocks):
+        path = tmp_path / "session.db"
+        c = sqlite3.connect(path)
+        c.execute("CREATE TABLE service_phase_corrections (id INTEGER PRIMARY KEY AUTOINCREMENT, "
+                  "block_index INTEGER, start_ms INTEGER, end_ms INTEGER, kind TEXT, "
+                  "label TEXT, note TEXT, corrected_at TEXT)")
+        c.execute("CREATE TABLE service_phase_blocks (block_index INTEGER PRIMARY KEY, kind TEXT, "
+                  "start_ms INTEGER, end_ms INTEGER, minutes INTEGER)")
+        c.execute("INSERT INTO service_phase_corrections (block_index, start_ms, end_ms, kind, "
+                  "label) VALUES (?, ?, ?, ?, ?)", correction)
+        c.executemany("INSERT INTO service_phase_blocks (block_index, kind, start_ms, end_ms, "
+                      "minutes) VALUES (?, ?, ?, ?, ?)", blocks)
+        c.commit()
+        return c
+
+    def test_a_drifted_index_does_not_change_the_length_learned(self, tmp_path):
+        # The correction named a 17-minute sermon. After the re-run, block 4 is 2 minutes of
+        # music; the anchor is what keeps the learner from being told the sermon was 2.
+        conn = self.db(
+            tmp_path,
+            correction=(4, 25 * 60000, 42 * 60000, "S", "Sermon 2"),
+            blocks=[(4, "M", 23 * 60000, 25 * 60000, 2)])
+        got = read_corrected_phases(conn, "s.db")
+        conn.close()
+        assert len(got) == 1
+        assert got[0].minutes == 17, "the learner took the drifted block's length"
+        assert got[0].start_ms == 25 * 60000
+
+    def test_a_legacy_correction_still_reads_its_block(self, tmp_path):
+        # No span recorded, so the block table is all there is — and remains correct when
+        # nothing has moved.
+        conn = self.db(
+            tmp_path,
+            correction=(1, None, None, None, "Sermon 1"),
+            blocks=[(1, "S", 3 * 60000, 14 * 60000, 11)])
+        got = read_corrected_phases(conn, "s.db")
+        conn.close()
+        assert len(got) == 1 and got[0].minutes == 11
+        assert got[0].kind == "S", "the kind came from the block it named"
+

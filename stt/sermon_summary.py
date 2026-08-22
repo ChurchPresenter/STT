@@ -35,6 +35,7 @@ import sqlite3
 from typing import Any, Callable, Dict, List, NamedTuple, Optional, Sequence, Tuple
 
 from stt.llm_translate import estimate_tokens
+from stt.service_phase import match_corrections
 
 TokenCounter = Callable[[str], int]
 
@@ -519,8 +520,10 @@ def sermon_ranges(blocks: Sequence[dict], corrections: Sequence[dict] = (), *,
 
     Returned in the shape of blocks, so callers cannot tell the difference.
     """
-    by_index = {c["block_index"]: c for c in corrections
-                if c.get("block_index") is not None}
+    # Matched by service_phase.match_corrections rather than by index here: a correction
+    # carrying its own span follows the phase it named across a re-run that renumbered the
+    # blocks, which is the whole reason the span is recorded.
+    by_index = match_corrections(blocks, corrections)
     # Newest wins where drawn spans overlap. A grouping correction is always an insert, so
     # an operator adjusting the same boundary twice leaves both on record — and taking both
     # would summarise one sermon twice, from two ranges they have already superseded. The
@@ -537,7 +540,7 @@ def sermon_ranges(blocks: Sequence[dict], corrections: Sequence[dict] = (), *,
 
     out: List[dict] = []
     for i, block in enumerate(blocks):
-        fix = by_index.get(block.get("index", i))
+        fix = by_index.get(i)
         label = (fix.get("label") if fix and fix.get("label") else block.get("label")) or ""
         start, end = int(block.get("start_ms") or 0), int(block.get("end_ms") or 0)
         # A span the operator drew wins over whatever the detector put under it.

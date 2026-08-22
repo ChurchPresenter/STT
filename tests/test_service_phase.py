@@ -29,6 +29,7 @@ from stt.service_phase import (
     label_blocks,
     load_analysis,
     load_corrections,
+    match_corrections,
     read_rows,
     save_analysis,
     save_correction,
@@ -951,4 +952,71 @@ class TestGroupCorrectionsSupersede:
         save_group_correction(conn, 0, 10 * MIN, kind="S", label="Sermon 1")
         save_group_correction(conn, 10 * MIN, 20 * MIN, kind="S", label="Sermon 1")
         assert len(self.rows(conn)) == 2
+
+
+class TestMatchCorrections:
+    """Which correction belongs to which block, once the blocks have moved.
+
+    A block_index is not a stable name for a phase. One real session went from five blocks to
+    six when the detector started reading the audio tag, and index 4 stopped meaning the
+    sermon an operator had named and started meaning the music after it.
+    """
+
+    def blocks(self, *spans):
+        return [{"index": i, "start_ms": a, "end_ms": b, "label": lbl, "kind": "S"}
+                for i, (a, b, lbl) in enumerate(spans)]
+
+    FIVE = ((0, 3 * MIN, "None"), (3 * MIN, 14 * MIN, "Sermon 1"), (14 * MIN, 23 * MIN, "None"),
+            (23 * MIN, 25 * MIN, "Music"), (25 * MIN, 42 * MIN, "Sermon 2"))
+    # The same service after the classifier improved: one quiet stretch resolved into two.
+    SIX = ((0, 3 * MIN, "None"), (3 * MIN, 14 * MIN, "Sermon 1"), (14 * MIN, 17 * MIN, "None"),
+           (17 * MIN, 23 * MIN, "Speaking"), (23 * MIN, 25 * MIN, "Music"),
+           (25 * MIN, 42 * MIN, "Sermon 2"))
+
+    def test_an_anchored_correction_follows_its_phase_across_a_reshape(self):
+        # The operator named block 4 of five; after the re-run that stretch is block 5.
+        c = {"block_index": 4, "label": "Closing", "start_ms": 25 * MIN, "end_ms": 42 * MIN}
+        got = match_corrections(self.blocks(*self.SIX), [c])
+        assert list(got) == [5], "the correction followed the number instead of the sermon"
+        assert got[5]["label"] == "Closing"
+
+    def test_without_the_anchor_it_would_have_landed_on_the_music(self):
+        # What the old behaviour did, kept as the reason the anchor exists.
+        c = {"block_index": 4, "label": "Closing", "start_ms": None, "end_ms": None}
+        got = match_corrections(self.blocks(*self.SIX), [c])
+        assert self.blocks(*self.SIX)[next(iter(got))]["label"] == "Music"
+
+    def test_a_legacy_correction_still_matches_by_index(self):
+        # Every row written before spans were recorded has only this.
+        c = {"block_index": 1, "label": "Sermon 1", "start_ms": None, "end_ms": None}
+        assert list(match_corrections(self.blocks(*self.FIVE), [c])) == [1]
+
+    def test_a_span_beats_a_stale_index(self):
+        c = {"block_index": 0, "label": "Sermon 2", "start_ms": 25 * MIN, "end_ms": 42 * MIN}
+        got = match_corrections(self.blocks(*self.SIX), [c])
+        assert list(got) == [5]
+
+    def test_it_picks_the_block_it_overlaps_most(self):
+        # A boundary that moved a minute must not hand the correction to the neighbour.
+        c = {"block_index": 1, "label": "Sermon 1", "start_ms": 2 * MIN, "end_ms": 13 * MIN}
+        got = match_corrections(self.blocks(*self.FIVE), [c])
+        assert list(got) == [1]
+
+    def test_grouped_spans_are_not_block_corrections(self):
+        c = {"block_index": None, "label": "Sermon 1", "start_ms": 0, "end_ms": 42 * MIN}
+        assert match_corrections(self.blocks(*self.FIVE), [c]) == {}
+
+    def test_an_index_past_the_end_is_dropped_rather_than_guessed(self):
+        c = {"block_index": 9, "label": "Closing", "start_ms": None, "end_ms": None}
+        assert match_corrections(self.blocks(*self.FIVE), [c]) == {}
+
+    def test_an_anchored_correction_is_not_displaced_by_a_legacy_one(self):
+        anchored = {"block_index": 0, "label": "Sermon 2", "start_ms": 25 * MIN, "end_ms": 42 * MIN}
+        legacy = {"block_index": 5, "label": "Something else", "start_ms": None, "end_ms": None}
+        got = match_corrections(self.blocks(*self.SIX), [anchored, legacy])
+        assert got[5]["label"] == "Sermon 2"
+
+    def test_a_correction_outside_every_block_is_dropped(self):
+        c = {"block_index": 1, "label": "Sermon 1", "start_ms": 200 * MIN, "end_ms": 210 * MIN}
+        assert match_corrections(self.blocks(*self.FIVE), [c]) == {}
 

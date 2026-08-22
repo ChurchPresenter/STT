@@ -719,6 +719,54 @@ def save_analysis(conn: "sqlite3.Connection", analysis: dict) -> Dict[str, int]:
     return written
 
 
+def match_corrections(blocks: Sequence[dict],
+                      corrections: Sequence[dict]) -> Dict[int, dict]:
+    """Which correction belongs to each block, keyed by position in ``blocks``.
+
+    One rule, in one place, because three callers used to answer this separately and only one
+    of them could be right.
+
+    A block_index is not a stable name for a phase. Blocks renumber whenever the detector's
+    output changes shape, and it changes shape for ordinary reasons — more audio arrives, a
+    threshold moves, the classifier improves. One real session went from five blocks to six
+    when the audio tag started being read, and from that moment index 4 meant the music rather
+    than the sermon an operator had named.
+
+    So a correction that carries its own span belongs to the block it overlaps most, which
+    survives a boundary shifting by a minute. Only a correction without one falls back to the
+    index, because for rows written before spans were recorded it is the only thing there is.
+    Time wins wherever both exist, since the index is the part that rots.
+    """
+    out: Dict[int, dict] = {}
+    spare = []
+    for c in corrections:
+        if c.get("block_index") is None:
+            continue          # a grouped span names a stretch, not a block
+        start, end = c.get("start_ms"), c.get("end_ms")
+        if start and end and int(end) > int(start):
+            best, best_overlap = None, 0
+            for i, b in enumerate(blocks):
+                overlap = min(int(end), int(b.get("end_ms") or 0)) - \
+                    max(int(start), int(b.get("start_ms") or 0))
+                if overlap > best_overlap:
+                    best, best_overlap = i, overlap
+            if best is not None:
+                out[best] = c
+            # A span that overlaps nothing is stale — the stretch it named is no longer in
+            # this timeline. Falling back to its index would re-introduce exactly the drift
+            # the span exists to prevent, so it is dropped instead of guessed at.
+            continue
+        spare.append(c)
+
+    # Index only for the ones with nothing better, and never over a block already claimed by
+    # a correction that knows its own times.
+    for c in spare:
+        i = int(c["block_index"])
+        if 0 <= i < len(blocks) and i not in out:
+            out[i] = c
+    return out
+
+
 def save_correction(conn: "sqlite3.Connection", block_index: Optional[int], *,
                     kind: Optional[str], label: Optional[str],
                     start_ms: Optional[int] = None, end_ms: Optional[int] = None,

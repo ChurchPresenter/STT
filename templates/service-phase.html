@@ -316,8 +316,23 @@
     return new Date(ms).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: true });
   }
 
+  // Mirrors service_phase.match_corrections: a correction carrying its own span belongs to
+  // the block it overlaps most, and only one without a span falls back to the index. The
+  // timeline has to name the same stretch the summariser will read.
   function correctionFor(idx) {
-    return spData.corrections.find(c => c.block_index === idx) || null;
+    const block = (spData.blocks || []).find(x => x.index === idx);
+    if (!block) return null;
+    let best = null, bestOverlap = 0;
+    (spData.corrections || []).forEach(c => {
+      if (c.block_index === null || c.block_index === undefined) return;
+      if (!c.start_ms || !c.end_ms) return;
+      const overlap = Math.min(c.end_ms, block.end_ms) - Math.max(c.start_ms, block.start_ms);
+      if (overlap > bestOverlap) { best = c; bestOverlap = overlap; }
+    });
+    if (best) return best;
+    // Legacy rows, written before the span was recorded, have only the index.
+    return (spData.corrections || []).find(
+      c => c.block_index === idx && !c.start_ms && !c.end_ms) || null;
   }
 
   // A correction outranks the detector, so the anchor moves when an operator names a
@@ -710,11 +725,16 @@
     // vocabulary cannot. Blank falls back to the selected label, which is the common case.
     const typed = (document.getElementById('sp-txt-' + index) || {}).value || '';
     const note = (document.getElementById('sp-note-' + index) || {}).value || '';
+    const b = (spData.blocks || []).find(x => x.index === index) || {};
     try {
       const resp = await fetch('/api/service-phase/correct', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
+        // The block's own span goes with the index. Blocks renumber whenever the detector
+        // changes shape, so the index alone would let this correction drift onto a
+        // neighbouring phase; the span is what keeps it on the stretch that was named.
         body: spBody({ block_index: index, kind: kind,
+                       start_ms: b.start_ms, end_ms: b.end_ms,
                        label: typed.trim() || sel.value, note: note.trim() })
       });
       const data = await resp.json();
