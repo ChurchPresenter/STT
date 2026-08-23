@@ -70,6 +70,13 @@ module = [
     "stt.session_reset",
     "stt.log_gate",
     "stt.optional_deps",
+    "stt.demo_mode",
+    "stt.demo_playback",
+    "stt.demo_api",
+    "stt.demo_redact",
+    "stt.demo_synth",
+    "stt.demo_scrub",
+    "stt.demo_guard",
 ]
 disallow_untyped_defs = true
 

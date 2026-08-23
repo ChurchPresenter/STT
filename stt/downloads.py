@@ -252,6 +252,15 @@ def download_url_to_file(url: str, dest_path: str, cancel_check: Optional[Callab
     (e.g. minimal Windows installs). `cancel_check` is polled during the
     download; returning True aborts it. Returns "ok" or "cancelled"; raises
     after all attempts fail."""
+    # Every download in the application funnels through here, so this is the one
+    # place that has to know a demo fetches nothing. Checked by env rather than by
+    # a parameter because the alternative is threading a flag through a dozen
+    # unrelated call sites, and a door that is only sometimes shut is not shut.
+    from stt import demo_mode
+    if demo_mode.enabled():
+        from stt import demo_guard
+        raise RuntimeError(demo_guard.blocked_message("downloads"))
+
     import subprocess
     import tempfile as _tempfile
     import time as _time

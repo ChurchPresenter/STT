@@ -14,12 +14,30 @@ from typing import ClassVar
 _data_override = os.environ.get("STT_DATA_DIR")
 _script_dir = os.path.dirname(os.path.abspath(__file__))
 _is_frozen = getattr(sys, "frozen", False)
+# BUNDLE_DIR follows the freeze, not the data override: a frozen build's templates,
+# static assets and config templates only exist under _MEIPASS, so resolving them
+# next to this file would leave a frozen server with no pages to render. The two
+# settings are independent — the watchdog sets STT_DATA_DIR but runs the app
+# unfrozen from a checkout, and the demo build is frozen with its own data dir.
+BUNDLE_DIR = sys._MEIPASS if _is_frozen else _script_dir
 if _data_override:
-    APP_DIR    = os.path.abspath(os.path.expanduser(_data_override))
-    BUNDLE_DIR = _script_dir
+    APP_DIR = os.path.abspath(os.path.expanduser(_data_override))
 else:
-    APP_DIR    = os.path.join(os.path.expanduser("~"), ".stt")
-    BUNDLE_DIR = sys._MEIPASS if _is_frozen else _script_dir
+    APP_DIR = os.path.join(os.path.expanduser("~"), ".stt")
+
+# A demo replays a recorded service instead of transcribing one: no worker process,
+# no models, no microphone. Its data root is chosen (and wiped) before anything is
+# created, so a demo can never write into a real install. See stt/demo_mode.py.
+from stt import demo_guard as _demo_guard  # noqa: E402
+from stt import demo_mode as _demo_mode  # noqa: E402
+
+DEMO = _demo_mode.enabled()
+DEMO_PORT = 0
+if DEMO:
+    _demo_install_id = _demo_mode.read_install_id()  # before the wipe takes it
+    APP_DIR = _demo_mode.prepare_data_dir(BUNDLE_DIR)
+    DEMO_PORT = _demo_mode.pick_port()
+    _demo_mode.write_config(APP_DIR, BUNDLE_DIR, DEMO_PORT, install_id=_demo_install_id)
 
 os.makedirs(APP_DIR, exist_ok=True)
 
@@ -232,8 +250,19 @@ import inspect
 
 from flask import Flask, render_template, jsonify, request, redirect, send_from_directory, make_response, g, Response, stream_with_context
 from flask_socketio import SocketIO, emit
-import speech_recognition as sr
-import numpy as np
+# Both are used only by the transcription worker (capture buffer, PANNs, the audio
+# loop) and by local TTS — never by the web layer or the demo's playback. Guarding
+# them lets the demo build leave numpy out of the bundle entirely (~35MB). A real
+# install that is missing them fails at the top of thread1_function with a clear
+# message rather than silently here.
+try:
+    import speech_recognition as sr
+except ImportError:  # pragma: no cover - present in every real install
+    sr = None
+try:
+    import numpy as np
+except ImportError:  # pragma: no cover - present in every real install
+    np = None
 
 # Heavy ML imports will be loaded lazily when needed
 torch = None
@@ -635,8 +664,14 @@ def _init_sentry():
             profile_lifecycle=cr.get("sentry_profile_lifecycle", "trace"),
         )
         sentry_sdk.set_tag("process", "server")
+        # A crash in the demo is a packaging bug on a machine we will never see, which
+        # is the whole reason to report it — but it must never be counted against the
+        # real application. Tagged rather than filtered client-side so the demo's
+        # crashes stay searchable on their own.
+        sentry_sdk.set_tag("demo", "yes" if DEMO else "no")
         _prof = "profiling" if cr.get("sentry_profiling_enabled", False) else "no profiling"
-        print(f"[SENTRY] Error reporting enabled (logs + traces + {_prof})")
+        print(f"[SENTRY] Error reporting enabled (logs + traces + {_prof})"
+              + (" [demo]" if DEMO else ""))
     except ImportError:
         print("[SENTRY] sentry-sdk is not installed — rerun the installer or: uv pip install 'sentry-sdk[flask]'")
     except Exception as e:
@@ -2093,6 +2128,10 @@ def _tts_settings():
 
 def get_edge_tts_voices():
     """Get cached list of edge-tts voices. Returns list of dicts with Name, ShortName, Gender, Locale."""
+    if DEMO:
+        # A live call to Microsoft, reached on a language switch even when TTS is off.
+        # The demo answers /api/tts/voices from recorded fixtures instead.
+        return []
     global _edge_tts_voices
     with _edge_tts_voices_lock:
         if _edge_tts_voices is not None:
@@ -3444,7 +3483,7 @@ class WhisperLiveTranscriber:
 #
 # Must happen before the Manager and Queues below: they inherit the active context,
 # and mixing contexts is unsupported.
-if multiprocessing.current_process().name == "MainProcess":
+if not DEMO and multiprocessing.current_process().name == "MainProcess":
     try:
         if multiprocessing.get_start_method(allow_none=True) != "spawn":
             multiprocessing.set_start_method("spawn", force=True)
@@ -3460,7 +3499,17 @@ if multiprocessing.current_process().name == "MainProcess":
 # With spawn (macOS), the child re-imports this module and must NOT recreate the Manager
 # (it would fail before bootstrap completes). Instead, the child receives these objects
 # as pickled arguments to thread1_function and assigns them to module globals there.
-if multiprocessing.current_process().name == 'MainProcess':
+#
+# A demo has no worker process — playback and the web server are threads in one
+# process — so it uses plain dicts and queues instead. That keeps a spawned Manager
+# child out of the frozen bundle (the part of multiprocessing least happy under
+# PyInstaller) while leaving every transcription_state[...] call site unchanged.
+if DEMO:
+    mp_manager = _demo_mode.LocalManager()
+    config_queue = _demo_mode.local_queue()
+    control_queue = _demo_mode.local_queue()
+    audio_stream_queue = _demo_mode.local_queue(maxsize=10)
+elif multiprocessing.current_process().name == 'MainProcess':
     mp_manager = multiprocessing.Manager()
 
     # Create multiprocessing Queue for config updates (hot-reload)
@@ -3471,7 +3520,15 @@ if multiprocessing.current_process().name == 'MainProcess':
 
     # Create multiprocessing Queue for streaming audio to web clients
     audio_stream_queue = MPQueue(maxsize=10)
+else:
+    # Spawned worker process: shared objects will be received as function arguments
+    # and assigned to these globals at the top of thread1_function.
+    mp_manager = None
+    config_queue = None
+    control_queue = None
+    audio_stream_queue = None
 
+if mp_manager is not None:
     # Global transcription state - use Manager.dict() for cross-process sharing
     transcription_state = mp_manager.dict(
         {
@@ -3538,11 +3595,6 @@ if multiprocessing.current_process().name == 'MainProcess':
         }
     )
 else:
-    # Spawned worker process: shared objects will be received as function arguments
-    # and assigned to these globals at the top of thread1_function.
-    mp_manager = None
-    config_queue = None
-    control_queue = None
     transcription_state = None
     calibration_state = None
     calibration_data_shared = None
@@ -4699,7 +4751,9 @@ def _send_livemap_ping(event, **fields):
             # Cached after the first probe; on a CPU-only box this is blank, which is
             # itself the answer to half the "why is it slow" questions.
             gpu=_livemap.gpu_label(_probe_hardware().get("gpu_name") or ""),
-            src="dev" if SERVER_IS_DEV else "",
+            # A trial is not an install. The collector filters on this, so a demo
+            # that failed to say so would be counted as a church running the app.
+            src="demo" if DEMO else ("dev" if SERVER_IS_DEV else ""),
             **_livemap.install_fields_from_config(config, remote_model=_remote_model,
                                                   remote_method=_remote_method),
             **fields)
@@ -5067,6 +5121,12 @@ def _request_origin():
 
 def check_ip_whitelist():
     """Check if the client IP is in the whitelist or has a valid password session"""
+    # A demo binds to loopback and holds no real data — every page is meant to be
+    # walked through. Granting here also covers Socket.IO, which authorises through
+    # this same function.
+    if DEMO:
+        return True
+
     import ipaddress
 
     # First check if password authentication is enabled
@@ -5184,6 +5244,34 @@ def _access_log_start_timer():
         g._access_log_t0 = time.perf_counter()
     except Exception:
         pass
+
+
+if DEMO:
+    from stt import demo_api as _demo_api
+
+    _demo_api_state = _demo_api.State()
+
+    def _demo_player_ref():
+        return globals().get("_demo_player")
+
+    # Registered after the access-log timer so a demo request is still logged, and
+    # before dispatch so the production view is never entered: several of those views
+    # import huggingface_hub or shell out to uv/git, neither of which exists in a demo
+    # build. See stt/demo_api.py for what is answered and what is passed through.
+    @app.before_request
+    def _demo_api_intercept():
+        try:
+            canned = _demo_api.intercept(
+                request.method, request.path, request.args.to_dict(),
+                request.get_json(silent=True) or {},
+                _demo_api_state, player=_demo_player_ref())
+        except Exception as exc:  # pragma: no cover - a demo must not 500
+            print(f"[DEMO] intercept failed for {request.path}: {exc}")
+            return None
+        if canned is None:
+            return None
+        payload, status = canned
+        return jsonify(payload), status
 
 
 def _note_access_detail(detail):
@@ -8110,6 +8198,11 @@ def _peer_request(method, endpoint, path, self_heal=True, **kwargs):
     ``self_heal=False`` for the pairing handshake itself, which runs before any
     token exists and must not recurse into claiming one.
     """
+    if DEMO:
+        # Every call to a paired machine passes through here, including the whole
+        # /api/remote-translation proxy family. A demo has no peer, and must not be
+        # usable as a client against a host somebody else names.
+        raise RuntimeError(_demo_guard.blocked_message("a paired translation server"))
     url = endpoint.rstrip("/") + path
     caller_headers = dict(kwargs.pop("headers", None) or {})
     session = _get_remote_http_session()
@@ -9574,6 +9667,8 @@ class _RemoteTranslateError(Exception):
 
 def _probe_remote_port(base_url):
     """Try common ports to find which one the STT app is listening on."""
+    if DEMO:
+        return None  # five requests to a caller-supplied host is a port scan
     from urllib.parse import urlparse
     import requests as _req
     parsed = urlparse(base_url)
@@ -18096,6 +18191,10 @@ def _translate_via_llm(text, source_lang, target_lang, timeout_override=None,
     server: Ollama (``/api/chat``), llama-server, LM Studio, vLLM or a hosted API
     (``/v1/chat/completions``). Nothing here is Ollama-specific.
     """
+    if DEMO:
+        # An arbitrary URL, sent caption text and an Authorization header. None is the
+        # documented "fall back to the NMT path" answer, so callers already handle it.
+        return None
     llm_cfg = llm_cfg_override if llm_cfg_override is not None else (
         config.get("live_translation", {}).get("llm") or {})
     is_local = (llm_cfg.get("provider") or "endpoint").strip().lower() == "local"
@@ -18549,7 +18648,11 @@ def emit_translated_entries():
             _allowed_fresh = set()
             _backlogged = False
             _pending_fresh = []
-            if not _whisper_translation_active:
+            # A demo displays the translations the recording was captioned with and
+            # never produces new ones: it has no model, and the alternatives are an
+            # LLM endpoint or a paired machine. Left to the loop below, an operator's
+            # drop-in session with any untranslated row would try all three.
+            if not _whisper_translation_active and not DEMO:
                 for _e in entries:
                     if _e[10]:
                         continue
@@ -18825,7 +18928,8 @@ def emit_translated_entries():
             # gets translated first would otherwise slip past a check on the
             # translated string. Also covers the music-detected gate.
             if not _live_preview_suppressed(in_progress):
-                should_translate_ip = trans_config.get("translate_in_progress", False) and not _whisper_translation_active
+                should_translate_ip = (trans_config.get("translate_in_progress", False)
+                                       and not _whisper_translation_active and not DEMO)
                 if should_translate_ip:
                     translated_in_progress = translate_live_text(in_progress, source_lang, target_lang)
                 else:
@@ -18921,6 +19025,9 @@ def _run_translation_backfill(entries, source_lang, target_lang, dbg=False):
         if _translation_backfill_session["id"] != _session:
             _translation_backfill_session["id"] = _session
             _translation_backfill.reset()
+
+        if DEMO:
+            return  # this routine's whole job is to find untranslated rows and translate them
 
         visible_ids = [e[0] for e in entries]
         if not visible_ids:
@@ -19500,6 +19607,15 @@ def _kill_stray_ffmpeg(source, pid=None):
 
 def thread1_function(ts, cq, cfq, cal_state, cal_data, cal_step1, asq):
     """Main transcription process with start/stop support"""
+    # numpy and SpeechRecognition are imported defensively at module scope so the
+    # demo build can omit them. Everything below needs both, so say so here rather
+    # than failing with a NameError somewhere inside the audio loop.
+    _missing = [name for name, mod in (("numpy", np), ("SpeechRecognition", sr)) if mod is None]
+    if _missing:
+        raise RuntimeError(
+            f"Transcription requires {' and '.join(_missing)}, which is not installed. "
+            "Reinstall the dependencies with install.sh (or 'uv pip install -r requirements.txt')."
+        )
     install_crash_diagnostics("worker")
     try:
         import sentry_sdk
@@ -22274,7 +22390,10 @@ if __name__ == "__main__":
     # machine, before spawning the worker/threads or doing any startup work.
     # This makes "only one server at a time" hold regardless of launcher
     # (watchdog child, bare service, dev run, or a post-install race).
-    acquire_server_lock()
+    # Not for a demo: a second copy should take the next free port rather than
+    # refuse to start, and it shares no state with the first.
+    if not DEMO:
+        acquire_server_lock()
     # Bound server.log at startup (small breadcrumb log; rotated across launches)
     try:
         _srv_log = os.path.join(APP_DIR, "server.log")
@@ -22303,6 +22422,48 @@ if __name__ == "__main__":
                 pass  # stdin closed/unreadable: channel unavailable, signals still apply
         threading.Thread(target=_stdin_shutdown_watcher, daemon=True,
                          name="watchdog-shutdown").start()
+
+    # A demo stops here: no worker process, and none of the startup work below is
+    # wanted (git self-update, uv dependency provisioning, a live-map beacon). The
+    # web server runs in this process with the playback engine beside it.
+    if DEMO:
+        from stt import demo_playback as _demo_playback
+
+        _demo_source = _demo_mode.discover_session(
+            BUNDLE_DIR, _demo_mode.executable_dir(), APP_DIR,
+            explicit=os.environ.get("STT_DEMO_DB") or None)
+        if not _demo_source:
+            print("[DEMO] No recorded service found. Drop a session .db into "
+                  f"{os.path.join(APP_DIR, _demo_mode.SESSIONS_DIR_NAME)} and start again.")
+            sys.exit(1)
+        print(f"[DEMO] Replaying {_demo_source}")
+
+        # The player stands in for the transcription worker: it consumes the same
+        # control queue and publishes the same shared state, so Start and Stop in
+        # the UI drive it through the unmodified routes. Handing it to
+        # transcription_process is what stops start_transcription from deciding the
+        # worker is dead and spawning a real one.
+        _demo_player = _demo_playback.Player(
+            _demo_playback.PlaybackConfig(source_db=_demo_source, session_dir=BACKUP_DIR),
+            state=transcription_state, control_queue=control_queue)
+        _demo_player.start()
+        transcription_process = _demo_player
+        globals()["thread1"] = _demo_player
+        # The recording holds real output from the real translation engine, so
+        # /api/translate can answer with it instead of inventing anything.
+        _demo_api_state.translations = _demo_playback.translation_pairs(_demo_source)
+
+        thread2 = threading.Thread(target=thread2_function, name="web")
+        thread2.start()
+        globals()["thread2"] = thread2
+        print(_demo_mode.startup_banner(DEMO_PORT, _demo_mode.lan_address()), flush=True)
+        _demo_mode.open_browser_later(DEMO_PORT)
+        try:
+            while thread2.is_alive():
+                thread2.join(timeout=1.0)
+        except KeyboardInterrupt:
+            print("\nDemo interrupted, shutting down...")
+        sys.exit(0)
 
     # Direct-run auto-update: fast-forward the checkout before anything spins up.
     # No-op (and no restart) under the watchdog, when disabled, or when there's

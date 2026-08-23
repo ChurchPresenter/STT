@@ -12,13 +12,57 @@ The project venv (`.venv/`, Python 3.9) is uv-managed and has no pip — use `uv
 
 ```bash
 .venv/bin/python3 speech_to_text.py      # Run the server (port 80) — ./start_server.sh / .bat wrappers exist
+STT_DEMO=1 .venv/bin/python3 speech_to_text.py   # Run as the demo (see Demo build)
 .venv/bin/python3 -m pytest              # Run tests (testpaths = tests/, config in pyproject.toml)
 .venv/bin/python3 -m ruff check .        # Lint (line-length 200, target py39)
 ./install.sh                             # Install runtime deps (install.bat / install.ps1 on Windows)
 uv pip install -r requirements-dev.txt   # Dev/test deps (pytest, ruff)
 ```
 
-Ruff is configured with hard-error rules only (E9, F63, F7, F82, F811) and excludes `.venv`, `_AUTOMATIC_BACKUP`, `models`, `installer`.
+Ruff selects the hard-error rules (E9, F63, F7, F82, F811) plus `B` and `RUF`, and excludes `.venv`, `_AUTOMATIC_BACKUP`, `models`, `installer`.
+
+### Demo build
+
+A self-contained demo ships as one executable per OS (~29MB, ~15MB zipped) that runs
+with no Python, no models and no ML libraries. It replays a recorded service into the
+real UI, so Start/Stop and every page behave exactly as in production.
+
+```bash
+python scripts/make_demo_session.py --synthetic -o build/demo.db  # a written service
+python packaging/build.py --demo --synthetic                      # build the artifact
+STT_DEMO=1 STT_DEMO_DB=<session.db> .venv/bin/python3 speech_to_text.py   # run from source
+```
+
+`stt/demo_playback.py` replaces the transcription worker: it opens a real session
+database and copies the recording's rows into it at their original pace, so the whole
+read path (`get_new_entries`, the phase detector, corrections, the file manager) works
+unmodified. `stt/demo_api.py` answers the model/TTS/translation routes from
+`stt/demo_fixtures.py` — recorded from a real server by `scripts/record_demo_fixtures.py`
+and scrubbed through `stt/demo_redact.py`. Those families are **deny-by-default**, so a
+route added under `/api/models/` later fails closed rather than reaching an ML import.
+
+The demo reports two things and nothing else: that it ran (a live-map ping carrying
+`src=demo`) and that it crashed (a Sentry event tagged `demo`). Both are tagged at the
+source so the collector counts a trial as a trial — `stt/worker/index.ts` in the website
+repo keeps `demo` out of every install figure, and the anonymous id is carried across
+the per-launch data wipe so one person opening the demo twice is not two trials.
+
+Everything else it could send is shut off. The demo binds the network with no password,
+so it must not be usable as somebody else's network client. `stt/demo_guard.py` holds
+`CHOKE_POINTS` — the few monolith
+functions every outbound request passes through — and `audit_choke_points` parses
+`speech_to_text.py` to assert each still opens with an `if DEMO:` guard, the way
+`stt/peer_auth_audit.py` enforces its own one-door rule. **A new way to reach the
+network must be added to `CHOKE_POINTS`.** Routes whose risk is `subprocess` rather than
+egress (`/api/tunnel/`, `/api/file-mover/`, `/api/remote-translation/`) are refused by
+`demo_api.BLOCKED_PREFIXES` instead, since no network guard would catch them.
+
+Demo mode is `STT_DEMO=1`, set in the shipped artifact by `packaging/demo_rthook.py`. It
+redirects all data to `~/.stt-demo` (wiped each launch), so a demo can never write into a
+real install. The build refuses to run without `STT_DEMO_DB`: a session database is
+congregation speech until someone decides otherwise. Prefer `stt/demo_synth.py` for
+anything published; `stt/demo_scrub.py` exists for a real recording, reduces risk, and
+does not certify — read the `.review.txt` it writes.
 
 ## Architecture
 
@@ -32,8 +76,10 @@ The server is mostly a monolith — most changes land in `speech_to_text.py`.
 | `stt/file_mover.py` | SMB/NAS remote file delivery |
 | `templates/` | Jinja2 pages: index, live-settings, model-manager, server-settings, translation, corrections, file-manager, word-highlighting, url-builder |
 | `static/` | Vendored JS/CSS — no build step, no npm |
+| `stt/demo_*.py` | The shippable demo: playback engine, fake backends, egress guards, redaction, synthetic service generator |
+| `scripts/` | Dev-only tools: fixture recorder, demo session builder |
 | `tests/` | Pytest suite: download state, path safety, staging, text utils, watchdog update |
-| `packaging/` | Watchdog binary build tooling (build.py, make_icon.py, watchdog.spec) — NOT `build/`, which PyInstaller uses as its workdir |
+| `packaging/` | Binary build tooling (build.py, make_icon.py, watchdog.spec, demo.spec) — NOT `build/`, which PyInstaller uses as its workdir |
 | `deploy/` | OS service templates: stt-watchdog.service (systemd), com.stt.watchdog.plist (launchd) |
 
 ## Configuration

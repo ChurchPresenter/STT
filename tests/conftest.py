@@ -40,6 +40,12 @@ def extract_definitions(source_file, names, extra_globals=None):
         "time": time,
         "threading": threading,
         "print": print,
+        # The monolith's demo switch. Extracted functions see the real module's
+        # globals only as far as this stub provides them, and several now open with
+        # an `if DEMO:` guard (see stt/demo_guard.CHOKE_POINTS). Default False so a
+        # test exercises the production path; pass extra_globals={"DEMO": True} to
+        # pin the demo behaviour instead.
+        "DEMO": False,
     }
     if extra_globals:
         ns.update(extra_globals)

@@ -73,3 +73,5 @@ tests/fixtures/real_captions.json
 tests/fixtures/sessions/
 replay-runs/
 *.replay.json
+# Scrub review files name the captions they changed.
+*.review.txt
