@@ -65,7 +65,7 @@ source venv/bin/activate
 
 ### 3. Install Python Dependencies
 
-#### macOS (Apple Silicon or Intel) / CPU-only Linux:
+#### macOS (Apple Silicon) / CPU-only Linux:
 ```bash
 pip install -r requirements.txt
 ```
@@ -222,7 +222,7 @@ Alternatively, run `start_watchdog.bat` or `start_watchdog.ps1` from the Startup
 ## System Requirements
 
 ### Transcription only (minimum)
-- **OS:** Debian 12, Ubuntu 22.04+, or similar Linux; Windows 10+; macOS 12+ (Intel & Apple Silicon)
+- **OS:** Debian 12, Ubuntu 22.04+, or similar Linux; Windows 10+; macOS 12+ (Apple Silicon only — see [Intel Macs](#intel-macs))
 - **CPU:** 6 cores
 - **RAM:** 12 GB
 - **Storage:** 15 GB free space
@@ -248,6 +248,27 @@ Actual requirements depend on which models you configure. A few representative s
 | Apple Silicon | `small` (CPU int8) | NLLB-600M on MPS | ~10 GB unified memory | M1 or later with 16 GB |
 
 Estimates include a ~4 GB app/OS baseline. The faster-whisper backend (int8) needs roughly half the memory of openai-whisper (fp32); Apple Silicon shares one memory pool between CPU and GPU. Larger NLLB models raise requirements substantially (3.3B ≈ 15 GB RAM on CPU or 8 GB VRAM on GPU), while offloading translation to a remote machine (Live Translation → Remote) keeps the local footprint at transcription-only. The web UI shows a warning banner whenever the machine falls short of what the currently configured models need.
+
+### Intel Macs
+
+Not supported. PyTorch published its last macOS x86_64 wheels with 2.2.2, so the pinned
+`torch` in `requirements.txt` can never resolve on an Intel Mac — `install.sh` and the
+watchdog's setup both refuse one up front rather than failing partway through.
+
+**26.2.233 was the last release with an Intel macOS package.** An install that is already
+running on an Intel Mac keeps working at the version it has: its updater detects the
+permanent condition and pauses updating ("Updates paused: This Mac has an Intel
+processor…" in the control window and `~/.stt/logs/watchdog.log`) instead of stopping the
+server for an install that cannot succeed. No newer version will install there — move the
+install to an Apple Silicon Mac (M1 or newer), or to a Windows or Linux PC.
+
+A separate Intel dependency set is possible and was declined, not overlooked: holding
+`torch`/`torchaudio` at 2.2.2 and `transformers` below 5 (4.57.6 declares `torch>=2.2`;
+5.x wants `torch>=2.5`) does resolve on `x86_64-apple-darwin`, and GitHub still offers
+Intel macOS runners. The cost is what rules it out — a second `transformers` major to keep
+the app working on, a second signed and notarized package every release, and an extra
+build leg on a runner fleet Apple is winding down. Reopen it if enough Intel installs turn
+up to outweigh that.
 
 ### Acceleration (optional, recommended)
 - **NVIDIA minimum:** GPU with 4GB+ VRAM (RTX 2060 / RTX 3050) — enough for transcription with small/medium models
