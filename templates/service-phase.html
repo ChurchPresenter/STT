@@ -648,11 +648,15 @@
       : null;
   }
 
-  function selectPhase(start_ms, end_ms, label, kind) {
+  // ``scroll`` is what the operator asked for: clicking a phase in the timeline means "show
+  // me that", and the pane goes there. Opening the page on the running service means the
+  // opposite — the words being spoken now — so the automatic selection does not drag the
+  // view back to where the sermon started.
+  function selectPhase(start_ms, end_ms, label, kind, scroll) {
     spSel = { start_ms: start_ms, end_ms: end_ms, label: label || '', kind: kind || 'S' };
     renderBlocks();
     renderStrip();
-    loadCaptions(true);
+    loadCaptions(scroll !== false);
   }
 
   // The whole service, not one phase. The pane shows every phase and colours the lines by
@@ -1201,7 +1205,9 @@
       // old boundaries while the timeline beside it showed the new ones.
       if (!spSel) {
         const pick = sermonToOpen();
-        if (pick) selectPhase(pick.start_ms, pick.end_ms, pick.label, pick.kind);
+        // The live service opens at the live edge and keeps following it; a finished one
+        // has no edge to follow, so it opens on the sermon, which is what it is reviewed for.
+        if (pick) selectPhase(pick.start_ms, pick.end_ms, pick.label, pick.kind, !!spSession);
         else loadCaptions(false);   // no phases yet: the words are still worth showing
       } else {
         // The whole-service read on the slow tick. The fast poll only ever appends, so a
