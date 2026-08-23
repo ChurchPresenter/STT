@@ -6081,7 +6081,7 @@ def delete_service_phase_correction():
 
 @app.route("/api/service-phase/mark", methods=["POST"])
 def mark_service_phase():
-    """Record the moment the operator says a phase begins — or ends.
+    """Record the moment the operator says a phase begins — or ends, or began earlier.
 
     The row is a correction with a start and no end, which is what makes it a mark: every
     consumer written before marks existed tests both edges, so it is invisible to them
@@ -6091,6 +6091,10 @@ def mark_service_phase():
     stretch before it is over, which the detector cannot; an operator watching a service
     will also mark a start and never mark the end, which is why the end stays the
     detector's job unless they say otherwise.
+
+    Adjusting the start of a phase that is still running arrives here too, as ``move_id``,
+    for the same reason: writing a span with both edges would close a sermon that is still
+    being preached, which is what moving its start used to do.
     """
     if not check_ip_whitelist():
         return jsonify({"success": False, "error": "Access denied"}), 403
@@ -6102,6 +6106,10 @@ def mark_service_phase():
 
     undo = str(data.get("undo") or "").lower() in ("1", "true", "yes")
     ends = str(data.get("end") or "").lower() in ("1", "true", "yes")
+    # Moving a start rather than adding one. A phase has one beginning however many times
+    # the operator adjusts it, and an adjustment that left the old mark behind would open a
+    # second phase of the same name ending where the first press was.
+    move_id = coerce_int(data.get("move_id"), 0, lo=0, hi=2 ** 62)
     label = (data.get("label") or "").strip()[:120]
     kind = (data.get("kind") or "").strip()[:8]
     if ends:
@@ -6129,6 +6137,15 @@ def mark_service_phase():
                     removed = _service_phase_delete_correction_by_id(
                         conn, int(latest[-1].get("id") or 0))
             else:
+                if move_id:
+                    # Only a mark moves. A miss — an id undone from another tab, or a row
+                    # that was never a mark — falls through to a plain insert rather than
+                    # an error: the operator said where the phase starts, and mid-service is
+                    # the worst moment to refuse that over bookkeeping.
+                    prior = next((c for c in _service_phase_corrections(conn)
+                                  if int(c.get("id") or 0) == move_id and _phase_is_mark(c)), None)
+                    if prior is not None:
+                        removed = _service_phase_delete_correction_by_id(conn, move_id)
                 row_id = _service_phase_save_correction(
                     conn, None, kind=kind or None, label=label, start_ms=at_ms,
                     end_ms=None, note="live mark",

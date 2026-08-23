@@ -117,6 +117,27 @@ class TestOneMarkClosesTheOneBefore:
         spans = resolve(rows, blocks, now_ms=BASE + 30 * MIN)
         assert [s["label"] for s in spans] == ["Sermon 1"]
 
+    def test_the_press_just_made_is_shown_at_once_though_it_is_seconds_old(self):
+        """The row is what tells the operator the press landed.
+
+        A phase pressed a moment ago is shorter than the floor for the ordinary reason that
+        it has only just begun, and hiding it until it is half a minute old left the
+        timeline looking like nothing had happened at the one moment someone was watching
+        for it.
+        """
+        blocks = [block(0, 20, "M", ongoing=True, index=0)]
+        spans = resolve([mark(20, "Sermon 1")], blocks, now_ms=BASE + 20 * MIN + 3000)
+        assert len(spans) == 1
+        assert spans[0]["open"] is True
+        assert spans[0]["end_ms"] == BASE + 20 * MIN + 3000
+
+    def test_a_run_that_ends_a_short_phase_still_drops_it(self):
+        """Closed by the detector rather than by a second press, and still too short."""
+        blocks = [block(0, 10, "S", index=0), block(10, 40, "M", index=1)]
+        late = {"id": 1, "block_index": None, "start_ms": BASE + 10 * MIN - 20_000,
+                "end_ms": None, "kind": "S", "label": "Sermon 1"}
+        assert resolve([late], blocks, now_ms=BASE + 40 * MIN) == []
+
 
 class TestNothingMarkedChangesNothing:
     def test_no_marks_produce_no_spans(self):

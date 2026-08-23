@@ -578,78 +578,103 @@
     strip.appendChild(spTip());
   }
 
+  // Whether the selected phase is still running is re-read from the data on every render
+  // rather than remembered from the click: a phase the detector has closed since must not
+  // still be adjusted as though it were live, or moving its start would re-open it.
+  function refreshSelection() {
+    if (!spSel) return;
+    if (spSel.markId) {
+      const span = (spData.mark_spans || []).find(s => s.id === spSel.markId);
+      if (!span) { spSel.open = false; spSel.markId = null; return; }
+      spSel.start_ms = span.start_ms;
+      spSel.end_ms = span.end_ms;
+      spSel.open = !!span.open;
+      return;
+    }
+    // A block is found by its start, which does not move; its end does, while it is still
+    // being spoken — and following it is what keeps the row highlighted and the words tinted
+    // as the phase grows.
+    const b = (spData.blocks || []).find(x => x.start_ms === spSel.start_ms);
+    if (!b) return;
+    spSel.end_ms = b.end_ms;
+    spSel.open = !!b.ongoing;
+  }
+
   function renderBlocks() {
     const host = document.getElementById('sp-blocks');
     host.innerHTML = '';
-    if (!spData.blocks.length) {
-      host.innerHTML = '<div class="sp-empty">Nothing detected yet.</div>';
-      host.appendChild(markRow());   // the first minutes are exactly when marking helps most
-      return;
-    }
+    refreshSelection();
     const anchor = serviceStartMs();
     const songs = songNumbering(anchor);
-    const drawn = new Set();
+    // Phases and blocks are drawn from one list in time order, rather than the phases being
+    // drawn from inside a walk over the blocks. A phase the operator marked a moment ago
+    // covers no block — the detector is a minute or two behind, which is the whole reason
+    // to mark — and driving the loop from blocks left that press with nowhere to appear
+    // until the detector caught up. A marked stretch sitting in a gap between blocks had
+    // the same problem, and drew out of order when it did appear.
+    const gs = groups();
+    const rows = gs.map(g => ({ at: g.start_ms, draw: () => groupRow(g, anchor) }));
     spData.blocks.forEach(b => {
-      const group = groupCovering(b);
-      if (group) {
-        // The blocks under a group are absorbed into it: one row for the phase the operator
-        // says was one thing, drawn once at the first block it covers.
-        if (!drawn.has(group.id)) {
-          drawn.add(group.id);
-          host.appendChild(groupRow(group, anchor));
-        }
-        return;
-      }
-      const fix = correctionFor(b.index);
-      const shown = fix && fix.label ? fix.label : (songs[b.index] || b.label);
-      const row = document.createElement('div');
-      const flags = b.unusual || [];
-      const isSel = spSel && spSel.start_ms === b.start_ms && spSel.end_ms === b.end_ms;
-      row.className = 'sp-block' + (fix ? ' corrected' : '') + (b.ongoing ? ' ongoing' : '')
-        + (flags.length ? ' unusual' : '') + (isSel ? ' selected' : '');
-      // Anywhere but the controls: the row is the handle for "show me these words".
-      row.addEventListener('click', ev => {
-        if (ev.target.closest('button, select, input, a')) return;
-        selectPhase(b.start_ms, b.end_ms, shown, b.kind);
-      });
-
-      const cues = Object.entries(b.cues || {}).map(([k, v]) => k + '×' + v).join(' ');
-      // "Songs 2" is not in the vocabulary but "Songs" is; without this the dropdown falls
-      // back to its first entry and a stray Correct click relabels the block Opening.
-      const base = (shown || '').replace(/ \d+$/, '');
-      const opts = SP_LABELS.map(l =>
-        '<option value="' + l + '"' + (l === shown || l === base ? ' selected' : '') + '>' + l + '</option>'
-      ).join('');
-
-      const into = (anchor !== null && b.start_ms >= anchor)
-        ? fmtClock(b.start_ms, anchor) + ' – ' + fmtClock(b.end_ms, anchor)
-        : '—';
-
-      row.innerHTML =
-        '<input type="checkbox" class="sp-pick" id="sp-pick-' + b.index + '"' +
-          (picked.has(b.index) ? ' checked' : '') +
-          ' onchange="togglePick(' + b.index + ', this.checked)">' +
-        '<span class="sp-time">' + fmtWall(b.start_ms) + ' – ' + fmtWall(b.end_ms) + '</span>' +
-        '<span class="sp-time sp-since">' + into + '</span>' +
-        '<span class="sp-now-kind sp-kind-' + b.kind + '">' + (SP_KINDS[b.kind] || b.kind) + '</span>' +
-        '<span class="sp-label">' + esc(shown || '—') + '</span>' +
-        '<span class="sp-conf">' + b.minutes + ' min · ' + Math.round((b.confidence || 0) * 100) + '%</span>' +
-        '<span class="sp-cues">' + cues + '</span>' +
-        '<span class="sp-fix">' +
-          '<select id="sp-sel-' + b.index + '">' + opts + '</select>' +
-          '<input type="text" id="sp-txt-' + b.index + '" class="sp-custom" placeholder="or type a name">' +
-          '<input type="text" id="sp-note-' + b.index + '" class="sp-note-in" placeholder="note (optional)">' +
-          '<button type="button" onclick="correctBlock(' + b.index + ', \'' + b.kind + '\')">Correct</button>' +
-          (fix ? '<button type="button" class="sp-undo" onclick="undoCorrection(' + b.index + ')">Undo</button>' : '') +
-          nudger(b.start_ms, b.end_ms, shown, b.kind) +
-        '</span>' +
-        (flags.length ? '<span class="sp-flag">&#9888; ' + flags.join(' · ') + '</span>' : '') +
-        (fix ? '<span class="sp-was">corrected to "' + esc(fix.label) + '"' +
-               (fix.note ? ' — ' + esc(fix.note) : '') +
-               (fix.corrected_at ? ' at ' + esc(fix.corrected_at) : '') + '</span>' : '');
-      host.appendChild(row);
+      // The blocks under a phase are absorbed into it: one row for the stretch the operator
+      // says was one thing.
+      if (gs.some(g => b.start_ms >= g.start_ms && b.end_ms <= g.end_ms)) return;
+      rows.push({ at: b.start_ms, draw: () => blockRow(b, anchor, songs) });
     });
-    host.appendChild(markRow());
+    if (!rows.length) host.innerHTML = '<div class="sp-empty">Nothing detected yet.</div>';
+    rows.sort((x, y) => x.at - y.at).forEach(r => host.appendChild(r.draw()));
+    host.appendChild(markRow());   // the first minutes are exactly when marking helps most
+  }
+
+  // One detected block the operator has not grouped or renamed away.
+  function blockRow(b, anchor, songs) {
+    const fix = correctionFor(b.index);
+    const shown = fix && fix.label ? fix.label : (songs[b.index] || b.label);
+    const row = document.createElement('div');
+    const flags = b.unusual || [];
+    const isSel = spSel && spSel.start_ms === b.start_ms && spSel.end_ms === b.end_ms;
+    row.className = 'sp-block' + (fix ? ' corrected' : '') + (b.ongoing ? ' ongoing' : '')
+      + (flags.length ? ' unusual' : '') + (isSel ? ' selected' : '');
+    // Anywhere but the controls: the row is the handle for "show me these words".
+    row.addEventListener('click', ev => {
+      if (ev.target.closest('button, select, input, a')) return;
+      selectPhase(b.start_ms, b.end_ms, shown, b.kind, undefined, { open: !!b.ongoing });
+    });
+
+    const cues = Object.entries(b.cues || {}).map(([k, v]) => k + '×' + v).join(' ');
+    // "Songs 2" is not in the vocabulary but "Songs" is; without this the dropdown falls
+    // back to its first entry and a stray Correct click relabels the block Opening.
+    const base = (shown || '').replace(/ \d+$/, '');
+    const opts = SP_LABELS.map(l =>
+      '<option value="' + l + '"' + (l === shown || l === base ? ' selected' : '') + '>' + l + '</option>'
+    ).join('');
+
+    const into = (anchor !== null && b.start_ms >= anchor)
+      ? fmtClock(b.start_ms, anchor) + ' – ' + fmtClock(b.end_ms, anchor)
+      : '—';
+
+    row.innerHTML =
+      '<input type="checkbox" class="sp-pick" id="sp-pick-' + b.index + '"' +
+        (picked.has(b.index) ? ' checked' : '') +
+        ' onchange="togglePick(' + b.index + ', this.checked)">' +
+      '<span class="sp-time">' + fmtWall(b.start_ms) + ' – ' + fmtWall(b.end_ms) + '</span>' +
+      '<span class="sp-time sp-since">' + into + '</span>' +
+      '<span class="sp-now-kind sp-kind-' + b.kind + '">' + (SP_KINDS[b.kind] || b.kind) + '</span>' +
+      '<span class="sp-label">' + esc(shown || '—') + '</span>' +
+      '<span class="sp-conf">' + b.minutes + ' min · ' + Math.round((b.confidence || 0) * 100) + '%</span>' +
+      '<span class="sp-cues">' + cues + '</span>' +
+      '<span class="sp-fix">' +
+        '<select id="sp-sel-' + b.index + '">' + opts + '</select>' +
+        '<input type="text" id="sp-txt-' + b.index + '" class="sp-custom" placeholder="or type a name">' +
+        '<input type="text" id="sp-note-' + b.index + '" class="sp-note-in" placeholder="note (optional)">' +
+        '<button type="button" onclick="correctBlock(' + b.index + ', \'' + b.kind + '\')">Correct</button>' +
+        (fix ? '<button type="button" class="sp-undo" onclick="undoCorrection(' + b.index + ')">Undo</button>' : '') +
+        nudger(b.start_ms, b.end_ms, shown, b.kind, !!b.ongoing, null) +
+      '</span>' +
+      (flags.length ? '<span class="sp-flag">&#9888; ' + flags.join(' · ') + '</span>' : '') +
+      (fix ? '<span class="sp-was">corrected to "' + esc(fix.label) + '"' +
+             (fix.note ? ' — ' + esc(fix.note) : '') +
+             (fix.corrected_at ? ' at ' + esc(fix.corrected_at) : '') + '</span>' : '');
+    return row;
   }
 
   // The operator's own row, always the last one: the detector's rows are the past, and this
@@ -698,7 +723,7 @@
         body: spBody(body)
       });
       const data = await resp.json();
-      if (!data.success) { showAlert('Could not mark: ' + data.error, 'error'); return; }
+      if (!data.success) { showAlert('Could not mark: ' + data.error, 'error'); return null; }
       spData.corrections = data.corrections || [];
       spData.mark_spans = data.mark_spans || [];
       spData.marked = data.marked || '';
@@ -707,9 +732,11 @@
       renderBlocks();
       renderStrip();
       renderCaptions(false);
+      return data;
     } catch (e) {
       showAlert('Could not mark: ' + e, 'error');
     }
+    return null;
   }
 
   // The moment is taken here, not on the server: a press travelling over a slow link should
@@ -752,7 +779,7 @@
     const block = (spData.blocks || []).find(b => (effectiveLabel(b) || '').startsWith('Sermon'))
       || (spData.blocks || [])[0];
     return block
-      ? { start_ms: block.start_ms, end_ms: block.end_ms,
+      ? { start_ms: block.start_ms, end_ms: block.end_ms, open: !!block.ongoing,
           label: effectiveLabel(block), kind: block.kind }
       : null;
   }
@@ -761,8 +788,12 @@
   // me that", and the pane goes there. Opening the page on the running service means the
   // opposite — the words being spoken now — so the automatic selection does not drag the
   // view back to where the sermon started.
-  function selectPhase(start_ms, end_ms, label, kind, scroll) {
-    spSel = { start_ms: start_ms, end_ms: end_ms, label: label || '', kind: kind || 'S' };
+  // ``live`` says whether the phase is still running and, if it is a marked one, which row
+  // holds its start — the two things an edge control has to know before it writes anything,
+  // because a running phase is adjusted by moving its mark and a finished one by its span.
+  function selectPhase(start_ms, end_ms, label, kind, scroll, live) {
+    spSel = { start_ms: start_ms, end_ms: end_ms, label: label || '', kind: kind || 'S',
+              open: !!(live && live.open), markId: (live && live.markId) || null };
     renderBlocks();
     renderStrip();
     loadCaptions(scroll !== false);
@@ -915,7 +946,9 @@
         // rather than sitting there doing nothing.
         + (spSel
           ? '<span class="sp-cap-set">'
-            +   '<button type="button" title="Start the phase here" '
+            +   '<button type="button" title="' + (spSel.open
+                    ? 'Start the phase here — it keeps running'
+                    : 'Start the phase here') + '" '
             +     'onclick="setEdge(' + r.ts_ms + ', null)">⇤</button>'
             +   '<button type="button" title="End the phase here" '
             +     'onclick="setEdge(null, ' + r.ts_ms + ')">⇥</button>'
@@ -952,6 +985,13 @@
   // through one path: the whole range, written to the grouping route.
   function setEdge(startAt, endAt) {
     if (!spSel) return;
+    // Moving the start of a phase that is still running is a mark, not a span: a span
+    // carries both edges, so writing one here closed the phase at the last word said —
+    // which is what happened to an operator adjusting where the sermon began while it was
+    // still being preached. Ending it stays a span, because that is what it means.
+    if (endAt === null && spSel.open) {
+      return moveMarkStart(startAt, spSel.label, spSel.kind, spSel.markId);
+    }
     // A caption's stamp is where it *begins*, so ending "here" has to include it — a minute,
     // the width of a bin, rather than a hairline that would cut the line it names.
     const start = startAt === null ? spSel.start_ms : startAt;
@@ -970,13 +1010,16 @@
   // adjusting the detector's block or an adjustment already made.
   const NUDGE_MS = 60000;
 
-  function nudger(startMs, endMs, label, kind) {
+  function nudger(startMs, endMs, label, kind, open, markId) {
     const a = [startMs, endMs, esc(label || ''), kind || 'S'];
     const call = (ds, de) => 'nudgeRange(' + a[0] + ',' + a[1] + ',' + ds + ',' + de
-      + ',\'' + a[2].replace(/'/g, "\\'") + '\',\'' + a[3] + '\')';
+      + ',\'' + a[2].replace(/'/g, "\\'") + '\',\'' + a[3] + '\',' + (open ? 1 : 0)
+      + ',' + (markId || 0) + ')';
     return '<span class="sp-nudge" title="Move this phase\'s edges a minute at a time. '
-      + 'What you set here is what gets summarised.">'
-      + '<span class="sp-nudge-lbl">start</span>'
+      + 'What you set here is what gets summarised.'
+      + (open ? ' It is still running: moving its start keeps it running, and its end stays '
+                + 'with the detector until you say otherwise.' : '') + '">'
+      + '<span class="sp-nudge-lbl">start' + (open ? ' (keeps running)' : '') + '</span>'
       + '<button type="button" onclick="' + call(-NUDGE_MS, 0) + '">−</button>'
       + '<button type="button" onclick="' + call(NUDGE_MS, 0) + '">+</button>'
       + '<span class="sp-nudge-lbl">end</span>'
@@ -985,8 +1028,32 @@
       + '</span>';
   }
 
-  function nudgeRange(startMs, endMs, dStart, dEnd, label, kind) {
+  function nudgeRange(startMs, endMs, dStart, dEnd, label, kind, open, markId) {
+    // Same rule as the transcript's ⇤: the start of a running phase moves its mark, so the
+    // phase keeps running. Liveness comes from the row the button is on rather than from
+    // whatever happens to be selected.
+    if (open && dEnd === 0) return moveMarkStart(startMs + dStart, label, kind, markId);
     return writeRange(startMs + dStart, endMs + dEnd, label, kind);
+  }
+
+  // A running phase has one beginning however many times the operator adjusts it, so this
+  // moves the mark that holds it rather than adding another — two marks would resolve into
+  // two phases of the same name, the first ending where the operator first pressed.
+  async function moveMarkStart(at, label, kind, markId) {
+    if (!label) {
+      showAlert('Name the phase first, then adjust its edges.', 'error');
+      return;
+    }
+    if (at > Date.now()) {
+      showAlert('A phase cannot start later than now.', 'error');
+      return;
+    }
+    const data = await postMark({ label: label, kind: kind || 'S', at_ms: at,
+                                  move_id: markId || 0 },
+      label + ' now starts ' + fmtWall(at) + ' — still running.');
+    // The panel follows the edge that just moved, and takes the new row's id with it so the
+    // next nudge moves this mark again instead of laying a second one beside it.
+    if (data && spSel) { spSel.start_ms = at; spSel.open = true; spSel.markId = data.id || null; }
   }
 
   async function writeRange(start, end, label, kind) {
@@ -1032,7 +1099,8 @@
       + (g.marked ? ' sp-marked' : '');
     row.addEventListener('click', ev => {
       if (ev.target.closest('button, select, input, a')) return;
-      selectPhase(g.start_ms, g.end_ms, g.label, g.kind || 'S');
+      selectPhase(g.start_ms, g.end_ms, g.label, g.kind || 'S', undefined,
+                  { open: !!g.open, markId: g.marked ? g.id : null });
     });
     const into = (anchor !== null && g.start_ms >= anchor)
       ? fmtClock(g.start_ms, anchor) + ' – ' + fmtClock(g.end_ms, anchor)
@@ -1056,7 +1124,8 @@
           ? '<input type="text" id="sp-span-' + esc(g.id) + '" class="sp-custom" placeholder="rename">'
             + '<button type="button" onclick="acceptSpan(\'' + esc(g.id) + '\')">Correct</button>'
           : '<button type="button" class="sp-undo" onclick="ungroup(' + g.id + ')">Ungroup</button>') +
-        nudger(g.start_ms, g.end_ms, g.label, g.kind || 'S') +
+        nudger(g.start_ms, g.end_ms, g.label, g.kind || 'S', !!g.open,
+               g.marked ? g.id : null) +
       '</span>' +
       (g.note ? '<span class="sp-was">' + esc(g.note) + '</span>' : '');
     return row;
@@ -1320,7 +1389,8 @@
         const pick = sermonToOpen();
         // The live service opens at the live edge and keeps following it; a finished one
         // has no edge to follow, so it opens on the sermon, which is what it is reviewed for.
-        if (pick) selectPhase(pick.start_ms, pick.end_ms, pick.label, pick.kind, !!spSession);
+        if (pick) selectPhase(pick.start_ms, pick.end_ms, pick.label, pick.kind, !!spSession,
+                              { open: !!pick.open, markId: pick.marked ? pick.id : null });
         else loadCaptions(false);   // no phases yet: the words are still worth showing
       } else {
         // The whole-service read on the slow tick. The fast poll only ever appends, so a

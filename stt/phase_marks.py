@@ -113,8 +113,10 @@ def resolve(corrections: Sequence[Mapping[str, Any]],
     * now, while both of those are still open — a phase in progress is shown running to the
       present moment rather than not shown at all.
 
-    ``min_seconds`` drops a span too short to be a phase: two presses a second apart are a
-    correction of the first press, not a five-second sermon.
+    ``min_seconds`` drops a *closed* span too short to be a phase: two presses a second
+    apart are a correction of the first press, not a five-second sermon. An open span is
+    never dropped for its length — it is still running, and it is at its shortest in the
+    seconds after the press, which is exactly when the operator is looking for it.
     """
     found = marks(corrections)
     spans: List[dict] = []
@@ -128,7 +130,11 @@ def resolve(corrections: Sequence[Mapping[str, Any]],
         if run_end is not None and run_end > start:
             limits.append(run_end)
         end = min(limits) if limits else max(now_ms, start)
-        if end - start < int(min_seconds) * 1000:
+        # Only what something actually closed is judged on length: two presses a second
+        # apart are a correction of the first, but a phase pressed a moment ago is merely
+        # young, and hiding it for half a minute is the timeline telling the operator their
+        # press did not land.
+        if limits and end - start < int(min_seconds) * 1000:
             continue
         spans.append({
             # The row's own id, so a mark takes its place in the same "newest wins" order

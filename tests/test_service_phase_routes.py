@@ -796,3 +796,42 @@ class TestMark:
         db = session_db(tmp_path)
         body = make_ns(live_db=db)["get_service_phase"]()
         assert body["mark_spans"] == [] and body["marked"] == ""
+
+    def test_moving_a_start_leaves_one_beginning_not_two(self, tmp_path):
+        """Adjusting where a running phase began moves its mark.
+
+        Two marks would resolve into two phases of the same name, the first ending where
+        the operator first pressed — so an operator correcting themselves would be creating
+        the mess they were correcting.
+        """
+        db = session_db(tmp_path)
+        first = self.mark(db, label="Sermon 1", kind="S", at_ms=1_600_000)
+        moved = self.mark(db, label="Sermon 1", kind="S", at_ms=1_300_000,
+                          move_id=first["id"])
+        assert moved["removed"] == 1
+        assert len(moved["corrections"]) == 1
+        assert moved["corrections"][0]["start_ms"] == 1_300_000
+        assert moved["corrections"][0]["end_ms"] is None
+        assert moved["corrections"][0]["id"] != first["id"]
+
+    def test_a_moved_start_is_still_the_detectors_to_end(self, tmp_path):
+        db = session_db(tmp_path)
+        blocks = load_analysis(sqlite3.connect(db))["blocks"]
+        inside = blocks[-1]["start_ms"] + MIN
+        first = self.mark(db, label="Sermon 1", kind="S", at_ms=inside)
+        moved = self.mark(db, label="Sermon 1", kind="S", at_ms=inside - MIN,
+                          move_id=first["id"])
+        assert len(moved["mark_spans"]) == 1
+        assert moved["mark_spans"][0]["start_ms"] == inside - MIN
+
+    def test_a_move_of_something_that_is_gone_still_marks(self, tmp_path):
+        """Undone from another tab, or never a mark: mid-service is the worst moment to
+        refuse the operator's statement over bookkeeping."""
+        db = session_db(tmp_path)
+        conn = sqlite3.connect(db)
+        save_group_correction(conn, 1_000_000, 2_000_000, kind="S", label="Sermon 1")
+        conn.close()
+        body = self.mark(db, label="Sermon 1", kind="S", at_ms=1_200_000, move_id=999)
+        assert body["success"] is True and body["removed"] == 0
+        assert [c["start_ms"] for c in body["corrections"] if c["end_ms"] is None] \
+            == [1_200_000]
