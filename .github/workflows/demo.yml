@@ -255,9 +255,9 @@ jobs:
 
   # ── Publish ────────────────────────────────────────────────────────────────
   # Opt-in, and to the demo repository only. GITHUB_TOKEN cannot reach another
-  # repository, which is exactly the property wanted here: without
-  # DEMO_RELEASE_TOKEN this job fails rather than falling back to publishing
-  # somewhere it should not.
+  # repository, which is exactly the property wanted here — so this job mints its
+  # own credential, narrowly scoped, and fails rather than falling back to
+  # publishing somewhere it should not.
   publish:
     needs: [version, build-windows, build-macos, build-linux]
     # Not always(): a platform left unticked is skipped and must not block the
@@ -276,12 +276,28 @@ jobs:
           ls -la out
           test -n "$(ls -A out)" || { echo "nothing was built"; exit 1; }
           (cd out && shasum -a 256 * > SHA256SUMS.txt && cat SHA256SUMS.txt)
+      # A GitHub App rather than a personal token: an App's key does not expire the
+      # way a fine-grained PAT does, and the token minted here is short-lived and
+      # revoked when the job ends.
+      #
+      # owner + repositories are load-bearing. Without them the action defaults to
+      # the repository running the workflow — this one — which is the single place
+      # this credential must never be able to write. permission-contents narrows the
+      # minted token below what the installation itself holds, so even a
+      # generously-scoped App can do no more here than cut a release.
+      - uses: actions/create-github-app-token@v3
+        id: demo-token
+        with:
+          app-id: ${{ secrets.DEMO_APP_ID }}
+          private-key: ${{ secrets.DEMO_APP_PRIVATE_KEY }}
+          owner: ChurchPresenter
+          repositories: STT-Demo
+          permission-contents: write
       - name: Publish to the demo repository
         env:
-          GH_TOKEN: ${{ secrets.DEMO_RELEASE_TOKEN }}
+          GH_TOKEN: ${{ steps.demo-token.outputs.token }}
           VERSION: ${{ needs.version.outputs.version }}
         run: |
-          test -n "$GH_TOKEN" || { echo "DEMO_RELEASE_TOKEN is not set"; exit 1; }
           gh release create "demo-v$VERSION" out/* \
             --repo "$DEMO_REPO" \
             --title "STT Demo $VERSION" \
