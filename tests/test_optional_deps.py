@@ -253,3 +253,119 @@ def test_ensure_mode_always_exits_zero(tmp_path, monkeypatch):
     monkeypatch.setattr(od, "ensure", boom)
     data = _data_dir(tmp_path, _config())
     assert od.main(["--repo-dir", str(tmp_path), "--data-dir", data]) == 0
+
+
+# ─── the live probe ──────────────────────────────────────────────────
+#
+# The counterpart to the startup check: what a long-running server does when the
+# package goes missing (or comes back) under it. Written against the real incident —
+# 124 captions of a live service went out untranslated, one log line each, and the
+# only thing that noticed was a human reading server.log the next day.
+
+
+class _Clock:
+    def __init__(self):
+        self.now = 0.0
+
+    def __call__(self):
+        return self.now
+
+
+def _probe(answers, clock=None, **kw):
+    """A probe over a list of answers, one consumed per actual filesystem check."""
+    seen = {"invalidated": 0}
+    calls = iter(answers)
+    last = [answers[-1]]
+
+    def installed(_name):
+        try:
+            last[0] = next(calls)
+        except StopIteration:
+            pass
+        return last[0]
+
+    p = od.RuntimeProbe("pretend_module", clock=clock or _Clock(),
+                        is_installed=installed,
+                        invalidate=lambda: seen.__setitem__("invalidated",
+                                                            seen["invalidated"] + 1),
+                        **kw)
+    return p, seen
+
+
+def test_present_module_is_probed_once_and_then_trusted():
+    """An importable module does not stop being importable; re-probing is pure cost."""
+    probe, seen = _probe([True, False, False])
+    assert [probe.available() for _ in range(4)] == [True, True, True, True]
+    assert seen["invalidated"] == 0
+    assert probe.take_report() is None
+
+
+def test_absence_is_reported_once_not_once_per_caption():
+    probe, _ = _probe([False])
+    assert probe.available() is False
+    assert probe.take_report() == ("missing", 0)
+    for _ in range(50):
+        probe.available()
+    assert probe.take_report() is None
+
+
+def test_absence_is_not_re_probed_before_the_retry_window():
+    clock = _Clock()
+    probe, seen = _probe([False, True], clock=clock, retry_seconds=30)
+    assert probe.available() is False
+    clock.now = 29.0
+    assert probe.available() is False       # still inside the window: no filesystem work
+    assert seen["invalidated"] == 0
+
+
+def test_a_package_installed_while_running_is_picked_up():
+    """The whole reason for invalidate_caches: find_spec cannot see it otherwise."""
+    clock = _Clock()
+    probe, seen = _probe([False, True], clock=clock, retry_seconds=30)
+    assert probe.available() is False
+    clock.now = 31.0
+    assert probe.available() is True
+    assert seen["invalidated"] == 1
+
+
+def test_recovery_reports_how_many_calls_were_served_degraded():
+    clock = _Clock()
+    probe, _ = _probe([False, True], clock=clock, retry_seconds=30)
+    for _ in range(7):
+        probe.available()                   # one real check, then six cached refusals
+    assert probe.take_report() == ("missing", 0)
+    assert probe.degraded_calls() == 7
+    clock.now = 31.0
+    assert probe.available() is True
+    assert probe.take_report() == ("restored", 7)
+    assert probe.degraded_calls() == 0
+
+
+def test_a_probe_that_raises_reads_as_absent_rather_than_propagating():
+    """It is asked once per caption; raising there would take the caption with it."""
+    def boom(_name):
+        raise RuntimeError("broken finder")
+
+    probe = od.RuntimeProbe("pretend_module", is_installed=boom, invalidate=lambda: None)
+    assert probe.available() is False
+    assert probe.take_report() == ("missing", 0)
+
+
+def test_invalidate_failure_does_not_break_the_probe():
+    clock = _Clock()
+
+    def boom():
+        raise RuntimeError("cache is stuck")
+
+    answers = iter([False, True])
+    probe = od.RuntimeProbe("pretend_module", clock=clock, retry_seconds=1,
+                            is_installed=lambda _n: next(answers), invalidate=boom)
+    assert probe.available() is False
+    clock.now = 2.0
+    assert probe.available() is True
+
+
+def test_the_real_probe_agrees_with_module_installed():
+    """Defaults wired to the real thing: a stdlib module is present, a nonsense one is not."""
+    assert od.RuntimeProbe("json").available() is True
+    assert od.RuntimeProbe("stt_module_that_does_not_exist").available() is False

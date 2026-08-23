@@ -37,7 +37,8 @@ def _cache_stub(size=0):
 
 
 def call_status(live_translation, *, local_llm=None, device=None, is_ct2=False,
-                model_loaded=True, whisper_model="large-v3", trusted=(), a_pushed=None):
+                model_loaded=True, whisper_model="large-v3", trusted=(), a_pushed=None,
+                degraded=""):
     """Run the route and return its JSON body as a plain dict."""
     ns = extract_definitions(
         "speech_to_text.py", ["get_translation_status", "_llm_retry_enabled"],
@@ -79,6 +80,9 @@ def call_status(live_translation, *, local_llm=None, device=None, is_ct2=False,
             "_DEFAULT_LLM_SYSTEM_PROMPT": DEFAULT_SYSTEM_PROMPT_TEMPLATE,
             "transcription_state": {"running": False},
             "time": __import__("time"),
+            # Every page polls this route every five seconds, so it is also how a caption
+            # path that has stopped translating reaches an operator mid-service.
+            "llm_runtime_warning": lambda: degraded,
         })
     return ns["get_translation_status"]()
 
@@ -270,3 +274,19 @@ class TestLlmParametersReported:
         status = call_status(cfg)
         assert status["llm_n_ctx"] is None
         assert status["llm_max_tokens"] == 160
+
+
+class TestDegradedIsReported:
+    """The five-second poll is the only surface that can reach a live service.
+
+    Without this the caption path could stop translating — a rebuilt venv losing
+    llama-cpp-python does exactly that — and every page would keep showing a healthy
+    session while the captions went out in the source language.
+    """
+
+    def test_a_healthy_session_reports_no_degradation(self):
+        assert call_status(LLM_LOCAL, local_llm=object())["degraded"] == ""
+
+    def test_the_warning_travels_to_the_page(self):
+        body = call_status(LLM_LOCAL, degraded="captions are going out untranslated")
+        assert body["degraded"] == "captions are going out untranslated"

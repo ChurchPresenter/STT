@@ -957,6 +957,7 @@ from stt.service_phase import (
     save_correction as _service_phase_save_correction,
     save_group_correction as _service_phase_save_group,
 )
+from stt.optional_deps import RuntimeProbe as _RuntimeProbe
 from stt.phase_rules import load_rules as _phase_rules_load
 from stt.session_index import (
     describe as _session_describe,
@@ -7376,6 +7377,11 @@ def get_system_requirements():
     # landed on CPU despite use_gpu — translations run seconds-per-sentence and
     # nothing else surfaces it (field reports arrive as "translation got slow").
     trans_cfg = config.get("live_translation", {})
+    # Not a hardware shortfall either, but the same kind of "it is running and quietly not
+    # doing its job" this banner exists to name.
+    degraded = llm_runtime_warning()
+    if degraded:
+        warns = [*warns, degraded]
     if (_live_translation_device == "cpu" and trans_cfg.get("use_gpu", True)
             and trans_cfg.get("translation_method", "nllb") == "nllb"):
         warns = [*warns, "Translation model is running on CPU (GPU requested but unavailable) — expect slow translations. Check GPU drivers / torch install."]
@@ -8369,6 +8375,12 @@ def get_translation_status():
         result["trusted_clients"] = []
         result["a_pushed"] = []
         result["pending_pairs"] = []
+
+    # Every page polls this endpoint every five seconds, which makes it the one place a
+    # caption-path fault can reach an operator while the service is still running. A
+    # missing LLM runtime is exactly that: captions keep flowing, with HTTP 200, in the
+    # source language, and nothing on screen said so.
+    result["degraded"] = llm_runtime_warning()
 
     return jsonify(result)
 
@@ -17615,18 +17627,65 @@ _local_llm_lock = threading.Lock()
 _local_llm_gen_lock = threading.Lock()
 
 
-def local_llm_available():
-    """Whether the in-process GGUF runtime is installed.
+# Probed rather than imported, and absent is not an error — the same treatment
+# panns-inference gets, so an install without the optional dependency degrades to the NMT
+# model instead of failing to start.
+#
+# Through a RuntimeProbe rather than a bare find_spec because this is asked once per
+# caption and the answer can change under a running server: a venv rebuild takes the
+# package away mid-service, and the preflight (or an operator with uv) puts it back. The
+# probe caches, invalidates the import caches before re-asking, and hands each state change
+# to the caller exactly once — the alternative was one identical log line per caption and
+# no way for anyone to notice that captions had stopped being translated at all.
+_llama_probe = _RuntimeProbe("llama_cpp")
 
-    Probed rather than imported, and absent is not an error — the same treatment
-    panns-inference gets, so an install without the optional dependency degrades to
-    the NMT model instead of failing to start.
+_LLM_RUNTIME_MISSING = (
+    "llama-cpp-python is not installed, so captions are going out untranslated. "
+    "Restarting the server installs it; until then this machine is passing the source "
+    "text through.")
+
+# True while the runtime the config asks for is absent. Counted separately from the probe's
+# own calls because the banner is polled every five seconds by every open page, and a
+# number that grows whether or not anyone is speaking is not a count of anything.
+_llm_runtime_missing = False
+_llm_passthrough_captions = 0
+
+
+def local_llm_available():
+    """Whether the in-process GGUF runtime is installed."""
+    global _llm_runtime_missing, _llm_passthrough_captions
+    ok = _llama_probe.available()
+    report = _llama_probe.take_report()
+    if report:
+        state, _ = report
+        if state == "missing":
+            _llm_runtime_missing = True
+            _llm_passthrough_captions = 0
+            print("[LLM-LOCAL] llama-cpp-python is not installed; "
+                  "install it or set live_translation.llm.provider to 'endpoint'")
+        else:
+            _llm_runtime_missing = False
+            print(f"[LLM-LOCAL] llama-cpp-python is available again after "
+                  f"{_llm_passthrough_captions} caption(s) went out untranslated")
+            _llm_passthrough_captions = 0
+    return ok
+
+
+def llm_runtime_warning():
+    """The passthrough warning for the operator's screen, or ''.
+
+    Probes rather than reading a flag, so a page opened after the fact says the same thing
+    as one that was open when it happened — and so the five-second poll behind the banner
+    is also what notices the runtime coming back. The config test matters: a box that
+    offloads translation or uses NMT is not degraded by a package it never wanted.
     """
-    try:
-        import importlib.util
-        return importlib.util.find_spec("llama_cpp") is not None
-    except Exception:
-        return False
+    if not _uses_local_llm(config.get("live_translation", {})):
+        return ""
+    if local_llm_available() or not _llm_runtime_missing:
+        return ""
+    if _llm_passthrough_captions:
+        return f"{_LLM_RUNTIME_MISSING} {_llm_passthrough_captions} caption(s) so far."
+    return _LLM_RUNTIME_MISSING
 
 
 def get_local_llm(llm_cfg_override=None):
@@ -17636,11 +17695,12 @@ def get_local_llm(llm_cfg_override=None):
     one pip dependency and one model file, which is what makes LLM translation
     workable on a fresh Windows/Linux/macOS install where nothing else is present.
     """
-    global _local_llm, _local_llm_failed, _local_llm_path
+    global _local_llm, _local_llm_failed, _local_llm_path, _llm_passthrough_captions
     if not local_llm_available():
-        print("[LLM-LOCAL] llama-cpp-python is not installed; "
-              "install it or set live_translation.llm.provider to 'endpoint'")
-        return None
+        # Counted here rather than in the probe: this is the call a caption makes, so this
+        # is the only place the number means "captions that went out untranslated".
+        _llm_passthrough_captions += 1
+        return None  # local_llm_available says so once, not once per caption
 
     llm_cfg = llm_cfg_override if llm_cfg_override is not None else (
         config.get("live_translation", {}).get("llm") or {})
@@ -22009,6 +22069,31 @@ def _run_startup_self_update():
         print(f"[AUTO-UPDATE] Startup self-update error: {e}")
 
 
+def _run_optional_dep_preflight():
+    """Install optional packages the live config asks for and the venv lacks.
+
+    The same check start_server.sh runs, asked from inside the app because that is where
+    production actually starts: the launchd plist and the systemd unit both exec this
+    script directly, so a crash restart, a reboot or the watchdog never touched the
+    wrapper's copy of it. A venv rebuild drops llama-cpp-python (requirements.txt omits it
+    on purpose), get_local_llm() then returns None, and llm.fallback="skip" hands every
+    caption back untranslated with HTTP 200 — which is how a live service ran 45 minutes on
+    passthrough captions with nothing but one log line per caption to show for it.
+
+    Best-effort by construction: stt.optional_deps reports and returns on every failure
+    path, so the worst case is starting exactly as we would have started anyway.
+    """
+    try:
+        from stt.optional_deps import ensure as _ensure_optional_deps
+        started = time.perf_counter()
+        installed = _ensure_optional_deps(BUNDLE_DIR, APP_DIR)
+        if installed:
+            print(f"[DEPS] Installed {installed} optional package(s) in "
+                  f"{time.perf_counter() - started:.0f}s")
+    except Exception as e:
+        print(f"[DEPS] Optional dependency check failed: {type(e).__name__}: {e}")
+
+
 def _self_update_loop():
     """Nightly git self-update at a fixed hour; only applies while idle.
 
@@ -22093,6 +22178,10 @@ if __name__ == "__main__":
     # No-op (and no restart) under the watchdog, when disabled, or when there's
     # nothing to pull / the tree isn't safely fast-forwardable.
     _run_startup_self_update()
+
+    # Before anything loads a model: the config may be asking for a runtime this venv no
+    # longer has. See _run_optional_dep_preflight.
+    _run_optional_dep_preflight()
 
     transcription_process = multiprocessing.Process(
         target=thread1_function,

@@ -33,7 +33,9 @@ import json
 import os
 import subprocess
 import sys
-from typing import Any, Callable, List, Mapping, NamedTuple, Optional, Sequence, Set
+import time
+from typing import (Any, Callable, List, Mapping, NamedTuple, Optional, Sequence, Set,
+                    Tuple)
 
 from stt.llm_translate import uses_local_llm
 
@@ -138,6 +140,84 @@ def module_installed(name: str) -> bool:
         return importlib.util.find_spec(name) is not None
     except Exception:  # noqa: BLE001 - a broken/partial install must read as absent
         return False
+
+
+class RuntimeProbe:
+    """Whether an optional module is importable *now*, cheap enough to ask per caption.
+
+    :func:`module_installed` alone is not enough for a long-running server. A package
+    installed while the process is running is invisible to ``find_spec`` until the path
+    finders' cached directory listings are dropped, so a venv repaired mid-service stays
+    "missing" until a restart — and a venv that *lost* a package (the rebuild this module
+    exists for) turns every caption into a log line and a passthrough.
+
+    So: a present answer is cached and never re-probed — an importable module does not stop
+    being importable, and the import itself caches after the first use. An absent one is
+    re-probed at most every ``retry_seconds``, with :func:`importlib.invalidate_caches`
+    first, which is the part that lets a repair take effect without a restart.
+
+    :meth:`take_report` hands the caller each state change exactly once, so an outage is one
+    log line and a recovery is one more carrying the number of calls served while degraded —
+    rather than the same line once per caption, which is how 124 of them went unnoticed.
+    """
+
+    __slots__ = ("_absent_calls", "_checked_at", "_clock", "_invalidate", "_is_installed",
+                 "_pending", "_present", "module", "retry_seconds")
+
+    def __init__(self, module: str, *, retry_seconds: float = 30.0,
+                 clock: Optional[Callable[[], float]] = None,
+                 is_installed: Callable[[str], bool] = module_installed,
+                 invalidate: Callable[[], None] = importlib.invalidate_caches) -> None:
+        self.module = module
+        self.retry_seconds = float(retry_seconds)
+        self._clock = clock if clock is not None else time.monotonic
+        self._is_installed = is_installed
+        self._invalidate = invalidate
+        self._present: Optional[bool] = None
+        self._checked_at = 0.0
+        self._absent_calls = 0
+        self._pending: Optional[Tuple[str, int]] = None
+
+    def available(self) -> bool:
+        """True when the module can be imported, re-probing an absence periodically."""
+        if self._present:
+            return True
+        now = self._clock()
+        if self._present is None or now - self._checked_at >= self.retry_seconds:
+            if self._present is False:
+                # Only on a re-probe: the first check runs against a cache nothing has had
+                # the chance to invalidate, and dropping it costs every finder a re-scan.
+                try:
+                    self._invalidate()
+                except Exception:  # noqa: BLE001 - a probe must never raise at a call site
+                    pass
+            was = self._present
+            try:
+                self._present = bool(self._is_installed(self.module))
+            except Exception:  # noqa: BLE001 - absent is the safe reading, and this is
+                self._present = False  # called per caption: it must never raise here
+            self._checked_at = now
+            if self._present and was is False:
+                self._pending = ("restored", self._absent_calls)
+                self._absent_calls = 0
+            elif not self._present and was is not False:
+                self._pending = ("missing", 0)
+        if not self._present:
+            self._absent_calls += 1
+        return bool(self._present)
+
+    def take_report(self) -> Optional[Tuple[str, int]]:
+        """The pending state change, once: ``("missing", 0)`` or ``("restored", n)``.
+
+        ``n`` is how many calls were answered while it was gone — on the caption path, how
+        many captions went out untranslated.
+        """
+        report, self._pending = self._pending, None
+        return report
+
+    def degraded_calls(self) -> int:
+        """Calls answered "absent" in the current outage; 0 when nothing is wrong."""
+        return self._absent_calls if self._present is False else 0
 
 
 def venv_python(repo_dir: str) -> str:

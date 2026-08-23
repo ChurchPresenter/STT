@@ -119,6 +119,10 @@ class TestLocalLlmLoadPreconditions:
                 "unload_local_llm": lambda: None,
                 "torch": torch_module,
                 "os": __import__("os"),
+                # Counted where a caption actually asks for the model, so the number
+                # means "captions that went out untranslated" and not "times anything
+                # probed the runtime".
+                "_llm_passthrough_captions": 0,
             })
         ns.setdefault("torch", torch_module)
         return ns["get_local_llm"](), calls, state
@@ -759,3 +763,46 @@ class TestPromptStyleWiring:
             # The measured failure: a reference answered with a different passage.
             return "1 Corinthians 11:1-24 — and the recited text of the passage."
         return _local
+
+
+class TestPassthroughAccounting:
+    """What the operator is told when the runtime the config asks for is gone.
+
+    The incident: a rebuilt venv dropped llama-cpp-python mid-service, get_local_llm
+    returned None for every caption, fallback="skip" sent the source text out with HTTP
+    200, and the only trace was one identical log line per caption. The count is what
+    turns that into a number someone can act on, so it has to count captions — not the
+    probes the status poll makes every five seconds.
+    """
+
+    def _namespace(self, available):
+        return extract_definitions(
+            "speech_to_text.py", ["get_local_llm"],
+            extra_globals={
+                "config": {"live_translation": {"llm": {
+                    "provider": "local", "gguf_repo": "r/x", "gguf_file": "m.gguf"}}},
+                "_local_llm": None,
+                "_local_llm_path": "",
+                "_local_llm_failed": False,
+                "_local_llm_lock": threading.Lock(),
+                "local_llm_available": lambda: available,
+                "_lazy_import_ml_libraries": lambda: None,
+                "_llm_local_model_path": lambda d, r, f: "/nonexistent/m.gguf",
+                "_llm_resolve_gpu_layers": lambda v, has: -1,
+                "MODELS_DIR": "/models",
+                "unload_local_llm": lambda: None,
+                "torch": None,
+                "os": __import__("os"),
+                "_llm_passthrough_captions": 0,
+            })
+
+    def test_each_untranslated_caption_is_counted(self):
+        ns = self._namespace(available=False)
+        for _ in range(3):
+            assert ns["get_local_llm"]() is None
+        assert ns["_llm_passthrough_captions"] == 3
+
+    def test_nothing_is_counted_while_the_runtime_is_there(self):
+        ns = self._namespace(available=True)
+        ns["get_local_llm"]()   # fails later, on the missing model file
+        assert ns["_llm_passthrough_captions"] == 0

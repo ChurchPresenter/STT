@@ -975,7 +975,11 @@
             </nav>
         </div>
 
-        {% block sysreq_banner %}<div id="sysreq_warning" role="alert" aria-live="polite" style="display: none; margin: 0 16px 15px; padding: 10px 14px; background: rgba(245,158,11,0.08); border: 1px solid rgba(245,158,11,0.3); border-radius: var(--radius-sm); color: var(--warning);"></div>{% endblock %}
+        {% block sysreq_banner %}<div id="sysreq_warning" role="alert" aria-live="polite" style="display: none; margin: 0 16px 15px; padding: 10px 14px; background: rgba(245,158,11,0.08); border: 1px solid rgba(245,158,11,0.3); border-radius: var(--radius-sm); color: var(--warning);"></div>
+        <!-- Separate from the requirements banner because this one is about right now: the
+             translation status poll drives it, so a caption path that stops translating
+             mid-service reaches the screen within five seconds instead of on next load. -->
+        <div id="degraded_warning" role="alert" aria-live="assertive" style="display: none; margin: 0 16px 15px; padding: 10px 14px; background: rgba(239,68,68,0.08); border: 1px solid rgba(239,68,68,0.35); border-radius: var(--radius-sm); color: var(--danger);"></div>{% endblock %}
 
         <div id="server-lock-banner" class="server-lock-banner" role="status" aria-live="polite"></div>
 
@@ -1154,6 +1158,12 @@
                         var t = (d && d.trusted_clients) || [];
                         var active = ((d && d.remote_clients) || []).length > 0;
                         setLocked(t.length > 0, t, active, (d && d.a_pushed) || []);
+                        var warn = document.getElementById('degraded_warning');
+                        if (warn) {
+                            var msg = (d && d.degraded) || '';
+                            warn.textContent = msg ? '⚠️ ' + msg : '';
+                            warn.style.display = msg ? 'block' : 'none';
+                        }
                     })
                     .catch(function () {});
             }
