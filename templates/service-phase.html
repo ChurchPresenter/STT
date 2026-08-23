@@ -26,7 +26,26 @@
         display: flex; gap: 1px; flex-wrap: wrap; padding: 12px;
         background: var(--bg-base); border: 1px solid var(--border);
         border-radius: var(--radius-md); margin-bottom: 14px;
+        position: relative;   /* the tooltip is placed against the strip, not the page */
       }
+      /* What the detector heard in one minute. A native title on a 7px cell takes a second
+         to appear and arrives as one unreadable line — this is the same evidence, laid out,
+         and it shows the moment the pointer is on the cell. */
+      #sp-tip {
+        position: absolute; z-index: 20; display: none; pointer-events: none;
+        min-width: 150px; max-width: 260px; padding: 8px 10px;
+        background: var(--bg-card); border: 1px solid var(--border);
+        border-radius: var(--radius-sm); box-shadow: 0 2px 10px rgba(0,0,0,0.5);
+        font-size: 0.78em; line-height: 1.5; color: var(--text-secondary);
+      }
+      #sp-tip.is-visible { display: block; }
+      #sp-tip b { color: var(--text-primary); font-weight: 600; }
+      #sp-tip .sp-tip-kind {
+        font-size: 0.9em; letter-spacing: 0.04em; text-transform: uppercase;
+        padding: 1px 6px; border-radius: var(--radius-sm);
+      }
+      #sp-tip .sp-tip-row { display: flex; gap: 6px; align-items: baseline; }
+      #sp-tip .sp-tip-cues { color: var(--warning); }
       .sp-cell { width: 7px; height: 22px; border-radius: 2px; flex-shrink: 0; }
       .sp-cell.M { background: var(--accent); }
       .sp-cell.S { background: var(--success); }
@@ -64,8 +83,7 @@
         display: flex; align-items: baseline; gap: 10px; padding: 10px 14px;
         border-bottom: 1px solid var(--border); background: var(--bg-base);
       }
-      .sp-tr-head span:first-child { color: var(--text-primary); font-weight: 600; font-size: 0.94em; }
-      .sp-tr-hint { color: var(--text-muted); font-size: 0.82em; margin-left: auto; }
+      .sp-tr-hint { color: var(--text-muted); font-size: 0.82em; }
       .sp-tr-body { max-height: 70vh; overflow-y: auto; }
 
       .sp-cap {
@@ -74,7 +92,30 @@
         color: var(--text-muted); font-size: 0.88em; line-height: 1.45;
       }
       .sp-cap:first-child { border-top: none; }
-      /* The tint is the range: where it starts and stops is where the phase does. */
+      /* One row naming the phase the lines under it belong to, sticky so an operator
+         scrolling a whole service always knows which phase they are reading. */
+      .sp-cap-phase {
+        position: sticky; top: 0; z-index: 2;
+        display: flex; align-items: baseline; gap: 8px;
+        padding: 6px 14px; background: var(--bg-base);
+        border-top: 1px solid var(--border); border-bottom: 1px solid var(--border);
+      }
+      .sp-cap-phase:first-child { border-top: none; }
+      .sp-cap-phase-name {
+        font-size: 0.72em; letter-spacing: 0.04em; text-transform: uppercase;
+        padding: 2px 8px; border-radius: var(--radius-sm);
+      }
+      /* The rail says what kind of phase a line is in, in the same three colours the strip
+         and the headline already use. */
+      .sp-cap.k-M { border-left: 3px solid var(--accent); }
+      .sp-cap.k-S { border-left: 3px solid var(--success); }
+      .sp-cap.k-_ { border-left: 3px solid var(--border); }
+      /* Kind alone cannot separate Sermon 1 from Sermon 2, or Songs 1 from Songs 2 — both
+         sides of the boundary are the same colour. Every other phase carries a faint wash,
+         so consecutive phases always differ by something. */
+      .sp-cap.sp-band { background: rgba(255,255,255,0.035); }
+      /* The tint is the range: where it starts and stops is where the phase does. Declared
+         after the band so a selected line in a banded phase still reads as selected. */
       .sp-cap.inside { background: var(--accent-subtle); color: var(--text-primary); }
       .sp-cap-at {
         font-variant-numeric: tabular-nums; flex: none; min-width: 52px;
@@ -91,6 +132,23 @@
       .sp-cap:hover .sp-cap-set, .sp-cap:focus-within .sp-cap-set { opacity: 1; }
       .sp-cap-set button { padding: 1px 6px; font-size: 0.78em; line-height: 1.3; }
       @media (prefers-reduced-motion: reduce) { .sp-cap-set { transition: none; } }
+
+      /* Jump-to-latest pill — the corrections page's, in this page's palette, and anchored
+         to the transcript pane rather than the viewport because the pane is what scrolls.
+         Shown only while the operator has scrolled off the live edge. */
+      #sp-jump {
+        position: absolute; left: 50%; bottom: 14px; transform: translateX(-50%);
+        z-index: 3; display: none; align-items: center; gap: 6px;
+        padding: 6px 14px; border: 1px solid var(--accent); border-radius: 18px;
+        background: var(--bg-card); color: var(--accent); cursor: pointer;
+        font-size: 0.82em; box-shadow: 0 2px 10px rgba(0,0,0,0.5);
+      }
+      #sp-jump.is-visible { display: flex; }
+      #sp-jump-count {
+        background: var(--accent); color: var(--bg-base); border-radius: 10px;
+        padding: 0 7px; font-weight: 600; font-size: 0.9em;
+      }
+      #sp-jump-count:empty { display: none; }
 
       .sp-block.selected { border-color: var(--accent); background: var(--accent-subtle); }
       .sp-cell.inrange { outline: 1px solid var(--accent); outline-offset: -1px; }
@@ -243,10 +301,12 @@
 
   <div class="sp-tr" id="sp-transcript">
     <div class="sp-tr-head">
-      <span id="sp-tr-title">Transcript</span>
-      <span class="sp-tr-hint" id="sp-tr-hint">Pick a phase to see its words</span>
+      <span class="sp-tr-hint" id="sp-tr-hint">Loading the service…</span>
     </div>
     <div class="sp-tr-body" id="sp-tr-body"></div>
+    <button id="sp-jump" type="button">
+      <span id="sp-jump-count"></span> Scroll to latest &#9660;
+    </button>
   </div>
 </div>
 {% endblock %}
@@ -426,6 +486,34 @@
       + (spData.first_sunday ? ' · first Sunday' : '');
   }
 
+  // Kept out of the markup because renderStrip clears the strip on every tick; this puts it
+  // back rather than leaving a dangling id behind.
+  function spTip() {
+    const strip = document.getElementById('sp-strip');
+    let tip = document.getElementById('sp-tip');
+    if (!tip) {
+      tip = document.createElement('div');
+      tip.id = 'sp-tip';
+      strip.appendChild(tip);
+    }
+    return tip;
+  }
+
+  // What one cell is saying, spelled out: when it was, what the detector called it, the
+  // counts it called it from, any cue words in that minute, and which phase it ended up in.
+  function cellTip(b, i, cls, segs) {
+    const cues = (b.cues && Object.keys(b.cues).length)
+      ? Object.entries(b.cues).map(([k, v]) => esc(k) + '×' + v).join(', ') : '';
+    const seg = (segs || []).find(g => b.end_ms > g.start_ms && b.start_ms < g.end_ms);
+    return '<div class="sp-tip-row"><b>' + esc(fmtWall(b.start_ms)) + '</b>'
+      + '<span class="sp-tip-kind sp-kind-' + kindClass(cls) + '">'
+      + esc(SP_KINDS[cls] || 'Unknown') + '</span></div>'
+      + '<div>minute ' + i + (seg ? ' · ' + esc(seg.label) : '') + '</div>'
+      + '<div>' + b.speech + ' speech · ' + b.music + ' music · ' + b.quiet + ' quiet'
+      + (b.words ? ' · ' + b.words + ' words' : '') + '</div>'
+      + (cues ? '<div class="sp-tip-cues">cues: ' + cues + '</div>' : '<div>no cues</div>');
+  }
+
   function renderStrip() {
     const strip = document.getElementById('sp-strip');
     strip.innerHTML = '';
@@ -437,6 +525,8 @@
       return;
     }
     strip.style.color = '';
+    // Resolved once for the whole strip: every cell asks the same question of the same data.
+    const segs = capSegments();
     spData.bins.forEach((b, i) => {
       const cell = document.createElement('div');
       const hasCue = b.cues && Object.keys(b.cues).length > 0;
@@ -445,11 +535,12 @@
       const inSel = spSel && b.end_ms > spSel.start_ms && b.start_ms < spSel.end_ms;
       cell.className = 'sp-cell ' + (classes[i] || '_') + (hasCue ? ' cue' : '')
         + (inSel ? ' inrange' : '');
-      const cues = hasCue ? Object.entries(b.cues).map(([k, v]) => k + '×' + v).join(', ') : 'no cues';
-      cell.title = 'minute ' + i + ' · ' + (SP_KINDS[classes[i]] || '?')
-        + ' · ' + b.speech + ' speech / ' + b.music + ' music / ' + b.quiet + ' quiet · ' + cues;
+      // Built here rather than on hover: the strip is a few hundred cells, and doing it
+      // once per render costs less than doing it once per pointer move.
+      cell.dataset.tip = cellTip(b, i, classes[i] || '_', segs);
       strip.appendChild(cell);
     });
+    strip.appendChild(spTip());
   }
 
   function renderBlocks() {
@@ -530,8 +621,12 @@
   // nothing told you which sentence you had just taken in or left out — while those edges are
   // what decides the material a summary is written from.
   let spSel = null;      // {start_ms, end_ms, label, kind}
-  let spCaps = [];       // rows in the padded window
-  const CAP_PAD_MS = 8 * 60000;   // enough either side to move a boundary without refetching
+  let spCaps = [];       // every caption of the service on screen, oldest first
+  const CAP_PAD_MS = 8 * 60000;   // slack either side of the service's own span
+  let spTruncated = false;  // the route capped the read, and the tail is not on screen
+  let spFollow = true;   // pinned to the live edge until the operator scrolls off it
+  let spPending = 0;     // lines that arrived while they were reading further up
+  let spCapsBusy = false;   // one caption request at a time, so a slow one cannot stack
 
   // Corrected span first, then one the detector grouped, then a bare block. Whatever the
   // operator has said outranks what was derived, which is the same order everything else
@@ -556,16 +651,45 @@
     loadCaptions(true);
   }
 
+  // The whole service, not one phase. The pane shows every phase and colours the lines by
+  // which one they are in, so the window is the service's own span — and open at the live
+  // end, where words are still arriving.
+  function capWindow() {
+    const bins = spData.bins || [], blocks = spData.blocks || [];
+    let first = bins.length ? bins[0].start_ms : (blocks.length ? blocks[0].start_ms : null);
+    // A service in its first minute has no bins yet, and the operator is watching the words
+    // arrive right now — so the running one falls back to a window wide enough to hold a
+    // service, rather than showing nothing until the detector's first tick.
+    if (first === null && !spSession) first = Date.now() - 4 * 3600000;
+    if (first === null) return null;
+    const last = bins.length ? bins[bins.length - 1].end_ms
+                             : (blocks.length ? blocks[blocks.length - 1].end_ms : first);
+    return { start_ms: Math.max(0, first - CAP_PAD_MS),
+             end_ms: spSession ? last + CAP_PAD_MS : Date.now() + 60000 };
+  }
+
   async function loadCaptions(scroll) {
-    if (!spSel) return;
+    const win = capWindow();
+    if (!win) return;
     const body = document.getElementById('sp-tr-body');
     try {
-      const qs = spQuery({ start_ms: spSel.start_ms - CAP_PAD_MS,
-                           end_ms: spSel.end_ms + CAP_PAD_MS });
+      // 5000 is the route's ceiling; a long service can reach it, and the header says so
+      // rather than letting the tail go missing quietly.
+      const qs = spQuery({ start_ms: win.start_ms, end_ms: win.end_ms, limit: 5000 });
       const resp = await pollFetch('/api/service-phase/transcript' + qs);
       const data = await resp.json();
       if (!data.success) { body.innerHTML = '<div class="sp-cap">' + esc(data.error) + '</div>'; return; }
-      spCaps = data.rows || [];
+      const rows = data.rows || [];
+      // The whole-service read on the slow tick must not wipe the pill's count: lines that
+      // arrived while the operator was reading further up are still unread to them.
+      if (!spFollow && spCaps.length) {
+        const had = new Set(spCaps.map(r => r.id));
+        spPending += rows.filter(r => !had.has(r.id)).length;
+      } else {
+        spPending = 0;
+      }
+      spCaps = rows;
+      spTruncated = !!data.truncated;
       renderCaptions(scroll);
     } catch (e) {
       if (e && e.pollingPaused) return;
@@ -573,40 +697,138 @@
     }
   }
 
+  // Only the tail. A service is a few thousand captions and the operator is watching them
+  // arrive one at a time; refetching all of them every five seconds to learn about the last
+  // one is the kind of poll that shows up in the access log rather than on screen. The slow
+  // tick does the whole-service read, which is what catches a line denied or corrected since.
+  async function pollCaptions() {
+    if (spSession || spCapsBusy || document.hidden) return;
+    spCapsBusy = true;
+    try {
+      if (!spCaps.length) { await loadCaptions(false); return; }
+      const last = spCaps[spCaps.length - 1].ts_ms;
+      const qs = spQuery({ start_ms: last + 1, end_ms: Date.now() + 60000, limit: 5000 });
+      const resp = await pollFetch('/api/service-phase/transcript' + qs);
+      const data = await resp.json();
+      if (!data.success) return;
+      // The window starts a millisecond past the newest line we hold, but a row sharing that
+      // stamp would still come back, so identity decides what is new — not the stamp.
+      const have = new Set(spCaps.map(r => r.id));
+      const fresh = (data.rows || []).filter(r => !have.has(r.id));
+      if (!fresh.length) return;
+      spCaps = spCaps.concat(fresh);
+      if (!spFollow) spPending += fresh.length;
+      renderCaptions(false);
+    } catch (e) {
+      if (e && e.pollingPaused) return;
+    } finally {
+      spCapsBusy = false;
+    }
+  }
+
+  // The phases the lines are coloured by, resolved the same way the timeline resolves them:
+  // groups first, then the blocks no group covers, carrying the song numbering the Opening
+  // implies. Deriving it any other way would let the pane and the timeline disagree about
+  // which phase a sentence is in.
+  function capSegments() {
+    const numbers = songNumbering(serviceStartMs());
+    const segs = groups().map(g => ({
+      start_ms: g.start_ms, end_ms: g.end_ms,
+      label: g.label || 'Phase', kind: g.kind || 'S' }));
+    (spData.blocks || []).forEach(b => {
+      if (groupCovering(b)) return;
+      segs.push({ start_ms: b.start_ms, end_ms: b.end_ms, kind: b.kind,
+                  label: numbers[b.index] || effectiveLabel(b) || SP_KINDS[b.kind] || 'Phase' });
+    });
+    return segs.sort((a, b) => a.start_ms - b.start_ms);
+  }
+
+  // A kind straight from the server goes into a class name, so it is mapped rather than
+  // interpolated: only the three the stylesheet knows about can come out.
+  function kindClass(kind) {
+    return kind === 'M' ? 'M' : (kind === 'S' ? 'S' : '_');
+  }
+
   function renderCaptions(scroll) {
     const body = document.getElementById('sp-tr-body');
-    document.getElementById('sp-tr-title').textContent = spSel ? (spSel.label || 'Phase') : 'Transcript';
-    document.getElementById('sp-tr-hint').textContent = spSel
-      ? 'Click ⇤ or ⇥ on a line to move an edge there'
-      : 'Pick a phase to see its words';
-    if (!spSel) { body.innerHTML = ''; return; }
+    document.getElementById('sp-tr-hint').textContent = spTruncated
+      ? 'Long service — showing the first 5000 lines'
+      : (spSel ? 'Click ⇤ or ⇥ on a line to move an edge there'
+               : 'Pick a phase to move its edges');
     if (!spCaps.length) {
-      body.innerHTML = '<div class="sp-cap">No captions in this stretch.</div>';
+      body.innerHTML = '<div class="sp-cap">No captions in this service yet.</div>';
+      updateJump();
       return;
     }
-    const inside = spCaps.filter(r => r.ts_ms >= spSel.start_ms && r.ts_ms <= spSel.end_ms);
+    const segs = capSegments();
+    const inside = spSel
+      ? spCaps.filter(r => r.ts_ms >= spSel.start_ms && r.ts_ms <= spSel.end_ms) : [];
     const firstIn = inside.length ? inside[0].ts_ms : null;
     const lastIn = inside.length ? inside[inside.length - 1].ts_ms : null;
 
-    body.innerHTML = spCaps.map(r => {
-      const isIn = r.ts_ms >= spSel.start_ms && r.ts_ms <= spSel.end_ms;
-      const edge = r.ts_ms === firstIn ? 'start' : (r.ts_ms === lastIn ? 'end' : '');
-      return '<div class="sp-cap' + (isIn ? ' inside' : '') + '" id="sp-cap-' + r.id + '">'
+    // Captions and phases are both in time order, so one index walking forward does what a
+    // find() per row would, and a whole service is a few thousand rows.
+    let at = -1, band = false;
+    const html = [];
+    spCaps.forEach(r => {
+      let next = at;
+      while (next + 1 < segs.length && segs[next + 1].start_ms <= r.ts_ms) next++;
+      if (next !== at) {
+        at = next;
+        band = !band;
+        // A phase with no captions of its own never gets a header, which is right: there is
+        // nothing under it to label.
+        if (at >= 0 && r.ts_ms <= segs[at].end_ms) {
+          const seg = segs[at];
+          html.push('<div class="sp-cap-phase">'
+            + '<span class="sp-cap-at">' + esc(fmtWall(seg.start_ms)) + '</span>'
+            + '<span class="sp-cap-phase-name sp-kind-' + kindClass(seg.kind) + '">'
+            + esc(seg.label) + '</span></div>');
+        }
+      }
+      const seg = (at >= 0 && r.ts_ms <= segs[at].end_ms) ? segs[at] : null;
+      const isIn = !!spSel && r.ts_ms >= spSel.start_ms && r.ts_ms <= spSel.end_ms;
+      const edge = !spSel ? '' : (r.ts_ms === firstIn ? 'start' : (r.ts_ms === lastIn ? 'end' : ''));
+      html.push('<div class="sp-cap k-' + (seg ? kindClass(seg.kind) : '_')
+          + (band ? ' sp-band' : '') + (isIn ? ' inside' : '') + '" id="sp-cap-' + r.id + '">'
         + '<span class="sp-cap-at">' + esc(fmtWall(r.ts_ms)) + '</span>'
         + '<span class="sp-cap-text">' + esc(r.text)
         + (edge ? '<span class="sp-cap-edge">' + edge + '</span>' : '') + '</span>'
-        + '<span class="sp-cap-set">'
-        +   '<button type="button" title="Start the phase here" '
-        +     'onclick="setEdge(' + r.ts_ms + ', null)">⇤</button>'
-        +   '<button type="button" title="End the phase here" '
-        +     'onclick="setEdge(null, ' + r.ts_ms + ')">⇥</button>'
-        + '</span></div>';
-    }).join('');
+        // Nothing to move an edge of until a phase is picked, so the buttons stay away
+        // rather than sitting there doing nothing.
+        + (spSel
+          ? '<span class="sp-cap-set">'
+            +   '<button type="button" title="Start the phase here" '
+            +     'onclick="setEdge(' + r.ts_ms + ', null)">⇤</button>'
+            +   '<button type="button" title="End the phase here" '
+            +     'onclick="setEdge(null, ' + r.ts_ms + ')">⇥</button>'
+            + '</span>'
+          : '')
+        + '</div>');
+    });
 
+    // Every render rewrites the list, which resets the scroll — so where it was is restored,
+    // or held at the live edge while the operator is following it.
+    const keep = body.scrollTop;
+    body.innerHTML = html.join('');
     if (scroll && firstIn !== null) {
+      spFollow = false;   // they went to a phase to read it, not to watch the tail
       const el = body.querySelector('.sp-cap.inside');
       if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    } else if (spFollow) {
+      body.scrollTop = body.scrollHeight;
+    } else {
+      body.scrollTop = keep;
     }
+    updateJump();
+  }
+
+  // Only on the running service: on a finished one there is no latest to catch up with.
+  function updateJump() {
+    const btn = document.getElementById('sp-jump');
+    if (!btn) return;
+    document.getElementById('sp-jump-count').textContent = spPending > 0 ? spPending : '';
+    btn.classList.toggle('is-visible', !spFollow && !spSession);
   }
 
   // Clicking a line and nudging with ± are the same correction aimed two ways, so they go
@@ -976,6 +1198,11 @@
       if (!spSel) {
         const pick = sermonToOpen();
         if (pick) selectPhase(pick.start_ms, pick.end_ms, pick.label, pick.kind);
+        else loadCaptions(false);   // no phases yet: the words are still worth showing
+      } else {
+        // The whole-service read on the slow tick. The fast poll only ever appends, so a
+        // line denied or corrected since is otherwise still sitting on screen.
+        loadCaptions(false);
       }
     } catch (e) {
       // A paused poll is not an error to report — the last loaded view stays.
@@ -1081,6 +1308,13 @@
     spSession = document.getElementById('sp-session').value || '';
     showArchivedBadge();
     picked.clear();
+    // The panel is about the service that was on screen. Left alone, loadPhases would keep
+    // the old selection and the new service's timeline would disagree with the words beside it.
+    spSel = null;
+    spCaps = [];
+    spTruncated = false;
+    spFollow = true;
+    spPending = 0;
     markSaved();  // the pill belongs to the service that was on screen, not the new one
     loadPhases();
   }
@@ -1164,11 +1398,53 @@
     spData.spans = data.spans || [];
     renderNow();
     renderBlocks();
+    // Blocks moved, so which phase a line is in may have moved with them.
+    renderCaptions(false);
   });
 
   document.addEventListener('DOMContentLoaded', async function () {
+    // Following the live edge is the default, and scrolling up is what stops it — the same
+    // bargain the corrections page makes, in the one box on this page that scrolls.
+    const capBody = document.getElementById('sp-tr-body');
+    capBody.addEventListener('scroll', function () {
+      spFollow = capBody.scrollHeight - capBody.scrollTop - capBody.clientHeight < 40;
+      if (spFollow) spPending = 0;   // caught up
+      updateJump();
+    });
+    document.getElementById('sp-jump').addEventListener('click', function () {
+      spFollow = true;
+      spPending = 0;
+      capBody.scrollTop = capBody.scrollHeight;
+      updateJump();
+    });
+
+    // One delegated pair of handlers for the whole strip: the cells are rebuilt on every
+    // tick, and per-cell listeners would have to be rebuilt with them.
+    const strip = document.getElementById('sp-strip');
+    strip.addEventListener('mouseover', function (ev) {
+      const cell = ev.target.closest('.sp-cell');
+      if (!cell || !cell.dataset.tip) return;
+      const tip = spTip();
+      tip.innerHTML = cell.dataset.tip;
+      tip.classList.add('is-visible');
+      // Above the cell it describes, and shifted back inside the strip when the cell is near
+      // an edge — a tooltip half off the panel is worse than none.
+      const box = strip.getBoundingClientRect(), at = cell.getBoundingClientRect();
+      const left = Math.max(6, Math.min(at.left - box.left + at.width / 2 - tip.offsetWidth / 2,
+                                        box.width - tip.offsetWidth - 6));
+      const above = at.top - box.top - tip.offsetHeight - 8;
+      tip.style.left = left + 'px';
+      tip.style.top = (above < 0 ? at.bottom - box.top + 8 : above) + 'px';
+    });
+    strip.addEventListener('mouseleave', function () {
+      spTip().classList.remove('is-visible');
+    });
+
     await loadSessions();
     loadPhases();
+    // Fast enough that a line appears while it is still being said. Only the running
+    // service has a tail to poll, and pollCaptions is what decides that.
+    setInterval(pollCaptions, 5000);
     // Only the live service changes under us; polling a finished one would keep
     // overwriting whatever the operator is part-way through reading.
     setInterval(function () {
