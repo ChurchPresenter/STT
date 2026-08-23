@@ -208,10 +208,11 @@ detect_gpu() {
         if [ "$(uname -m)" = "arm64" ]; then
             print_success "Apple Silicon detected — MPS (Metal) GPU acceleration available"
             return 0
-        else
-            print_warning "Intel Mac detected — no GPU acceleration (CPU only)"
-            return 1
         fi
+        # Unreachable via main() — detect_os exits on an Intel Mac. Kept so this
+        # stays a check rather than a claim if the call order ever changes.
+        print_error "This Mac has an Intel processor — unsupported (see detect_os)"
+        return 1
     else
         if command -v nvidia-smi &> /dev/null; then
             print_success "NVIDIA GPU detected:"
