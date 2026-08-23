@@ -1,0 +1,285 @@
+name: Build Demo
+
+# The demo is a separate artifact from the application and is published to a
+# separate repository. That separation is the point of this file existing rather
+# than jobs being added to build.yml: build.yml's release step publishes
+# `artifacts/**/*`, so a demo job living there would land its zips in the app's
+# release the moment it was added, and the website resolves download slots from
+# that release. Here there is no path to it — the only `gh release create` below
+# names ChurchPresenter/STT-Demo explicitly.
+#
+# The recording is generated, not committed: `--synthetic` builds a written
+# service from stt/demo_synth.py, so no congregation speech passes through CI.
+
+on:
+  workflow_dispatch:
+    inputs:
+      windows:
+        description: "Build Windows"
+        type: boolean
+        default: true
+      macos:
+        description: "Build macOS (Apple Silicon)"
+        type: boolean
+        default: true
+      linux:
+        description: "Build Linux"
+        type: boolean
+        default: true
+      publish:
+        description: "Publish a release to ChurchPresenter/STT-Demo"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: demo
+  cancel-in-progress: true
+
+env:
+  DEMO_REPO: ChurchPresenter/STT-Demo
+
+jobs:
+  # ── Gate ───────────────────────────────────────────────────────────────────
+  # The demo's own tests, including test_demo_spec.py, which asserts the ML
+  # excludes and the engineio hidden import are still in demo.spec. Those are the
+  # two failures that otherwise surface only after a full build, or on a user's
+  # machine.
+  test:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v9.0.0
+        with:
+          python-version: "3.11"
+      - name: Install test deps
+        run: |
+          uv venv
+          uv pip install -r requirements-dev.txt
+      - name: Lint
+        run: uv run ruff check .
+      - name: Type check (stt/ package)
+        run: uv run mypy
+      - name: Test
+        run: uv run pytest tests/test_demo_mode.py tests/test_demo_playback.py
+             tests/test_demo_api.py tests/test_demo_guard.py tests/test_demo_synth.py
+             tests/test_demo_scrub.py tests/test_demo_redact.py tests/test_demo_spec.py
+
+  version:
+    needs: test
+    runs-on: ubuntu-22.04
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+      - id: v
+        run: echo "version=$(cat VERSION)" >> "$GITHUB_OUTPUT"
+
+  # ── Windows ────────────────────────────────────────────────────────────────
+  build-windows:
+    needs: version
+    if: inputs.windows
+    runs-on: windows-latest
+    env:
+      WINDOWS_SIGNING_ENABLED: ${{ secrets.WINDOWS_CERTIFICATE_PFX != '' && 'true' || 'false' }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v9.0.0
+        with:
+          python-version: "3.11"
+      - name: Install build tools
+        shell: bash
+        # The demo bundles the whole application, so unlike the bootstrapper it
+        # needs the web stack at build time. No ML libraries: demo.spec excludes
+        # them, and a build that pulled them in would be the bug that check exists
+        # to catch.
+        run: |
+          uv venv
+          uv pip install pyinstaller pillow flask flask-socketio flask-cors \
+            python-socketio requests certifi "sentry-sdk>=2.0,<3"
+      - name: Build
+        shell: bash
+        run: uv run python packaging/build.py --demo --synthetic
+      - name: Sign demo binary
+        if: env.WINDOWS_SIGNING_ENABLED == 'true'
+        shell: pwsh
+        env:
+          CERTIFICATE_PFX: ${{ secrets.WINDOWS_CERTIFICATE_PFX }}
+          CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+        run: |
+          $pfx = Join-Path $env:RUNNER_TEMP "signing.pfx"
+          [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:CERTIFICATE_PFX))
+          $signtool = Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin\10.*\x64\signtool.exe" |
+            Sort-Object FullName -Descending | Select-Object -First 1
+          if (-not $signtool) { throw "signtool.exe not found in Windows SDK" }
+          & $signtool.FullName sign /f $pfx /p $env:CERTIFICATE_PASSWORD `
+            /tr http://timestamp.digicert.com /td sha256 /fd sha256 dist\STT-Demo\STT-Demo.exe
+          if ($LASTEXITCODE -ne 0) { throw "signtool failed" }
+      - name: Package
+        shell: pwsh
+        # No installer: the brief is that a user unzips it and runs it.
+        run: Compress-Archive -Path dist\STT-Demo -DestinationPath STT-Demo-windows.zip
+      - uses: actions/upload-artifact@v7
+        with:
+          name: STT-Demo-windows
+          path: STT-Demo-windows.zip
+          retention-days: 7
+
+  # ── macOS ──────────────────────────────────────────────────────────────────
+  build-macos:
+    needs: version
+    if: inputs.macos
+    runs-on: macos-latest
+    env:
+      MACOS_SIGNING_ENABLED: ${{ secrets.MACOS_CERTIFICATE_P12 != '' && 'true' || 'false' }}
+      NOTARIZATION_ENABLED: ${{ secrets.MACOS_NOTARIZATION_API_KEY_P8 != '' && 'true' || 'false' }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v9.0.0
+        with:
+          python-version: "3.11"
+      - name: Install build tools
+        run: |
+          uv venv
+          uv pip install pyinstaller pillow flask flask-socketio flask-cors \
+            python-socketio requests certifi "sentry-sdk>=2.0,<3"
+      - name: Build
+        run: uv run python packaging/build.py --demo --synthetic
+      - name: Import signing certificate into temporary keychain
+        if: env.MACOS_SIGNING_ENABLED == 'true'
+        env:
+          CERTIFICATE_P12: ${{ secrets.MACOS_CERTIFICATE_P12 }}
+          CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+        # Only the Developer ID *Application* certificate: the demo ships as a
+        # zipped .app, so there is no pkg to sign and no Installer certificate
+        # needed. That is the one real difference from build.yml's macOS leg.
+        run: |
+          KEYCHAIN_PATH="$RUNNER_TEMP/signing.keychain-db"
+          KEYCHAIN_PASSWORD=$(openssl rand -base64 32)
+
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+
+          echo "$CERTIFICATE_P12" | base64 --decode > "$RUNNER_TEMP/certificate.p12"
+          security import "$RUNNER_TEMP/certificate.p12" \
+            -k "$KEYCHAIN_PATH" -P "$CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+
+          security set-key-partition-list -S apple-tool:,apple: -s \
+            -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+
+          EXISTING=$(security list-keychains -d user | tr -d '"' | awk '{$1=$1};1')
+          security list-keychains -d user -s "$KEYCHAIN_PATH" $EXISTING
+          echo "Signing certificate imported"
+      - name: Sign app bundle
+        env:
+          IDENTITY_NAME: ${{ secrets.MACOS_IDENTITY_NAME }}
+        # Same order as build.yml: nested Mach-O first, frameworks (whose
+        # extensionless main binary the file sweep misses), then the bundle.
+        run: |
+          APP="dist/STT Demo.app"
+          if [ "$MACOS_SIGNING_ENABLED" = "true" ]; then
+            find "$APP" -type f \( -name "*.dylib" -o -name "*.so" \) \
+              -exec codesign --force --options runtime --timestamp --sign "$IDENTITY_NAME" {} \;
+            find "$APP" -type d -name "*.framework" \
+              -exec codesign --force --options runtime --timestamp --sign "$IDENTITY_NAME" {} \;
+            find "$APP/Contents/MacOS" -maxdepth 2 -name "Python" -type f \
+              -exec codesign --force --options runtime --timestamp \
+                --entitlements installer/macos/entitlements.plist --sign "$IDENTITY_NAME" {} \;
+            codesign --force --options runtime --timestamp \
+              --entitlements installer/macos/entitlements.plist --sign "$IDENTITY_NAME" "$APP"
+            codesign --verify --deep --strict "$APP"
+          else
+            find "$APP" -type f \( -name "*.dylib" -o -name "*.so" \) \
+              -exec codesign --force --sign - {} \;
+            find "$APP/Contents/MacOS" -maxdepth 2 -name "Python" -type f \
+              -exec codesign --force --sign - {} \;
+            codesign --force --sign - "$APP"
+          fi
+      - name: Package
+        # ditto, not zip: it preserves the symlinks and extended attributes inside
+        # a .app, and a plain zip corrupts the bundle's signature.
+        run: ditto -c -k --keepParent "dist/STT Demo.app" STT-Demo-macos-arm64.zip
+      - name: Notarize and staple
+        if: env.NOTARIZATION_ENABLED == 'true' && env.MACOS_SIGNING_ENABLED == 'true'
+        env:
+          API_KEY_P8: ${{ secrets.MACOS_NOTARIZATION_API_KEY_P8 }}
+          API_KEY_ID: ${{ secrets.MACOS_NOTARIZATION_API_KEY_ID }}
+          API_ISSUER_ID: ${{ secrets.MACOS_NOTARIZATION_API_ISSUER_ID }}
+        # The zip is what gets submitted, but the ticket staples to the .app —
+        # so the archive is rebuilt afterwards to carry it. Without that a
+        # download works only while Apple's service is reachable.
+        run: |
+          echo "$API_KEY_P8" | base64 --decode > "$RUNNER_TEMP/AuthKey.p8"
+          xcrun notarytool submit STT-Demo-macos-arm64.zip \
+            --key "$RUNNER_TEMP/AuthKey.p8" \
+            --key-id "$API_KEY_ID" \
+            --issuer "$API_ISSUER_ID" \
+            --wait
+          xcrun stapler staple "dist/STT Demo.app"
+          rm STT-Demo-macos-arm64.zip
+          ditto -c -k --keepParent "dist/STT Demo.app" STT-Demo-macos-arm64.zip
+          spctl --assess --type execute -vv "dist/STT Demo.app"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: STT-Demo-macos-arm64
+          path: STT-Demo-macos-arm64.zip
+          retention-days: 7
+
+  # ── Linux ──────────────────────────────────────────────────────────────────
+  build-linux:
+    needs: version
+    if: inputs.linux
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v9.0.0
+        with:
+          python-version: "3.11"
+      - name: Install build tools
+        run: |
+          uv venv
+          uv pip install pyinstaller pillow flask flask-socketio flask-cors \
+            python-socketio requests certifi "sentry-sdk>=2.0,<3"
+      - name: Build
+        run: uv run python packaging/build.py --demo --synthetic
+      - name: Package
+        run: tar -czf STT-Demo-linux.tar.gz -C dist STT-Demo
+      - uses: actions/upload-artifact@v7
+        with:
+          name: STT-Demo-linux
+          path: STT-Demo-linux.tar.gz
+          retention-days: 7
+
+  # ── Publish ────────────────────────────────────────────────────────────────
+  # Opt-in, and to the demo repository only. GITHUB_TOKEN cannot reach another
+  # repository, which is exactly the property wanted here: without
+  # DEMO_RELEASE_TOKEN this job fails rather than falling back to publishing
+  # somewhere it should not.
+  publish:
+    needs: [version, build-windows, build-macos, build-linux]
+    if: always() && inputs.publish
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          path: artifacts/
+      - name: Collect
+        run: |
+          mkdir -p out
+          find artifacts -type f \( -name "*.zip" -o -name "*.tar.gz" \) -exec mv {} out/ \;
+          ls -la out
+          test -n "$(ls -A out)" || { echo "nothing was built"; exit 1; }
+          (cd out && shasum -a 256 * > SHA256SUMS.txt && cat SHA256SUMS.txt)
+      - name: Publish to the demo repository
+        env:
+          GH_TOKEN: ${{ secrets.DEMO_RELEASE_TOKEN }}
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          test -n "$GH_TOKEN" || { echo "DEMO_RELEASE_TOKEN is not set"; exit 1; }
+          gh release create "demo-v$VERSION" out/* \
+            --repo "$DEMO_REPO" \
+            --title "STT Demo $VERSION" \
+            --notes "Recorded-playback demo of STT $VERSION. Unzip and run — no Python, no models, no install. Drop a session .db into the sessions/ folder beside the executable to replay a different service."

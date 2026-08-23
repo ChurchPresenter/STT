@@ -56,10 +56,38 @@ PORT_SEARCH_LIMIT = 12
 _TRUE = {"1", "true", "yes", "on"}
 
 
-def enabled(environ: Optional[MutableMapping[str, str]] = None) -> bool:
-    """Whether this process is a demo."""
+def bundled_recording_dir(meipass: Optional[str] = None) -> Optional[str]:
+    """The recording folder inside a frozen demo bundle, if this is one.
+
+    ``meipass`` defaults to PyInstaller's unpack directory. A build that is not frozen,
+    or a frozen build of the real application, has no such folder.
+    """
+    import sys
+
+    root = meipass if meipass is not None else getattr(sys, "_MEIPASS", None)
+    if not root:
+        return None
+    path = os.path.join(str(root), os.path.dirname(BUNDLED_SESSION))
+    return path if os.path.isdir(path) else None
+
+
+def enabled(environ: Optional[MutableMapping[str, str]] = None,
+            meipass: Optional[str] = None) -> bool:
+    """Whether this process is a demo.
+
+    Two independent answers, because the consequences of getting it wrong are silent
+    and irreversible: a demo that failed to identify itself would write into ``~/.stt``
+    — a real install's data directory — and report itself to the collector as a genuine
+    install, which cannot be taken back.
+
+    The environment variable is how the runtime hook and a developer both switch it on.
+    The bundled recording is the fail-closed half: only a demo build carries one, so a
+    frozen bundle that has it is a demo whether or not the hook ran.
+    """
     env = os.environ if environ is None else environ
-    return str(env.get(ENV_FLAG, "")).strip().lower() in _TRUE
+    if str(env.get(ENV_FLAG, "")).strip().lower() in _TRUE:
+        return True
+    return bundled_recording_dir(meipass) is not None
 
 
 # --- data directory --------------------------------------------------------

@@ -28,6 +28,37 @@ def test_enabled_defaults_to_off_when_unset():
     assert demo_mode.enabled({}) is False
 
 
+def test_a_frozen_bundle_carrying_a_recording_is_a_demo(tmp_path):
+    """The fail-closed half. If the runtime hook that sets the env var were ever
+    skipped, the build would write into a real install's data directory and report
+    itself to the collector as a genuine install — both silent, and the ping cannot
+    be taken back. Only a demo build carries a recording, so its presence settles it."""
+    (tmp_path / os.path.dirname(demo_mode.BUNDLED_SESSION)).mkdir(parents=True)
+
+    assert demo_mode.enabled({}, meipass=str(tmp_path)) is True
+
+
+def test_a_frozen_build_of_the_real_app_is_not_a_demo(tmp_path):
+    assert demo_mode.enabled({}, meipass=str(tmp_path)) is False
+
+
+def test_running_from_source_is_not_a_demo_without_the_flag():
+    assert demo_mode.enabled({}, meipass=None) is False
+
+
+def test_the_flag_still_wins_on_its_own(tmp_path):
+    """A developer runs the demo from a checkout, where there is no bundle at all."""
+    assert demo_mode.enabled({demo_mode.ENV_FLAG: "1"}, meipass=str(tmp_path)) is True
+
+
+def test_the_bundled_recording_is_reported_when_present(tmp_path):
+    expected = tmp_path / os.path.dirname(demo_mode.BUNDLED_SESSION)
+    expected.mkdir(parents=True)
+
+    assert demo_mode.bundled_recording_dir(str(tmp_path)) == str(expected)
+    assert demo_mode.bundled_recording_dir(None) is None
+
+
 # --- the data root ---------------------------------------------------------
 
 

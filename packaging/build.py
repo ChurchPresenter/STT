@@ -108,14 +108,16 @@ def main():
     spec = "demo.spec" if args.demo else "watchdog.spec"
     out_name = "STT-Demo" if args.demo else "STT"
 
-    if args.demo:
-        os.environ["STT_DEMO_DB"] = _resolve_demo_session(args, parser)
-
     # Clean previous artefacts — only this target's, so building the demo does not
-    # silently delete a bootstrapper someone is about to sign.
+    # silently delete a bootstrapper someone is about to sign. Before the session is
+    # resolved, not after: --synthetic generates into build/, and cleaning afterwards
+    # deleted the recording the spec was about to bundle.
     shutil.rmtree(os.path.join(ROOT, "build"), ignore_errors=True)
     for name in (out_name, "STT Demo.app") if args.demo else (out_name,):
         shutil.rmtree(os.path.join(ROOT, "dist", name), ignore_errors=True)
+
+    if args.demo:
+        os.environ["STT_DEMO_DB"] = _resolve_demo_session(args, parser)
 
     # Generate application icon (requires Pillow)
     run([sys.executable, os.path.join(PACKAGING_DIR, "make_icon.py")])
