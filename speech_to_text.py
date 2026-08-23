@@ -958,6 +958,14 @@ from stt.service_phase import (
     save_group_correction as _service_phase_save_group,
 )
 from stt.optional_deps import RuntimeProbe as _RuntimeProbe
+# The operator's live marks. They resolve into ordinary spans, which is why nothing
+# downstream — the timeline, sermon_ranges, the summariser — has to learn what a mark is.
+from stt.phase_marks import (
+    END_LABEL as _MARK_END,
+    describe as _phase_marks_describe,
+    is_mark as _phase_is_mark,
+    resolve as _phase_marks_resolve,
+)
 from stt.phase_rules import load_rules as _phase_rules_load
 from stt.session_index import (
     describe as _session_describe,
@@ -5537,6 +5545,12 @@ def get_service_phase():
     except Exception as e:
         return jsonify({"success": False, "error": f"{type(e).__name__}: {e}"}), 500
 
+    # Resolved here rather than in the page: the rule for where a marked phase ends is the
+    # one the summariser applies, and two implementations of it would eventually disagree
+    # about which stretch a summary was written from.
+    now_ms = int(time.time() * 1000)
+    mark_spans = _phase_marks_resolve(corrections, result.get("blocks", []), now_ms=now_ms)
+
     return jsonify({
         "success": True,
         "session_id": os.path.basename(db_path),
@@ -5553,6 +5567,8 @@ def get_service_phase():
         "classes": result.get("classes", ""),
         "spans": result.get("spans", []),
         "corrections": corrections,
+        "mark_spans": mark_spans,
+        "marked": _phase_marks_describe(corrections, now_ms=now_ms),
     })
 
 
@@ -5973,6 +5989,77 @@ def delete_service_phase_correction():
 
     _archive_write_done(db_path, is_live)
     return jsonify({"success": True, "removed": removed, "corrections": corrections})
+
+
+@app.route("/api/service-phase/mark", methods=["POST"])
+def mark_service_phase():
+    """Record the moment the operator says a phase begins — or ends.
+
+    The row is a correction with a start and no end, which is what makes it a mark: every
+    consumer written before marks existed tests both edges, so it is invisible to them
+    rather than half-understood. What it means is resolved in stt/phase_marks.
+
+    Deliberately not a span. An operator in the room knows the exact moment and can name a
+    stretch before it is over, which the detector cannot; an operator watching a service
+    will also mark a start and never mark the end, which is why the end stays the
+    detector's job unless they say otherwise.
+    """
+    if not check_ip_whitelist():
+        return jsonify({"success": False, "error": "Access denied"}), 403
+
+    data = _control_params(keep_blank=True)
+    db_path, is_live, err = _archive_resolve_db(data.get("session"))
+    if err:
+        return err
+
+    undo = str(data.get("undo") or "").lower() in ("1", "true", "yes")
+    ends = str(data.get("end") or "").lower() in ("1", "true", "yes")
+    label = (data.get("label") or "").strip()[:120]
+    kind = (data.get("kind") or "").strip()[:8]
+    if ends:
+        # The sentinel is the server's business, not the page's: "the operator said
+        # something stopped" is one fact, and only one place should know how it is spelled.
+        label, kind = _MARK_END, "_"
+
+    # Its own moment, or the one the page pressed: a press travelling over a slow link
+    # should land where the operator was, not where the server got to.
+    at_ms = coerce_int(data.get("at_ms"), 0, lo=0, hi=2 ** 62) or int(time.time() * 1000)
+    if not undo and not label:
+        return jsonify({"success": False, "error": "A mark needs a phase name."}), 400
+
+    try:
+        conn = sqlite3.connect(db_path, timeout=5)
+        try:
+            removed = 0
+            row_id = None
+            if undo:
+                # The newest mark only. Undo is for the press that just happened — a mark
+                # from earlier in the service is corrected by marking again, where the
+                # operator can see what they are changing.
+                latest = [c for c in _service_phase_corrections(conn) if _phase_is_mark(c)]
+                if latest:
+                    removed = _service_phase_delete_correction_by_id(
+                        conn, int(latest[-1].get("id") or 0))
+            else:
+                row_id = _service_phase_save_correction(
+                    conn, None, kind=kind or None, label=label, start_ms=at_ms,
+                    end_ms=None, note="live mark",
+                    corrected_at=datetime.now().isoformat(timespec="seconds"))
+            corrections = _service_phase_corrections(conn)
+            blocks = _service_phase_load(conn).get("blocks", [])
+        finally:
+            conn.close()
+    except Exception as e:
+        return jsonify({"success": False, "error": f"{type(e).__name__}: {e}"}), 500
+
+    _archive_write_done(db_path, is_live)
+    now_ms = int(time.time() * 1000)
+    return jsonify({
+        "success": True, "id": row_id, "removed": removed, "at_ms": at_ms,
+        "corrections": corrections,
+        "mark_spans": _phase_marks_resolve(corrections, blocks, now_ms=now_ms),
+        "marked": _phase_marks_describe(corrections, now_ms=now_ms),
+    })
 
 
 @app.route("/api/service-phase/group", methods=["POST"])
@@ -17036,6 +17123,11 @@ def _sermon_summary_scan(blocks, db_path, ignore_settle=False, is_live=True,
     cfg = _sermon_summary_config()
     if not cfg.get("enabled", False) and not ignore_settle:
         return 0
+    # A phase the operator marked live is a correction like any other by the time it gets
+    # here — the resolution is what turns "the sermon starts now" into the stretch it
+    # turned out to be, using the detector for the end they did not mark.
+    corrections = list(corrections) + _phase_marks_resolve(
+        corrections, blocks, now_ms=int(time.time() * 1000))
     ready = _sermon_ready(
         _sermon_ranges(blocks, corrections,
                        min_minutes=coerce_int(cfg.get("min_minutes"), 8, lo=1, hi=240)),
@@ -17351,6 +17443,10 @@ def _sermon_begin_finalising(db_path):
             corrections = _service_phase_corrections(conn)
             stored = _sermon_load_all(conn)
         min_minutes = coerce_int(cfg.get("min_minutes"), 8, lo=1, hi=240)
+        # The same resolution the tick applies: a service that ends with a marked sermon
+        # still owes a summary of the stretch the operator marked, not the detector's.
+        corrections = list(corrections) + _phase_marks_resolve(
+            corrections, blocks, now_ms=int(time.time() * 1000))
         owed = _sermon_unfinished(
             _sermon_ranges(blocks, corrections, min_minutes=min_minutes), stored,
             min_minutes=min_minutes)

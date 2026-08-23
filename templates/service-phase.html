@@ -136,6 +136,30 @@
       .sp-cap-set button { padding: 1px 6px; font-size: 0.78em; line-height: 1.3; }
       @media (prefers-reduced-motion: reduce) { .sp-cap-set { transition: none; } }
 
+      /* The operator's row: the present, under a list of everything already decided. The
+         accent border is the one place on this page that says "you act here". */
+      .sp-mark-row {
+        border-color: var(--accent); background: var(--accent-subtle);
+        position: sticky; bottom: 0; z-index: 1;
+      }
+      .sp-mark-row.sp-mark-idle { border-color: var(--border); background: var(--bg-card); }
+      .sp-mark-say { color: var(--text-secondary); font-size: 0.88em; }
+      .sp-mark-hint { color: var(--text-muted); font-size: 0.86em; }
+      .sp-mark-go {
+        background: var(--accent); color: var(--text-primary); border-color: var(--accent);
+        font-weight: 600;
+      }
+      /* Reads at a glance in a dim room by someone who is also doing something else. */
+      .sp-mark-state { color: var(--accent); font-size: 0.86em; margin-left: auto; }
+
+      /* A phase the operator marked live, so the timeline says which rows are theirs. */
+      .sp-block.sp-marked { border-color: var(--accent); }
+      .sp-marked-tag {
+        font-size: 0.72em; letter-spacing: 0.04em; text-transform: uppercase;
+        padding: 2px 8px; border-radius: var(--radius-sm);
+        color: var(--accent); background: rgba(41,121,255,0.16);
+      }
+
       /* Jump-to-latest pill — the corrections page's, in this page's palette, and anchored
          to the transcript pane rather than the viewport because the pane is what scrolls.
          Shown only while the operator has scrolled off the live edge. */
@@ -426,10 +450,17 @@
         if (mine.some(k => c.start_ms < k.end_ms && c.end_ms > k.start_ms)) return;
         mine.push(Object.assign({ detected: false }, c));
       });
-    const found = (spData.spans || [])
+    // What the operator marked live, resolved on the server so the page and the summariser
+    // cannot disagree about where a marked phase ended. Ranked under a span they drew while
+    // reviewing — that is the more considered statement — and over anything detected.
+    const marked = (spData.mark_spans || [])
       .filter(s => !mine.some(g => s.start_ms < g.end_ms && g.start_ms < s.end_ms))
+      .map(s => Object.assign({ detected: false, note: '' }, s, { marked: true }));
+    const claimed = mine.concat(marked);
+    const found = (spData.spans || [])
+      .filter(s => !claimed.some(g => s.start_ms < g.end_ms && g.start_ms < s.end_ms))
       .map((s, i) => Object.assign({ id: 'span-' + i, detected: true, note: '' }, s));
-    return mine.concat(found).sort((a, b) => a.start_ms - b.start_ms);
+    return claimed.concat(found).sort((a, b) => a.start_ms - b.start_ms);
   }
 
   function groupCovering(b) {
@@ -552,6 +583,7 @@
     host.innerHTML = '';
     if (!spData.blocks.length) {
       host.innerHTML = '<div class="sp-empty">Nothing detected yet.</div>';
+      host.appendChild(markRow());   // the first minutes are exactly when marking helps most
       return;
     }
     const anchor = serviceStartMs();
@@ -617,6 +649,83 @@
                (fix.corrected_at ? ' at ' + esc(fix.corrected_at) : '') + '</span>' : '');
       host.appendChild(row);
     });
+    host.appendChild(markRow());
+  }
+
+  // The operator's own row, always the last one: the detector's rows are the past, and this
+  // is the present. It exists because the two are good at different things — the detector
+  // never misses a transition but is a minute or two late and cannot name a stretch until
+  // it is over, while an operator in the room knows the moment exactly and knows what it is
+  // before it has finished. Pressing here says only when and what; where it *ends* stays
+  // with the detector unless they press again, so marking a start and then watching the
+  // service instead of the screen costs nothing.
+  // Held on the page rather than read from the <select> at press time, so the tick that
+  // redraws this row every twenty seconds cannot reset what the operator had chosen.
+  let spMarkLabel = 'Sermon 1';
+
+  function markRow() {
+    const row = document.createElement('div');
+    row.className = 'sp-block sp-mark-row';
+    if (spSession) {
+      // "Now" is not a moment in a finished service. Its edges are moved with the ⇤ ⇥
+      // controls on the transcript, which say which words are in.
+      row.className += ' sp-mark-idle';
+      row.innerHTML = '<span class="sp-pick-gap"></span>'
+        + '<span class="sp-mark-hint">Reviewing a finished service — move edges from the '
+        + 'transcript beside it.</span>';
+      return row;
+    }
+    const opts = SP_LABELS.map(l =>
+      '<option value="' + l + '"' + (l === spMarkLabel ? ' selected' : '') + '>' + l + '</option>'
+    ).join('');
+    row.innerHTML =
+      '<span class="sp-pick-gap"></span>' +
+      '<span class="sp-time">' + fmtWall(Date.now()) + ' · now</span>' +
+      '<span class="sp-mark-say">This is</span>' +
+      '<select id="sp-mark-label" onchange="spMarkLabel = this.value">' + opts + '</select>' +
+      '<button type="button" class="sp-mark-go" onclick="markNow()">Starts now</button>' +
+      '<button type="button" onclick="markEnd()">Ends now</button>' +
+      '<button type="button" class="sp-undo" onclick="undoMark()">Undo</button>' +
+      '<span class="sp-mark-state">' + esc(spData.marked || 'nothing marked yet') + '</span>';
+    return row;
+  }
+
+  async function postMark(body, said) {
+    try {
+      const resp = await fetch('/api/service-phase/mark', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: spBody(body)
+      });
+      const data = await resp.json();
+      if (!data.success) { showAlert('Could not mark: ' + data.error, 'error'); return; }
+      spData.corrections = data.corrections || [];
+      spData.mark_spans = data.mark_spans || [];
+      spData.marked = data.marked || '';
+      showAlert(said, 'success');
+      renderNow();
+      renderBlocks();
+      renderStrip();
+      renderCaptions(false);
+    } catch (e) {
+      showAlert('Could not mark: ' + e, 'error');
+    }
+  }
+
+  // The moment is taken here, not on the server: a press travelling over a slow link should
+  // land where the operator was standing, not where the request arrived.
+  function markNow() {
+    const kind = spMarkLabel === 'Music' || spMarkLabel.startsWith('Songs') ? 'M' : 'S';
+    postMark({ label: spMarkLabel, kind: kind, at_ms: Date.now() },
+             spMarkLabel + ' starts now.');
+  }
+
+  function markEnd() {
+    postMark({ end: true, at_ms: Date.now() }, 'Marked as ended.');
+  }
+
+  function undoMark() {
+    postMark({ undo: true }, 'Last mark removed.');
   }
 
   // The phase whose words are on screen, and the captions around it.
@@ -919,7 +1028,8 @@
   function groupRow(g, anchor) {
     const row = document.createElement('div');
     const isSel = spSel && spSel.start_ms === g.start_ms && spSel.end_ms === g.end_ms;
-    row.className = 'sp-block corrected sp-group' + (isSel ? ' selected' : '');
+    row.className = 'sp-block corrected sp-group' + (isSel ? ' selected' : '')
+      + (g.marked ? ' sp-marked' : '');
     row.addEventListener('click', ev => {
       if (ev.target.closest('button, select, input, a')) return;
       selectPhase(g.start_ms, g.end_ms, g.label, g.kind || 'S');
@@ -933,8 +1043,11 @@
       '<span class="sp-time">' + fmtWall(g.start_ms) + ' – ' + fmtWall(g.end_ms) + '</span>' +
       '<span class="sp-time sp-since">' + into + '</span>' +
       '<span class="sp-now-kind sp-kind-' + (g.kind || '_') + '">' +
-        (g.detected ? 'detected' : 'grouped') + '</span>' +
+        (g.detected ? 'detected' : (g.marked ? 'marked' : 'grouped')) + '</span>' +
       '<span class="sp-label">' + esc(g.label) + '</span>' +
+      // Said rather than implied: a phase still running is one the operator can still end,
+      // and one whose end the detector may still move.
+      (g.marked && g.open ? '<span class="sp-marked-tag">running</span>' : '') +
       '<span class="sp-conf">' + Math.round((g.end_ms - g.start_ms) / 60000) + ' min · '
         + covered.length + ' blocks'
         + (g.detected ? ' · ' + Math.round((g.confidence || 0) * 100) + '%' : '') + '</span>' +

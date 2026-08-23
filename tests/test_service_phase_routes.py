@@ -21,6 +21,7 @@ from stt.phase_rules import load_rules
 from stt.coercion import coerce_int
 from stt.db_maintenance import checkpoint_and_release, open_readonly
 from stt.session_index import describe, index, resolve_session
+from stt.phase_marks import END_LABEL, describe as describe_marks, is_mark, resolve as resolve_marks
 from stt.service_phase import (
     analyze,
     delete_correction,
@@ -75,7 +76,8 @@ def make_ns(*, live_db=None, params=None, args=None, archive=(), saved=None):
          "_service_phase_first_sunday", "_service_phase_config",
          "_archive_session_paths", "_archive_resolve_db", "_archive_write_done",
          "_archive_open_ro", "rerun_service_phase", "list_service_phase_sessions",
-         "save_service_phase_settings", "get_service_phase_transcript"],
+         "save_service_phase_settings", "get_service_phase_transcript",
+         "mark_service_phase"],
         extra_globals={
             "os": os,
             "_db_iter_databases": lambda dirs: list(archive),
@@ -112,6 +114,12 @@ def make_ns(*, live_db=None, params=None, args=None, archive=(), saved=None):
             "_service_phase_save_group": save_group_correction,
             "app": type("A", (), {"route": staticmethod(lambda *a, **k: (lambda f: f))})(),
             "datetime": __import__("datetime").datetime,
+            "time": __import__("time"),
+            # A mark is a correction row with no end; these are what give it meaning.
+            "_phase_marks_resolve": resolve_marks,
+            "_phase_marks_describe": describe_marks,
+            "_phase_is_mark": is_mark,
+            "_MARK_END": END_LABEL,
         })
     return ns
 
@@ -701,3 +709,90 @@ class TestTranscriptWindow:
         body, _ = self.get(tmp_path, {"start_ms": 1_000_000, "end_ms": 1_000_000 + 2 * MIN})
         assert body["truncated"] is False
 
+
+
+class TestMark:
+    """The operator's live row: one press says when a phase starts and what it is.
+
+    The division of labour is the requirement. An operator in the room knows the moment
+    exactly and can name a stretch before it is over; the same operator will mark a start
+    and then watch the service instead of the screen. So a press records an edge, and the
+    end of what it opened stays the detector's job — which is why the stored row has a
+    start and no end, and why every consumer written before marks existed ignores it.
+    """
+
+    def mark(self, db, **params):
+        return make_ns(live_db=db, params=params)["mark_service_phase"]()
+
+    def test_a_press_stores_a_start_with_no_end(self, tmp_path):
+        db = session_db(tmp_path)
+        body = self.mark(db, label="Sermon 1", kind="S", at_ms=1_500_000)
+        assert body["success"] is True
+        stored = body["corrections"][0]
+        assert stored["block_index"] is None
+        assert stored["start_ms"] == 1_500_000 and stored["end_ms"] is None
+        assert stored["label"] == "Sermon 1"
+
+    def test_the_moment_the_page_pressed_is_the_moment_stored(self, tmp_path):
+        """A press travelling over a slow link lands where the operator was."""
+        db = session_db(tmp_path)
+        body = self.mark(db, label="Sermon 1", kind="S", at_ms=1_234_567)
+        assert body["at_ms"] == 1_234_567
+        assert body["corrections"][0]["start_ms"] == 1_234_567
+
+    def test_a_mark_needs_a_name(self, tmp_path):
+        db = session_db(tmp_path)
+        body, status = self.mark(db, label="   ")
+        assert status == 400 and body["success"] is False
+        assert load_corrections(sqlite3.connect(db)) == []
+
+    def test_an_end_press_records_the_sentinel_rather_than_a_name(self, tmp_path):
+        db = session_db(tmp_path)
+        body = self.mark(db, end="true", at_ms=2_000_000)
+        assert body["corrections"][0]["label"] == END_LABEL
+
+    def test_undo_removes_the_most_recent_mark_only(self, tmp_path):
+        db = session_db(tmp_path)
+        self.mark(db, label="Songs 1", kind="M", at_ms=1_000_000)
+        self.mark(db, label="Sermon 1", kind="S", at_ms=1_600_000)
+        body = self.mark(db, undo="true")
+        assert body["removed"] == 1
+        assert [c["label"] for c in body["corrections"]] == ["Songs 1"]
+
+    def test_undo_with_nothing_marked_is_not_an_error(self, tmp_path):
+        db = session_db(tmp_path)
+        body = self.mark(db, undo="true")
+        assert body["success"] is True and body["removed"] == 0
+
+    def test_undo_leaves_an_ordinary_correction_alone(self, tmp_path):
+        """Undo is for the press that just happened, not for the reviewer's work."""
+        db = session_db(tmp_path)
+        conn = sqlite3.connect(db)
+        save_group_correction(conn, 1_000_000, 2_000_000, kind="S", label="Sermon 1")
+        conn.close()
+        body = self.mark(db, undo="true")
+        assert body["removed"] == 0
+        assert [c["label"] for c in body["corrections"]] == ["Sermon 1"]
+
+    def test_the_reply_carries_the_resolved_span(self, tmp_path):
+        """The page never resolves marks itself: one rule, on the server."""
+        db = session_db(tmp_path)
+        blocks = load_analysis(sqlite3.connect(db))["blocks"]
+        inside = blocks[-1]["start_ms"] + MIN
+        body = self.mark(db, label="Sermon 1", kind="S", at_ms=inside)
+        assert len(body["mark_spans"]) == 1
+        assert body["mark_spans"][0]["start_ms"] == inside
+        assert "Sermon 1 marked" in body["marked"]
+
+    def test_the_page_payload_carries_marks_too(self, tmp_path):
+        db = session_db(tmp_path)
+        blocks = load_analysis(sqlite3.connect(db))["blocks"]
+        self.mark(db, label="Sermon 1", kind="S", at_ms=blocks[-1]["start_ms"] + MIN)
+        body = make_ns(live_db=db)["get_service_phase"]()
+        assert len(body["mark_spans"]) == 1
+        assert body["marked"].startswith("Sermon 1 marked")
+
+    def test_nothing_marked_leaves_the_payload_empty_rather_than_absent(self, tmp_path):
+        db = session_db(tmp_path)
+        body = make_ns(live_db=db)["get_service_phase"]()
+        assert body["mark_spans"] == [] and body["marked"] == ""
