@@ -58,6 +58,20 @@ elif command -v lsof &> /dev/null && lsof -i :"$PORT" -sTCP:LISTEN > /dev/null 2
     exit 1
 fi
 
+# ─── Optional dependency preflight ──────────────────────────────────
+# requirements.txt deliberately omits a few large, rarely-used packages (see the
+# commented block at its end), so the hash-gated sync in update_server.sh can never
+# notice one *missing* — it installs what that file lists, and these are not in it.
+# A rebuilt venv therefore dropped llama-cpp-python silently, and live translation
+# degraded to handing every caption back untranslated with HTTP 200. This asks the
+# question that sync cannot: does the venv have what the live config is asking it to
+# do? Best-effort and always exits 0 — a missing optional package degrades one
+# feature, a start script that refuses to start degrades everything.
+# Set STT_SKIP_DEP_CHECK=1 to skip it.
+if [ -z "$STT_SKIP_DEP_CHECK" ] && [ -f "$VENV_PYTHON" ]; then
+    PYTHONPATH="$SCRIPT_DIR" "$VENV_PYTHON" -m stt.optional_deps --repo-dir "$SCRIPT_DIR" 2>&1
+fi
+
 OS=$(uname -s)
 
 if [ "$OS" = "Linux" ]; then

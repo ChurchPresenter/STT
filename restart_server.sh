@@ -45,6 +45,20 @@ PYTHON_BIN=$([ -f "$VENV_PYTHON" ] && echo "$VENV_PYTHON" || echo "python3")
 # and always fell back to 8080 regardless of the port the server is bound to.
 PORT=$("$PYTHON_BIN" -c "import os,json; d=os.environ.get('STT_DATA_DIR') or os.path.join(os.path.expanduser('~'),'.stt'); print(json.load(open(os.path.join(d,'config','config.json'))).get('web_server',{}).get('port',8080))" 2>/dev/null || echo 8080)
 
+# ─── Optional dependency preflight ──────────────────────────────────
+# requirements.txt deliberately omits a few large, rarely-used packages (see the
+# commented block at its end), so the hash-gated sync in update_server.sh can never
+# notice one *missing* — it installs what that file lists, and these are not in it.
+# A rebuilt venv therefore dropped llama-cpp-python silently, and live translation
+# degraded to handing every caption back untranslated with HTTP 200. This asks the
+# question that sync cannot: does the venv have what the live config is asking it to
+# do? Best-effort and always exits 0 — a missing optional package degrades one
+# feature, a start script that refuses to start degrades everything.
+# Set STT_SKIP_DEP_CHECK=1 to skip it.
+if [ -z "$STT_SKIP_DEP_CHECK" ] && [ -f "$VENV_PYTHON" ]; then
+    PYTHONPATH="$SCRIPT_DIR" "$VENV_PYTHON" -m stt.optional_deps --repo-dir "$SCRIPT_DIR" 2>&1
+fi
+
 # ─── Fast path: launchd KeepAlive supervisor (macOS) ────────────────
 # When the server is supervised by launchd with KeepAlive — a system daemon
 # (/Library/LaunchDaemons/com.stt.server.plist) or a per-user gui agent — killing
