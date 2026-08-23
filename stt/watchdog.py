@@ -1825,6 +1825,7 @@ class AutoUpdater:
         self.state = state
         self.pm = pm
         self._pending_update = None  # (remote_version, assets) when update detected but not yet applied
+        self._unsupported_reported = False  # report a permanently-unsupported machine once per process
 
     def _transcription_active(self):
         """True if a transcription is currently running on the local server.
@@ -1871,11 +1872,35 @@ class AutoUpdater:
 
     # -- Check & update ------------------------------------------------------
 
+    def _updates_paused(self):
+        """True when this machine can never install an update, so the updater
+        must not start one.
+
+        Without this the permanent condition reads as a transient dependency
+        failure: apply stops the server, resets the checkout, fails on uv, rolls
+        back and restarts — every boot and every 1am, forever. Checked here
+        rather than in Provisioner._preflight() alone because preflight only
+        runs once the server is already down and the checkout already moved."""
+        reason = _unsupported_platform_reason()
+        if not reason:
+            return False
+        self._pending_update = None
+        self.state.set(last_update_result=f"Updates paused: {reason}")
+        if not getattr(self, "_unsupported_reported", False):
+            self._unsupported_reported = True
+            # warning, not error: an error log is itself a Sentry event, and one
+            # per hourly check is what made this a recurring issue. Report once.
+            logging.warning(f"[AU] Updates paused — {reason}")
+            _sentry_capture(UnsupportedPlatformError(reason))
+        return True
+
     def check_for_update(self):
         """Detect an available update and store it as pending. Does not download or apply.
 
         Channel 'main' tracks the repo's main branch via git (the default);
         'stable' remains release-pinned via the GitHub Releases API."""
+        if self._updates_paused():
+            return
         cfg = load_config()
         channel = cfg.get("watchdog", {}).get("update_channel", "main")
         now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
@@ -1965,6 +1990,10 @@ class AutoUpdater:
     def apply_pending_update(self):
         """Apply the pending update (if any) via git; fall back to source archive."""
         if not self._pending_update:
+            return
+        # Insurance for the callers that apply without checking first (the
+        # control-channel 'update' command, the GUI's Update Now).
+        if self._updates_paused():
             return
         remote, zipball_url, _assets = self._pending_update
         self._pending_update = None

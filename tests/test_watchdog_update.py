@@ -287,6 +287,65 @@ def test_stable_channel_still_uses_releases(git_updater, monkeypatch):
     assert _head(clone) != _head(seed), "stable channel must not track main"
 
 
+# --- permanently unsupported hardware ----------------------------------------
+# An Intel Mac can never resolve requirements.txt (PyTorch's last macOS x86_64
+# wheel was 2.2.2), so an update attempt is a guaranteed stop/reset/fail/roll
+# back/restart cycle. The updater must not start one.
+
+_INTEL = ("This Mac has an Intel processor. STT needs PyTorch, which no longer "
+          "publishes Intel-Mac builds, so its dependencies cannot be installed here.")
+
+
+@pytest.fixture
+def intel(monkeypatch):
+    monkeypatch.setattr(watchdog, "_unsupported_platform_reason", lambda: _INTEL)
+    monkeypatch.setattr(watchdog, "load_config", lambda: {})
+    monkeypatch.setattr(watchdog, "_sentry_capture", lambda e: None)
+
+
+@needs_git
+def test_unsupported_platform_pauses_updates(git_updater, intel):
+    upd, seed, clone = git_updater
+    prev = _head(clone)
+    _advance_origin(seed)
+
+    upd.check_for_update()
+
+    assert upd._pending_update is None
+    assert upd.state.values["last_update_result"].startswith("Updates paused")
+    assert upd.pm.calls == [], "the server must not be stopped for an update that cannot install"
+    assert _head(clone) == prev, "nothing may be fetched or reset"
+
+
+@needs_git
+def test_apply_pending_update_refuses_on_an_unsupported_platform(git_updater, intel):
+    # The control-channel command and the GUI's Update Now apply what a previous
+    # check left pending, so the apply path carries the guard too.
+    upd, seed, clone = git_updater
+    prev = _head(clone)
+    _advance_origin(seed)
+    upd._pending_update = (watchdog.AutoUpdater._BRANCH_TARGET, None, {})
+
+    upd.apply_pending_update()
+
+    assert upd.pm.calls == []
+    assert _head(clone) == prev
+
+
+@needs_git
+def test_the_pause_is_reported_once(git_updater, intel, monkeypatch):
+    upd, _seed, _clone = git_updater
+    captured = []
+    monkeypatch.setattr(watchdog, "_sentry_capture", captured.append)
+
+    for _ in range(3):
+        upd.check_for_update()
+
+    assert len(captured) == 1, "an hourly check must not file an hourly report"
+    assert isinstance(captured[0], watchdog.UnsupportedPlatformError)
+    assert "Intel" in str(captured[0])
+
+
 # --- provisioning failure reporting ------------------------------------------
 
 import types  # noqa: E402
