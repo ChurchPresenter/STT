@@ -130,6 +130,72 @@ def fingerprint(rows: Sequence[Row]) -> str:
     return h.hexdigest()
 
 
+def dominant_source_language(conn: "sqlite3.Connection", start_ms: int, end_ms: int) -> str:
+    """The language most of this stretch was recognised as, lowercased, or ''.
+
+    Only ever used to answer "would translating this actually produce another language".
+    The column is per-row and populated by detection, so it is a majority question rather
+    than a lookup: one misdetected caption in a Russian sermon must not make it English.
+    """
+    try:
+        cur = conn.execute(
+            "SELECT LOWER(source_language), COUNT(*) FROM transcriptions "
+            "WHERE is_final = 1 AND denied = 0 AND ts_ms IS NOT NULL "
+            "AND source_language IS NOT NULL AND TRIM(source_language) != '' "
+            "AND ts_ms >= ? AND ts_ms <= ? GROUP BY LOWER(source_language) "
+            "ORDER BY COUNT(*) DESC LIMIT 1",
+            (int(start_ms), int(end_ms)))
+        row = cur.fetchone()
+    except sqlite3.Error:
+        return ""
+    return (row[0] or "").strip() if row else ""
+
+
+def _base_language(code: str) -> str:
+    """The base subtag of a language code: ``en-US`` and ``en_us`` are both ``en``."""
+    return (code or "").strip().lower().replace("_", "-").split("-")[0]
+
+
+def same_language(source: str, target: str) -> bool:
+    """Whether translating *source* into *target* could only return what it was given.
+
+    An empty source — nothing detected — is never treated as a match, because the cost of
+    being wrong here is a summary that never gets translated at all.
+    """
+    base = _base_language(source)
+    return bool(base) and base == _base_language(target)
+
+
+def row_signature(conn: "sqlite3.Connection", start_ms: int, end_ms: int) -> Tuple[int, int, int]:
+    """A cheap stand-in for :func:`fingerprint`: has this stretch changed since last time?
+
+    The scan runs every detector tick for the rest of a service, and reading a finished
+    sermon's rows and hashing them only to learn it is already summarised is a full-sermon
+    read plus a sha over tens of kilobytes, repeated every twenty seconds inside the loop
+    that also pushes captions to the UI.
+
+    This is one indexed aggregate that transfers three integers: rows added, denied or
+    re-transcribed move the count or the id, and edited text moves the character total. It
+    is deliberately not an identity — an edit that keeps the length exactly is invisible to
+    it — so it may only ever be used to skip work, never to decide what a summary covers.
+    That decision stays with the fingerprint, which is computed from the rows themselves.
+    """
+    try:
+        cur = conn.execute(
+            "SELECT COUNT(*), COALESCE(MAX(id), 0), COALESCE(SUM(LENGTH(text)), 0) "
+            "FROM transcriptions WHERE is_final = 1 AND denied = 0 AND ts_ms IS NOT NULL "
+            "AND ts_ms >= ? AND ts_ms <= ?",
+            (int(start_ms), int(end_ms)))
+        row = cur.fetchone()
+    except sqlite3.Error:
+        # Unreadable reads as "changed", so the caller falls through to the real read and
+        # decides there. Skipping on an error would be the one wrong answer.
+        return (-1, -1, -1)
+    if not row:
+        return (0, 0, 0)
+    return (int(row[0] or 0), int(row[1] or 0), int(row[2] or 0))
+
+
 def transcript_text(rows: Sequence[Row]) -> str:
     """The sermon as one block of prose, for storage and for the review page."""
     return " ".join(r.text for r in rows if r.text)

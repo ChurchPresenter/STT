@@ -15,6 +15,9 @@ import pytest
 from stt.sermon_summary import (
     STATUS_DONE,
     STATUS_PENDING,
+    dominant_source_language,
+    row_signature,
+    same_language,
     Chapter,
     Row,
     build_map_prompt,
@@ -1030,3 +1033,112 @@ class TestReadingAnOlderSchema:
         assert len(got) == 1 and got[0]["summary"] == "From the future."
         c.close()
 
+
+
+# ─── the tick's change detector ──────────────────────────────────────
+#
+# A sermon stays "ready" for the rest of the service, so the scan asked the same
+# question every twenty seconds and paid a full read plus a sha to hear the same
+# answer — inside the loop that also pushes captions to the UI.
+
+
+class TestRowSignature:
+    @pytest.fixture()
+    def conn(self, tmp_path):
+        c = sqlite3.connect(tmp_path / "session.db")
+        c.execute("CREATE TABLE transcriptions (id INTEGER PRIMARY KEY, ts_ms INTEGER, "
+                  "text TEXT, is_final INTEGER, denied INTEGER, source_language TEXT)")
+        yield c
+        c.close()
+
+    def insert(self, conn, rows_):
+        conn.executemany(
+            "INSERT INTO transcriptions (id, ts_ms, text, is_final, denied, source_language) "
+            "VALUES (?, ?, ?, ?, ?, ?)", rows_)
+        conn.commit()
+
+    def test_unchanged_rows_give_the_same_signature(self, conn):
+        self.insert(conn, [(1, BASE, "one", 1, 0, "ru"), (2, BASE + MIN, "two", 1, 0, "ru")])
+        first = row_signature(conn, BASE, BASE + 10 * MIN)
+        assert row_signature(conn, BASE, BASE + 10 * MIN) == first
+
+    def test_a_new_caption_moves_it(self, conn):
+        self.insert(conn, [(1, BASE, "one", 1, 0, "ru")])
+        before = row_signature(conn, BASE, BASE + 10 * MIN)
+        self.insert(conn, [(2, BASE + MIN, "two", 1, 0, "ru")])
+        assert row_signature(conn, BASE, BASE + 10 * MIN) != before
+
+    def test_denying_a_caption_moves_it(self, conn):
+        """The summariser excludes denied rows, so the material really did change."""
+        self.insert(conn, [(1, BASE, "one", 1, 0, "ru"), (2, BASE + MIN, "two", 1, 0, "ru")])
+        before = row_signature(conn, BASE, BASE + 10 * MIN)
+        conn.execute("UPDATE transcriptions SET denied = 1 WHERE id = 2")
+        conn.commit()
+        assert row_signature(conn, BASE, BASE + 10 * MIN) != before
+
+    def test_an_edit_that_changes_the_length_moves_it(self, conn):
+        self.insert(conn, [(1, BASE, "one", 1, 0, "ru")])
+        before = row_signature(conn, BASE, BASE + 10 * MIN)
+        conn.execute("UPDATE transcriptions SET text = 'one more' WHERE id = 1")
+        conn.commit()
+        assert row_signature(conn, BASE, BASE + 10 * MIN) != before
+
+    def test_an_empty_stretch_is_stable_rather_than_an_error(self, conn):
+        assert row_signature(conn, BASE, BASE + MIN) == (0, 0, 0)
+
+    def test_an_unreadable_database_reads_as_changed(self, tmp_path):
+        """Never skip on an error: the fingerprint is the one allowed to decide."""
+        c = sqlite3.connect(tmp_path / "empty.db")   # no transcriptions table at all
+        try:
+            assert row_signature(c, BASE, BASE + MIN) == (-1, -1, -1)
+        finally:
+            c.close()
+
+
+# ─── skipping a translation that cannot say anything new ─────────────
+
+
+class TestSourceLanguage:
+    @pytest.fixture()
+    def conn(self, tmp_path):
+        c = sqlite3.connect(tmp_path / "session.db")
+        c.execute("CREATE TABLE transcriptions (id INTEGER PRIMARY KEY, ts_ms INTEGER, "
+                  "text TEXT, is_final INTEGER, denied INTEGER, source_language TEXT)")
+        yield c
+        c.close()
+
+    def insert(self, conn, rows_):
+        conn.executemany(
+            "INSERT INTO transcriptions (id, ts_ms, text, is_final, denied, source_language) "
+            "VALUES (?, ?, ?, ?, ?, ?)", rows_)
+        conn.commit()
+
+    def test_the_majority_language_wins(self, conn):
+        """One misdetected caption must not make a Russian sermon English."""
+        self.insert(conn, [(1, BASE, "a", 1, 0, "ru"), (2, BASE + MIN, "b", 1, 0, "ru"),
+                           (3, BASE + 2 * MIN, "c", 1, 0, "en")])
+        assert dominant_source_language(conn, BASE, BASE + 10 * MIN) == "ru"
+
+    def test_nothing_detected_reads_as_unknown(self, conn):
+        self.insert(conn, [(1, BASE, "a", 1, 0, None), (2, BASE + MIN, "b", 1, 0, "")])
+        assert dominant_source_language(conn, BASE, BASE + 10 * MIN) == ""
+
+    def test_a_missing_column_is_not_an_error(self, tmp_path):
+        c = sqlite3.connect(tmp_path / "old.db")
+        c.execute("CREATE TABLE transcriptions (id INTEGER PRIMARY KEY, ts_ms INTEGER, "
+                  "text TEXT, is_final INTEGER, denied INTEGER)")
+        try:
+            assert dominant_source_language(c, BASE, BASE + MIN) == ""
+        finally:
+            c.close()
+
+    @pytest.mark.parametrize("source,target,expected", [
+        ("en", "en", True),
+        ("en-US", "en", True),
+        ("en", "en_GB", True),
+        ("ru", "en", False),
+        ("", "en", False),      # undetected: translate anyway
+        ("en", "", False),
+    ])
+    def test_same_language(self, source, target, expected):
+        assert same_language(source, target) is expected

@@ -992,7 +992,10 @@ from stt.sermon_summary import (
     parse_translation as _sermon_parse_translation,
     progress_text as _sermon_progress_text,
     set_progress as _sermon_set_progress,
+    dominant_source_language as _sermon_source_language,
     read_sermon_rows as _sermon_read_rows,
+    row_signature as _sermon_row_signature,
+    same_language as _sermon_same_language,
     sermon_ranges as _sermon_ranges,
     ready_sermons as _sermon_ready,
     save_summary as _sermon_save,
@@ -17047,23 +17050,32 @@ def _sermon_summary_scan(blocks, db_path, ignore_settle=False, is_live=True,
         conn = sqlite3.connect(db_path, timeout=5)
     except sqlite3.Error:
         return 0
+    seen = _sermon_scan_seen(db_path)
     try:
         _sermon_ensure_tables(conn)
         for block in ready:
-            rows = _sermon_read_rows(conn, block.get("start_ms") or 0, block.get("end_ms") or 0)
+            start_ms, end_ms = block.get("start_ms") or 0, block.get("end_ms") or 0
+            # A sermon stays "ready" for the rest of the service, so without this the scan
+            # re-reads and re-hashes a finished one every tick — in the loop that also
+            # emits captions. The signature is three integers from an indexed aggregate;
+            # unchanged means there is nothing here the last tick did not already decide.
+            signature = _sermon_row_signature(conn, start_ms, end_ms)
+            if seen.get((start_ms, end_ms)) == signature:
+                continue
+            rows = _sermon_read_rows(conn, start_ms, end_ms)
             if not rows:
                 continue
             fp = _sermon_fingerprint(rows)
             if _sermon_load(conn, fp):
+                seen[(start_ms, end_ms)] = signature
                 continue  # already summarised, running, or queued
             _sermon_save(conn, fingerprint=fp, label=block.get("label") or "Sermon",
-                         start_ms=block.get("start_ms") or 0, end_ms=block.get("end_ms") or 0,
-                         status=_SERMON_PENDING,
+                         start_ms=start_ms, end_ms=end_ms, status=_SERMON_PENDING,
                          transcript=_sermon_transcript_text(rows))
             _sermon_supersede(conn, label=block.get("label") or "Sermon",
-                              start_ms=block.get("start_ms") or 0,
-                              end_ms=block.get("end_ms") or 0, keep=fp)
+                              start_ms=start_ms, end_ms=end_ms, keep=fp)
             _sermon_queue.put((db_path, fp, is_live))
+            seen[(start_ms, end_ms)] = signature
             queued += 1
             print(f"[SERMON] queued {block.get('label')} "
                   f"({block.get('minutes')} min, {len(rows)} rows)", flush=True)
@@ -17072,6 +17084,20 @@ def _sermon_summary_scan(blocks, db_path, ignore_settle=False, is_live=True,
     finally:
         conn.close()
     return queued
+
+
+# Per-session, so a rollover cannot carry one service's spans into the next; the key is a
+# span rather than a fingerprint because the question it answers is "has this stretch
+# changed", which is asked before there is anything to fingerprint.
+_sermon_seen_spans = {"db": "", "spans": {}}
+
+
+def _sermon_scan_seen(db_path):
+    """The signature cache for this session, cleared when the session rolls over."""
+    if _sermon_seen_spans["db"] != db_path:
+        _sermon_seen_spans["db"] = db_path
+        _sermon_seen_spans["spans"] = {}
+    return _sermon_seen_spans["spans"]
 
 
 def _sermon_emit(entry, session_id):
@@ -17195,19 +17221,27 @@ def _sermon_summarize_one(db_path, fingerprint_value, is_live=True):
         lt_cfg = config.get("live_translation", {}) or {}
         target = (lt_cfg.get("target_language") or "").strip()
         if chapters and cfg.get("translate", True) and target:
-            note(_sermon_progress_text(len(chunks), len(chunks), translating=True))
-            # The catalogue the Translations page already names languages from, so the
-            # prompt says "Spanish" where the operator chose Spanish.
-            language = TRANSLATION_LANGUAGES.get(target, target)
-            t_sys, t_user = _sermon_translate_prompt(
-                summary.strip(), [c.title for c in chapters], language)
-            t_raw = _sermon_generate_waiting(t_sys, t_user, reduce_tokens, llm_cfg)
-            if t_raw:
-                summary_translated, titles_translated = _sermon_parse_translation(
-                    t_raw, len(chapters))
-                if not titles_translated:
-                    print(f"[SERMON] {entry['label']}: translation did not line up with the "
-                          f"chapters; keeping the original only", flush=True)
+            # An English service with target_language "en" would otherwise spend a call
+            # translating English into English. Asked of the rows rather than assumed, and
+            # only a confident majority counts — an undetected language is still translated,
+            # because a summary that never gets translated is the worse way to be wrong.
+            if _sermon_same_language(_sermon_source_language(conn, start_ms, end_ms), target):
+                print(f"[SERMON] {entry['label']}: already in {target}; no translation pass",
+                      flush=True)
+            else:
+                note(_sermon_progress_text(len(chunks), len(chunks), translating=True))
+                # The catalogue the Translations page already names languages from, so the
+                # prompt says "Spanish" where the operator chose Spanish.
+                language = TRANSLATION_LANGUAGES.get(target, target)
+                t_sys, t_user = _sermon_translate_prompt(
+                    summary.strip(), [c.title for c in chapters], language)
+                t_raw = _sermon_generate_waiting(t_sys, t_user, reduce_tokens, llm_cfg)
+                if t_raw:
+                    summary_translated, titles_translated = _sermon_parse_translation(
+                        t_raw, len(chapters))
+                    if not titles_translated:
+                        print(f"[SERMON] {entry['label']}: translation did not line up with "
+                              f"the chapters; keeping the original only", flush=True)
 
         store(_SERMON_DONE, summary=summary.strip(), chapters=chapters,
               summary_translated=summary_translated, titles_translated=titles_translated,
