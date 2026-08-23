@@ -260,7 +260,10 @@ jobs:
   # somewhere it should not.
   publish:
     needs: [version, build-windows, build-macos, build-linux]
-    if: always() && inputs.publish
+    # Not always(): a platform left unticked is skipped and must not block the
+    # release, but a platform that *failed* must, or a broken run would quietly
+    # publish a demo missing one of its three downloads.
+    if: ${{ !cancelled() && inputs.publish && !contains(needs.*.result, 'failure') }}
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/download-artifact@v8
