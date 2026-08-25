@@ -625,6 +625,17 @@ def acquire_gui_lock():
 # ---------------------------------------------------------------------------
 
 PROVISION_MARKER = os.path.join(DATA_DIR, ".provisioned")
+
+
+def _dep_failure_marker():
+    """Path of the file recording the commit whose dependency install failed, so
+    the updater does not re-attempt the same doomed target on every launch (see
+    AutoUpdater._dep_failure_blocks). Resolved per call, not at import: DATA_DIR
+    is what tests redirect, and a stray marker under a real ~/.stt would silently
+    block that install's updates."""
+    return os.path.join(DATA_DIR, ".dep-failure")
+
+
 _FFMPEG_BIN_DIR = os.path.join(DATA_DIR, "bin")
 # Portable MinGit install (Windows fallback when winget is absent/blocked —
 # clean installs often ship without a working winget). git.exe lands in
@@ -682,6 +693,26 @@ def _unsupported_platform_reason():
             "the Apple Silicon (arm64) build of STT instead."
         )
     return None
+
+
+_RESOLUTION_FAILURE_SIGNS = (
+    "no solution found when resolving dependencies",
+    "no wheels with a matching platform tag",
+    "are unsatisfiable",
+)
+
+
+def _is_resolution_failure(message):
+    """True when uv gave up while *resolving* requirements, before installing.
+
+    A resolution failure never reaches the venv: nothing is downloaded and no
+    installed package is replaced, so the environment is exactly what it was
+    before the attempt. The updater uses this to skip the repair reinstall it
+    would otherwise run over a venv that was never damaged — a reinstall that
+    fails for the same reason a moment later, and reports itself as a second
+    error."""
+    low = (message or "").lower()
+    return any(sign in low for sign in _RESOLUTION_FAILURE_SIGNS)
 
 
 def is_provisioned():
@@ -2011,6 +2042,71 @@ class AutoUpdater:
                               capture_output=True, text=True,
                               check=check, creationflags=_CREATE_NO_WINDOW)
 
+    def _resolve_target(self, remote):
+        """Fetch, then resolve `remote` to (git ref, commit sha) for the reset."""
+        logging.info(f"[AU] Fetching {remote}...")
+        self._git("fetch", "--tags", "--force", "origin", check=False)
+        if remote == self._BRANCH_TARGET:
+            # 'main' channel: track the branch head directly.
+            target = self._BRANCH_TARGET
+        else:
+            # Reset to the release tag (with or without a leading 'v'); else default branch.
+            target = None
+            for ref in (f"v{remote}", remote):
+                if self._git("rev-parse", "--verify", "--quiet", ref, check=False).returncode == 0:
+                    target = ref
+                    break
+            if target is None:
+                # Fall back to the fetched default branch head
+                self._git("fetch", "--depth", "1", "origin", check=False)
+                target = "origin/HEAD"
+        sha = self._git("rev-parse", "--verify", "--quiet", target, check=False).stdout.strip()
+        return target, sha
+
+    def _record_dep_failure(self, target_sha):
+        """Remember that this commit's dependencies could not be installed."""
+        if not target_sha:
+            return
+        try:
+            with open(_dep_failure_marker(), "w", encoding="utf-8") as f:
+                f.write(target_sha)
+        except OSError as e:
+            logging.warning(f"[AU] Could not record the failed update ({e})")
+
+    def _clear_dep_failure(self):
+        try:
+            os.remove(_dep_failure_marker())
+        except OSError:
+            pass
+
+    def _dep_failure_blocks(self, remote, target_sha):
+        """True when this exact commit already failed its dependency install.
+
+        One attempt per release, not one per launch. A dependency failure is
+        usually a property of the machine (a wheel that does not exist for its
+        platform), not of the moment, so retrying the same commit on every boot
+        and every 1am buys nothing and costs a stop/reset/rollback/restart each
+        time. Any new commit on the channel clears the block and is tried
+        normally — the next release is exactly what might fix it.
+        """
+        if not target_sha:
+            return False
+        try:
+            with open(_dep_failure_marker(), encoding="utf-8") as f:
+                failed = f.read().strip()
+        except OSError:
+            return False
+        if failed != target_sha:
+            return False
+        self._pending_update = None
+        result = (f"Update to {remote} skipped: its dependencies failed to install "
+                  f"here. Waiting for a newer version.")
+        if not getattr(self, "_dep_block_reported", False):
+            self._dep_block_reported = True
+            logging.warning(f"[AU] {result}")
+        self.state.set(last_update_result=result)
+        return True
+
     def _apply_git_update(self, remote, zipball_url):
         """Update the managed checkout: git fetch + reset to the release, reinstall
         dependencies (deps may have changed), then restart. Data dir is untouched."""
@@ -2025,25 +2121,22 @@ class AutoUpdater:
             self._apply_update(remote, zipball_url)
             return
 
+        # Fetch and resolve the target *before* stopping the server: the guard
+        # below needs the target's commit, and a refused update must cost the
+        # operator no downtime at all.
+        try:
+            target, target_sha = self._resolve_target(remote)
+        except Exception as e:
+            result = f"Update failed: {e}"
+            logging.error(f"[AU] {result}")
+            self.state.set(last_update_result=result)
+            return
+        if self._dep_failure_blocks(remote, target_sha):
+            return
+
         self.state.set(status="updating")
         self.pm.stop(timeout=20)
         try:
-            logging.info(f"[AU] Fetching {remote}...")
-            self._git("fetch", "--tags", "--force", "origin", check=False)
-            if remote == self._BRANCH_TARGET:
-                # 'main' channel: track the branch head directly.
-                target = self._BRANCH_TARGET
-            else:
-                # Reset to the release tag (with or without a leading 'v'); else default branch.
-                target = None
-                for ref in (f"v{remote}", remote):
-                    if self._git("rev-parse", "--verify", "--quiet", ref, check=False).returncode == 0:
-                        target = ref
-                        break
-                if target is None:
-                    # Fall back to the fetched default branch head
-                    self._git("fetch", "--depth", "1", "origin", check=False)
-                    target = "origin/HEAD"
             prev = self._git("rev-parse", "HEAD", check=False).stdout.strip() or None
             logging.info(f"[AU] Resetting to {target}")
             self._git("reset", "--hard", target)
@@ -2053,16 +2146,28 @@ class AutoUpdater:
                 logging.info("[AU] Reinstalling dependencies...")
                 Provisioner(log=lambda m: logging.info(f"[AU] {m}")).install_deps_only()
             except Exception as e:
+                # Remember the commit that failed so the next launch does not
+                # repeat the whole stop/reset/fail/roll-back/restart cycle for it.
+                self._record_dep_failure(target_sha)
                 # New source with old/broken deps won't run — put the old source
                 # back so the restarted app matches the venv it has.
                 if prev:
-                    logging.error(f"[AU] Dependency install failed; rolling back to {prev[:12]}")
+                    # warning, not error: the summary logged below is the one
+                    # Sentry issue this failure should raise, and these two lines
+                    # group separately.
+                    logging.warning(f"[AU] Dependency install failed; rolling back to {prev[:12]}")
                     self._git("reset", "--hard", prev, check=False)
                     self._git("clean", "-fd", check=False)
-                    try:
-                        Provisioner(log=lambda m: logging.info(f"[AU] {m}")).install_deps_only()
-                    except Exception as e2:
-                        logging.error(f"[AU] Dep reinstall after rollback also failed: {e2}")
+                    if _is_resolution_failure(str(e)):
+                        # uv never reached the venv, so there is nothing to repair
+                        # — and repairing it would fail again the same way.
+                        logging.info("[AU] Dependencies untouched (resolution failed); "
+                                     "skipping the repair reinstall")
+                    else:
+                        try:
+                            Provisioner(log=lambda m: logging.info(f"[AU] {m}")).install_deps_only()
+                        except Exception as e2:
+                            logging.warning(f"[AU] Dep reinstall after rollback also failed: {e2}")
                     result = f"Update to {remote} failed (deps); rolled back: {e}"
                 else:
                     result = f"Update to {remote} failed (deps): {e}"
@@ -2070,6 +2175,7 @@ class AutoUpdater:
                 self.state.set(last_update_result=result)
                 return
 
+            self._clear_dep_failure()
             if remote != self._BRANCH_TARGET:
                 write_version(remote)
             # Branch mode: leave the VERSION file at the last release so
@@ -3481,6 +3587,14 @@ def _init_sentry():
             enable_logs=bool(cr.get("sentry_enable_logs", True)),
         )
         sentry_sdk.set_tag("process", "watchdog")
+        # A dependency failure on macOS x86_64 means one of two different
+        # things — an Intel Mac, or the Intel build running under Rosetta on
+        # Apple Silicon — and the advice differs. Neither the platform tag in
+        # uv's error nor anything else in the report tells them apart.
+        sentry_sdk.set_tag("arch", platform.machine())
+        if sys.platform == "darwin":
+            sentry_sdk.set_tag("mac_hardware",
+                               "arm64" if _mac_hardware_is_arm64() else "x86_64")
         print("[SENTRY] Error reporting enabled")
     except ImportError:
         pass
