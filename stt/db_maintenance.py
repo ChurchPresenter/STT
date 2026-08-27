@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import os
 import sqlite3
-from typing import Any, Dict, Iterable, List, Optional, Sequence
+from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence
 
 # Suffixes SQLite keeps beside a database. "-journal" belongs to rollback mode
 # rather than WAL, and is included so a database that was switched between modes
@@ -38,6 +38,33 @@ def resolve_sidecars(db_path: str) -> List[str]:
         return []
     return [db_path + suffix for suffix in SIDECAR_SUFFIXES
             if os.path.exists(db_path + suffix)]
+
+
+def sidecars_hold_nothing(db_path: str) -> bool:
+    """Whether the sidecars beside ``db_path`` (if any) can hold committed data.
+
+    True for a database with no sidecars at all, and also for the state a failed retirement
+    leaves behind: a zero-length ``-wal`` next to a ``-shm``. A WAL of no bytes has no header
+    and therefore no frames, and the ``-shm`` is only an index *for* those frames, so there
+    is nothing in either file to preserve and recovery is safe to attempt.
+
+    That shape is common — a session whose end-of-session ``journal_mode=DELETE`` could not
+    take (another connection was open) keeps exactly it — and on its own it reads fine. What
+    does not read is the pair *disagreeing*: a ``-wal`` emptied outside SQLite's control while
+    a ``-shm`` still describes frames fails every open with "disk I/O error", and a process
+    that has met that inconsistency keeps failing on that database even after the files are
+    made consistent again, until it is restarted. Recovering the empty ``-wal`` here retires
+    the pair rather than leaving it to be found in that state later.
+    """
+    for path in resolve_sidecars(db_path):
+        if path.endswith("-shm"):
+            continue  # an index for the WAL; on its own it holds nothing
+        try:
+            if os.path.getsize(path) > 0:
+                return False
+        except OSError:
+            return False  # cannot tell, so assume it holds something
+    return True
 
 
 # Every SQLite database begins with this, including one whose pages are later
@@ -112,11 +139,12 @@ def open_readonly(db_path: str, recover: bool = True,
     # absent turns out to be a property of the SQLite build, not a rule: 3.51
     # refuses, while 3.50 — what the provisioned runtime ships, and what CI runs —
     # opens it happily and creates -wal and -shm beside the file, leaving behind
-    # exactly the sidecars this module exists to retire. Only a database with no
-    # sidecars at all is touched, so a live writer's WAL is still none of our
+    # exactly the sidecars this module exists to retire. Only a database whose
+    # sidecars cannot hold anything is touched — none at all, or the empty -wal a
+    # failed retirement leaves — so a live writer's WAL is still none of our
     # business; that case falls through to the open below unchanged.
     if (recover and looks_like_sqlite(db_path) and header_says_wal(db_path)
-            and not resolve_sidecars(db_path)):
+            and sidecars_hold_nothing(db_path)):
         checkpoint_and_release(db_path, timeout=timeout)
 
     try:
@@ -128,7 +156,8 @@ def open_readonly(db_path: str, recover: bool = True,
         return _open()
 
 
-def checkpoint_and_release(db_path: str, timeout: float = 5.0) -> bool:
+def checkpoint_and_release(db_path: str, timeout: float = 5.0,
+                           on_error: Optional[Callable[[str, BaseException], None]] = None) -> bool:
     """Fold the WAL into ``db_path`` and retire the sidecars.
 
     Returns True when no sidecars remain afterwards. False means the database
@@ -152,6 +181,10 @@ def checkpoint_and_release(db_path: str, timeout: float = 5.0) -> bool:
 
     ``timeout`` is short because this is background housekeeping: it must yield
     to a live writer rather than contend with one.
+
+    ``on_error`` receives the sqlite error behind a False. Without it the reason was
+    discarded here, and a database this process could no longer open reported itself for
+    days as one unexplained "sidecars still present" line per session.
     """
     if not db_path or not os.path.isfile(db_path):
         return False
@@ -169,7 +202,9 @@ def checkpoint_and_release(db_path: str, timeout: float = 5.0) -> bool:
         conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
         # And this removes it, having nothing left to preserve.
         conn.execute("PRAGMA journal_mode=DELETE")
-    except sqlite3.Error:
+    except sqlite3.Error as e:
+        if on_error is not None:
+            on_error(db_path, e)
         return False
     finally:
         if conn is not None:
@@ -239,12 +274,18 @@ def sweep_orphaned_sidecars(base_dirs: Sequence[str],
                 except OSError:
                     pass  # unreadable mtime is not a reason to skip the work
 
-            if checkpoint_and_release(db_path):
+            reasons: List[str] = []
+
+            def _record(_path: str, error: BaseException, into: List[str] = reasons) -> None:
+                into.append(f"{type(error).__name__}: {error}")
+
+            if checkpoint_and_release(db_path, on_error=_record):
                 cleaned += 1
             else:
                 failed += 1
                 if len(errors) < 10:  # a summary, not a catalogue
-                    errors.append(os.path.basename(db_path))
+                    reason = f": {reasons[0]}" if reasons else ""
+                    errors.append(f"{os.path.basename(db_path)}{reason}")
     except OSError as e:
         errors.append(f"{type(e).__name__}: {e}")
 

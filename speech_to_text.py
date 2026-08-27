@@ -1006,6 +1006,7 @@ from stt.session_index import (
     describe as _session_describe,
     index as _session_index,
     resolve_session as _session_resolve,
+    unreadable as _session_unreadable,
 )
 
 # Sermon summary and chapters live in stt/sermon_summary.py, beside the phase detector that
@@ -1041,6 +1042,7 @@ from stt.sermon_summary import (
     same_language as _sermon_same_language,
     sermon_ranges as _sermon_ranges,
     ready_sermons as _sermon_ready,
+    wait_while as _sermon_wait_while,
     save_summary as _sermon_save,
     supersede as _sermon_supersede,
     snap_chapters as _sermon_snap_chapters,
@@ -5713,6 +5715,34 @@ def _archive_open_ro(db_path, is_live=False):
     return _db_open_readonly(db_path, recover=not is_live)
 
 
+# What each session last failed with, so a broken archive is reported once rather than
+# once per poll: the review pages ask for this listing every minute.
+_archive_unreadable_seen = {}
+
+
+def _archive_unreadable(db_path, error, stage="open"):
+    """Record a session the sweep could not read, and say so in the log.
+
+    Both halves matter. The listing carries it so the page can tell "nothing recorded" from
+    "could not be read", and the log carries the exception text, which until now was
+    discarded at the ``except`` and existed nowhere afterwards — a server that had stopped
+    being able to open its own archive looked, from every side, like a server with an empty
+    one. That is not hypothetical: a checkpoint that emptied a WAL underneath this process
+    left every open of that session failing with "disk I/O error" for the rest of the
+    process's life, while the same file read perfectly from anywhere else.
+
+    The log line is printed when the failure is new or has changed, not on every listing:
+    a page polling once a minute would otherwise turn one broken session into a thousand
+    identical lines a day, which is its own way of hiding something.
+    """
+    entry = _session_unreadable(db_path, error, stage)
+    key = f"{entry['stage']}: {entry['error']}"
+    if _archive_unreadable_seen.get(entry["session_id"]) != key:
+        _archive_unreadable_seen[entry["session_id"]] = key
+        print(f"[ARCHIVE] {entry['session_id']}: cannot {stage} ({entry['error']})")
+    return entry
+
+
 def _archive_write_done(db_path, is_live):
     """Retire the sidecars after writing to a finished session. No-op on the live one.
 
@@ -5768,8 +5798,14 @@ def list_service_phase_sessions():
 
     Databases are opened read-only and one at a time: the archive shares a disk with the
     session a service may be recording to, and a listing is never worth competing with the
-    writer for it. One unreadable session is skipped rather than failing the request, the
+    writer for it. One unreadable session is reported rather than failing the request, the
     same way _service_phase_learn_scan sweeps.
+
+    A session that cannot be opened is named in ``unreadable`` instead of being dropped
+    silently. An archive the server cannot *read* used to render exactly like an archive
+    with nothing in it — the page said "No recorded service" over a complete service sitting
+    on disk, and the reason (a sqlite error) existed nowhere at all. Listing continues past
+    the failure: one bad database must not empty the picker.
 
     Sessions with no finalized rows are dropped by session_index.index — a start/stop leaves
     a database behind, and listing those buries the real services.
@@ -5779,14 +5815,17 @@ def list_service_phase_sessions():
 
     live = _service_phase_session_db()
     described = []
+    unreadable = []
     for path in _archive_session_paths():
         try:
             conn = _archive_open_ro(path, is_live=bool(live and os.path.basename(path) == os.path.basename(live)))
-        except sqlite3.Error:
+        except Exception as e:
+            unreadable.append(_archive_unreadable(path, e, "open"))
             continue
         try:
             described.append((path, _session_describe(conn)))
-        except Exception:
+        except Exception as e:
+            unreadable.append(_archive_unreadable(path, e, "read"))
             continue
         finally:
             conn.close()
@@ -5798,7 +5837,7 @@ def list_service_phase_sessions():
         sessions.insert(0, {"session_id": os.path.basename(live), "date": os.path.basename(live)[:10],
                             "live": True, "rows": 0, "start_ms": 0, "end_ms": 0, "minutes": 0,
                             "has_phase": False, "has_summaries": False})
-    return jsonify({"success": True, "sessions": sessions,
+    return jsonify({"success": True, "sessions": sessions, "unreadable": unreadable,
                     "live_session_id": os.path.basename(live) if live else None})
 
 
@@ -6218,12 +6257,17 @@ def _service_phase_learn_scan(limit=200):
             # still in WAL mode, and it is the corrections in exactly those that the
             # learner most wants.
             conn = _archive_open_ro(path)
-        except sqlite3.Error:
+        except Exception as e:
+            _archive_unreadable(path, e, "open")
             continue
         try:
             phases.extend(_phase_learn_collect([(os.path.basename(path), conn)], with_text=True))
-        except Exception:
-            continue   # one unreadable session must not stop the sweep
+        except Exception as e:
+            # One unreadable session must not stop the sweep — but a learner that read
+            # nothing has to say why, or it reports "no corrections" for an archive it
+            # never managed to open.
+            _archive_unreadable(path, e, "read")
+            continue
         finally:
             conn.close()
     return phases
@@ -17532,6 +17576,29 @@ def sermon_finalising():
     return True
 
 
+def _sermon_wait_for_finalise(tag):
+    """Hold the caller until the end-of-session summary run is done. Bounded by its deadline.
+
+    Three steps must not run while that run still has the session database open: closing it
+    (which checkpoints), retiring its WAL sidecars, and handing its files to the file mover.
+    The first is the one that bit: a checkpoint empties the WAL underneath a process that is
+    holding the database, and from then on every open of that file in that process fails with
+    "disk I/O error" until it is restarted — which is how a complete service came to be
+    listed as no service at all.
+
+    ``tag`` is the log prefix of whoever is waiting, so the log says which step is holding.
+    """
+    waited = 0
+    if not sermon_finalising():
+        return waited
+    print(f"{tag} Waiting for end-of-session summaries...", flush=True)
+    waited = _sermon_wait_while(sermon_finalising, _sermon_finalise_deadline(),
+                                sleep, time.time)
+    if waited:
+        print(f"{tag} Waited {int(waited)}s for summaries", flush=True)
+    return waited
+
+
 def _sermon_set_finalising(active):
     try:
         transcription_state["finalising"] = bool(active)
@@ -19581,10 +19648,17 @@ def _export_and_retire_session(session_db_name):
     # The shared helper folds the WAL in first and lets SQLite
     # remove it, so no caller can copy the unsafe shape.
     print("[WAL-CLEANUP] Retiring WAL/SHM files after SRT conversion...", flush=True)
-    if _db_checkpoint_and_release(session_db_name):
+    # The reason is printed with the failure. Without it this line read the same whether the
+    # database was busy for a moment or this process had stopped being able to open it at
+    # all — and the second is what happened, once a night, for as long as anyone looked.
+    _wal_cleanup_errors = []
+    if _db_checkpoint_and_release(session_db_name,
+                                  on_error=lambda _p, e: _wal_cleanup_errors.append(
+                                      f"{type(e).__name__}: {e}")):
         print("[WAL-CLEANUP] Sidecars retired", flush=True)
     else:
-        print("[WAL-CLEANUP] Sidecars still present; the startup "
+        why = f" ({_wal_cleanup_errors[0]})" if _wal_cleanup_errors else ""
+        print(f"[WAL-CLEANUP] Sidecars still present{why}; the startup "
               "sweep will retry", flush=True)
 
 
@@ -20581,6 +20655,11 @@ def thread1_function(ts, cq, cfq, cal_state, cal_data, cal_step1, asq):
                                             # it once at the real stop.
                                             _finalize_session_audio(
                                                 session_audio_file, session_audio_written, source)
+                                            # Same rule as the stop: the summariser may still
+                                            # hold the outgoing session open, and closing it
+                                            # checkpoints. Normally clear, and bounded either
+                                            # way.
+                                            _sermon_wait_for_finalise("[RESET-SESSION]")
                                             _close_session_db(
                                                 persistent_db_conn, persistent_db_cursor, outgoing_db)
                                             _export_and_retire_session(outgoing_db)
@@ -21923,9 +22002,6 @@ def thread1_function(ts, cq, cfq, cal_state, cal_data, cal_step1, asq):
 
                     _finalize_session_audio(session_audio_file, session_audio_written, source)
 
-                    print("[DB-CLEANUP] Starting database cleanup...", flush=True)
-                    _close_session_db(persistent_db_conn, persistent_db_cursor, db_path)
-
                     try:
                         if os.path.exists(temp_file):
                             os.remove(temp_file)
@@ -21933,14 +22009,31 @@ def thread1_function(ts, cq, cfq, cal_state, cal_data, cal_step1, asq):
                     except Exception as e:
                         print(f"[WARNING] Error removing temp file: {e}")
 
-                    # Clear model references BEFORE cleanup to allow garbage collection
-                    audio_model = None
-                    processor = None
-                    model_type = None
-                    vad_model = None
+                    # The models are released before the wait below, not after: they have
+                    # nothing to do with the session database, and on a single machine the
+                    # summariser's LLM wants exactly the memory they are holding.
+                    try:
+                        # Clear model references BEFORE cleanup to allow garbage collection
+                        audio_model = None
+                        processor = None
+                        model_type = None
+                        vad_model = None
 
-                    # Clean up models
-                    ModelFactory.cleanup_models()
+                        # Clean up models
+                        ModelFactory.cleanup_models()
+                    except Exception as e:
+                        # Guarded so a failure here can never skip the database close below,
+                        # which used to run first and was therefore guaranteed.
+                        print(f"[CLEANUP] WARNING: Error cleaning up models: {e}")
+
+                    # Only now close the database. The end-of-session summariser is still
+                    # writing to this session in the web process, and closing checkpoints it:
+                    # emptying the WAL underneath a live holder is what leaves that process
+                    # unable to open the file again until it restarts.
+                    _sermon_wait_for_finalise("[DB-CLEANUP]")
+
+                    print("[DB-CLEANUP] Starting database cleanup...", flush=True)
+                    _close_session_db(persistent_db_conn, persistent_db_cursor, db_path)
 
             main()
 
@@ -21997,16 +22090,10 @@ def thread1_function(ts, cq, cfq, cal_state, cal_data, cal_step1, asq):
                         sleep(10)
                         # The session is about to be copied to the NAS and deleted here, so
                         # a summary still being written would be lost rather than merely
-                        # late. Bounded by its own deadline: a stuck summariser delays a
-                        # delivery, it must never prevent one.
-                        _waited = 0
-                        while sermon_finalising() and _waited < _sermon_finalise_deadline():
-                            if _waited == 0:
-                                print("[FILE MOVER] Waiting for end-of-session summaries...")
-                            sleep(5)
-                            _waited += 5
-                        if _waited:
-                            print(f"[FILE MOVER] Waited {_waited}s for summaries")
+                        # late. Normally already done — the database close above waits on the
+                        # same flag — but the wait is kept here too: this is the step where
+                        # being early loses the summary rather than merely mistiming it.
+                        _sermon_wait_for_finalise("[FILE MOVER]")
                         print("[FILE MOVER] Executing file move after final cleanup...")
                         result = execute_file_move_now(lambda cfg=current_config: cfg, APP_DIR)
                         set_file_mover_result("auto", result)

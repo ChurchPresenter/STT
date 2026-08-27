@@ -1474,13 +1474,24 @@
       // an operator mid-service is looking for it, not for last Sunday.
       const rows = (data.sessions || []).slice().sort((a, b) => (b.live ? 1 : 0) - (a.live ? 1 : 0));
       spHasLive = rows.some(r => r.live);
-      select.innerHTML = rows.map(r => {
+      const options = rows.map(r => {
         const bits = [r.live ? 'Live' : (r.date || r.session_id)];
         if (r.rows) bits.push(fmtDuration(r.minutes), r.rows + ' rows');
         if (r.has_summaries) bits.push('📖');
         return '<option value="' + (r.live ? '' : esc(r.session_id)) + '">'
           + esc(bits.join(' · ')) + '</option>';
-      }).join('') || '<option value="">No recorded service</option>';
+      }).join('');
+      // An archive the server cannot read is not an empty archive, and the two used to
+      // render identically: "No recorded service" appeared over a complete service the
+      // process had simply stopped being able to open. Name the failure instead.
+      const unreadable = data.unreadable || [];
+      const warning = unreadable.length
+        ? '<option value="" disabled title="'
+          + esc(unreadable.map(u => u.session_id + ' - ' + u.error).join(' | ')) + '">'
+          + '\u26a0 ' + unreadable.length + (unreadable.length === 1 ? ' session' : ' sessions')
+          + ' could not be read</option>'
+        : '';
+      select.innerHTML = (options + warning) || '<option value="">No recorded service</option>';
 
       const kept = Array.prototype.some.call(select.options, o => o.value === previous);
       select.value = kept ? previous : (select.options[0] || {}).value || '';

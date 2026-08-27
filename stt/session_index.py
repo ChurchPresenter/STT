@@ -69,6 +69,24 @@ def resolve_session(paths: Sequence[str], name: Optional[str],
     return None
 
 
+def unreadable(path: str, error: BaseException, stage: str = "open") -> Dict[str, str]:
+    """One listing row for a session the server could not read.
+
+    A session that cannot be opened is not a session that does not exist, and the picker has
+    no way to tell the two apart unless the failure is carried out with the list: an archive
+    the process could not read rendered as "No recorded service" over a complete service on
+    disk. ``stage`` says which half failed — opening the file, or reading it once open — and
+    the error keeps its type name, which is what distinguishes a corrupt database from one
+    this process cannot currently open at all.
+    """
+    return {
+        "session_id": os.path.basename(path or ""),
+        "date": session_date(path or ""),
+        "stage": stage,
+        "error": f"{type(error).__name__}: {error}",
+    }
+
+
 def _table_exists(conn: "sqlite3.Connection", table: str) -> bool:
     try:
         row = conn.execute(

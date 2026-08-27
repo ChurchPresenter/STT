@@ -20,7 +20,7 @@ from conftest import extract_definitions
 from stt.phase_rules import load_rules
 from stt.coercion import coerce_int
 from stt.db_maintenance import checkpoint_and_release, open_readonly
-from stt.session_index import describe, index, resolve_session
+from stt.session_index import describe, index, resolve_session, unreadable
 from stt.phase_marks import END_LABEL, describe as describe_marks, is_mark, resolve as resolve_marks
 from stt.service_phase import (
     analyze,
@@ -75,7 +75,8 @@ def make_ns(*, live_db=None, params=None, args=None, archive=(), saved=None):
          "delete_service_phase_correction", "group_service_phase_blocks",
          "_service_phase_first_sunday", "_service_phase_config",
          "_archive_session_paths", "_archive_resolve_db", "_archive_write_done",
-         "_archive_open_ro", "rerun_service_phase", "list_service_phase_sessions",
+         "_archive_open_ro", "_archive_unreadable", "rerun_service_phase",
+         "list_service_phase_sessions",
          "save_service_phase_settings", "get_service_phase_transcript",
          "mark_service_phase"],
         extra_globals={
@@ -87,6 +88,8 @@ def make_ns(*, live_db=None, params=None, args=None, archive=(), saved=None):
             "_session_resolve": resolve_session,
             "_session_describe": describe,
             "_session_index": index,
+            "_session_unreadable": unreadable,
+            "_archive_unreadable_seen": {},
             "_sermon_summary_config": lambda: {},
             "_service_phase_save": save_analysis,
             "_sermon_read_rows": __import__("stt.sermon_summary", fromlist=["x"]).read_sermon_rows,
@@ -590,6 +593,41 @@ class TestListSessions:
             fh.write(b"not a database at all")
         body = make_ns(live_db=None, archive=[junk, good])["list_service_phase_sessions"]()
         assert [r["session_id"] for r in body["sessions"]] == ["2026-03-01_093218.db"]
+
+    def test_a_session_that_cannot_be_read_is_named_not_dropped(self, tmp_path):
+        """The whole point: an archive that cannot be READ is not an empty archive.
+
+        A deployed server reached a state where every open of its one recorded service
+        raised, and because the failure was swallowed per session the page said "No recorded
+        service" over a complete 85-minute recording. The listing now says which session and
+        why, and the page has something to show other than nothing.
+        """
+        junk = str(tmp_path / "2026-02-02_000000.db")
+        with open(junk, "wb") as fh:
+            fh.write(b"not a database at all")
+        body = make_ns(live_db=None, archive=[junk])["list_service_phase_sessions"]()
+        assert body["success"] is True
+        assert body["sessions"] == []
+        assert [u["session_id"] for u in body["unreadable"]] == ["2026-02-02_000000.db"]
+        entry = body["unreadable"][0]
+        assert entry["date"] == "2026-02-02" and entry["stage"] in ("open", "read")
+        assert "Error" in entry["error"], "the sqlite reason, not just the name"
+
+    def test_a_repeated_failure_is_logged_once_not_once_per_poll(self, tmp_path, capsys):
+        """The page asks for this listing every minute; a broken session must not shout."""
+        junk = str(tmp_path / "2026-02-02_000000.db")
+        with open(junk, "wb") as fh:
+            fh.write(b"not a database at all")
+        ns = make_ns(live_db=None, archive=[junk])
+        for _ in range(3):
+            body = ns["list_service_phase_sessions"]()
+            assert len(body["unreadable"]) == 1, "every listing still carries it"
+        assert capsys.readouterr().out.count("[ARCHIVE]") == 1
+
+    def test_a_healthy_archive_reports_nothing_unreadable(self, tmp_path):
+        good = session_db(tmp_path)
+        body = make_ns(live_db=None, archive=[good])["list_service_phase_sessions"]()
+        assert body["unreadable"] == []
 
 
 class TestDetectionSwitch:

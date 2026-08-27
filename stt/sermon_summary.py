@@ -78,6 +78,35 @@ class Chunk:
         return f"<Chunk {self.index} rows={len(self.rows)} {self.start_ms}-{self.end_ms}>"
 
 
+def wait_while(is_active: Callable[[], bool], deadline_s: float,
+               sleep: Callable[[float], None], now: Callable[[], float],
+               step_s: float = 5.0) -> float:
+    """Block until ``is_active`` clears or ``deadline_s`` passes. Returns seconds waited.
+
+    The end-of-session run keeps the session database open for minutes after the recording
+    stops, and three things must not happen underneath it: checkpointing that database,
+    retiring its WAL sidecars, and delivering its files somewhere else. Each of those had
+    (or needed) its own hand-rolled loop; this is the one implementation they share.
+
+    Deadline-bounded rather than open-ended, because the flag is a promise made by a
+    background task: a summariser that dies without clearing it must delay a stop, never
+    prevent one. ``sleep`` and ``now`` are injected so callers can pass the cooperative
+    sleep they run under — the worker's blocking one, the server's socketio one — and so
+    tests need no clock at all.
+    """
+    waited = 0.0
+    if deadline_s <= 0:
+        return waited
+    started = now()
+    while is_active():
+        waited = now() - started
+        if waited >= deadline_s:
+            break
+        sleep(step_s)
+        waited = now() - started
+    return waited
+
+
 def _tokens(text: str, counter: Optional[TokenCounter]) -> int:
     """Token count via ``counter``, falling back to the heuristic if it raises.
 

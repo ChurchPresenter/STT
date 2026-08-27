@@ -11,7 +11,7 @@ import sqlite3
 
 import pytest
 
-from stt.session_index import describe, index, resolve_session, session_date
+from stt.session_index import describe, index, resolve_session, session_date, unreadable
 
 BASE = 1_700_000_000_000
 MIN = 60_000
@@ -212,3 +212,29 @@ class TestIndex:
     def test_preserves_the_order_it_was_given(self):
         out = index([(p, self.described()) for p in PATHS])
         assert [r["session_id"] for r in out] == [os.path.basename(p) for p in PATHS]
+
+
+class TestUnreadable:
+    """A session that could not be opened, carried out with the listing.
+
+    Dropping it silently is what let a server that had stopped being able to open its own
+    archive present itself as a server with an empty one.
+    """
+
+    def test_names_the_session_and_the_reason(self):
+        row = unreadable(PATHS[0], sqlite3.OperationalError("disk I/O error"))
+        assert row["session_id"] == "2026-08-16_101502.db"
+        assert row["date"] == "2026-08-16"
+        assert row["error"] == "OperationalError: disk I/O error"
+        assert row["stage"] == "open"
+
+    def test_the_stage_says_which_half_failed(self):
+        row = unreadable(PATHS[0], sqlite3.DatabaseError("malformed"), "read")
+        assert row["stage"] == "read"
+
+    def test_an_undated_name_still_produces_a_row(self):
+        row = unreadable("/archive/scratch.db", OSError("gone"))
+        assert row["session_id"] == "scratch.db" and row["date"] == ""
+
+    def test_an_empty_path_is_survivable(self):
+        assert unreadable("", RuntimeError("x"))["session_id"] == ""

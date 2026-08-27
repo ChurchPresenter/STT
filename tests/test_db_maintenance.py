@@ -19,6 +19,7 @@ from stt.db_maintenance import (
     checkpoint_and_release,
     open_readonly,
     resolve_sidecars,
+    sidecars_hold_nothing,
     sweep_orphaned_sidecars,
 )
 
@@ -376,3 +377,123 @@ class TestOpenReadonly:
     def test_a_missing_file_raises(self, tmp_path):
         with pytest.raises(sqlite3.Error):
             open_readonly(str(tmp_path / "nope.db"))
+
+
+def stalled_retirement(tmp_path, rows=4):
+    """The shape a failed end-of-session retirement leaves: an EMPTY -wal and a -shm.
+
+    Observed on a deployed server, whose log said "Sidecars still present; the startup
+    sweep will retry" once per session and then never managed it. The database itself is
+    complete — the checkpoint had already folded everything in — so every byte of the
+    service is in the .db and the two sidecars hold nothing at all.
+    """
+    src = tmp_path / "src.db"
+    conn = make_session_db(src, rows=rows)
+    conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")   # rows into the .db, still WAL mode
+    conn.commit()
+    archive = Path(tmp_path) / "archive"
+    archive.mkdir(exist_ok=True)
+    db = archive / "2026-08-26_185034.db"
+    shutil.copyfile(src, db)
+    conn.close()
+    Path(str(db) + "-wal").write_bytes(b"")
+    Path(str(db) + "-shm").write_bytes(b"\0" * 32768)
+    return db
+
+
+class TestSidecarsHoldNothing:
+    """Which sidecars can be recovered past, and which are data."""
+
+    def test_a_database_with_no_sidecars(self, tmp_path):
+        make_session_db(tmp_path / "clean.db", leave_wal=False)
+        assert sidecars_hold_nothing(str(tmp_path / "clean.db"))
+
+    def test_an_empty_wal_beside_a_shm(self, tmp_path):
+        db = stalled_retirement(tmp_path)
+        assert resolve_sidecars(str(db)), "setup must leave the sidecars in place"
+        assert sidecars_hold_nothing(str(db))
+
+    def test_a_wal_with_bytes_in_it_is_data(self, tmp_path):
+        db = killed_worker_state(tmp_path / "killed", rows=5)
+        assert os.path.getsize(str(db) + "-wal") > 0
+        assert not sidecars_hold_nothing(str(db))
+
+    def test_a_shm_alone_holds_nothing(self, tmp_path):
+        make_session_db(tmp_path / "s.db", leave_wal=False)
+        (tmp_path / "s.db-shm").write_bytes(b"\0" * 32768)
+        assert sidecars_hold_nothing(str(tmp_path / "s.db"))
+
+
+class TestAStalledRetirement:
+    """A complete service whose sidecars were never retired must still open.
+
+    This is the failure the whole change exists for: the archive listing opens every
+    session read-only, an open that raised was skipped in silence, and a page that lists
+    what opened said "No recorded service" over a service that was entirely there.
+    """
+
+    def test_the_rows_are_all_in_the_database_already(self, tmp_path):
+        db = stalled_retirement(tmp_path, rows=6)
+        assert read_rows(db) == 6, "setup no longer reproduces a checkpointed session"
+
+    def test_open_readonly_reads_it(self, tmp_path):
+        db = stalled_retirement(tmp_path, rows=6)
+        with open_readonly(str(db)) as ro:
+            assert ro.execute("SELECT COUNT(*) FROM transcriptions").fetchone()[0] == 6
+
+    def test_the_sidecars_are_retired_by_the_read(self, tmp_path):
+        db = stalled_retirement(tmp_path)
+        open_readonly(str(db)).close()
+        assert resolve_sidecars(str(db)) == [], (
+            "an empty -wal holds nothing; leaving it there is what stalls the next open")
+
+    def test_the_sweep_cleans_it_too(self, tmp_path):
+        db = stalled_retirement(tmp_path, rows=3)
+        result = sweep_orphaned_sidecars([str(db.parent)])
+        assert result["cleaned"] == 1 and result["failed"] == 0
+        assert read_rows(db) == 3
+
+    def test_a_live_writers_sidecars_are_never_touched(self, tmp_path):
+        """recover=False is the live session: its WAL is the writer's, empty or not.
+
+        Whether that open succeeds is the SQLite build's business — with a -shm present it
+        usually does — so what is asserted is the property that matters either way: nothing
+        of the writer's was retired.
+        """
+        db = stalled_retirement(tmp_path)
+        try:
+            open_readonly(str(db), recover=False).close()
+        except sqlite3.Error:
+            pass
+        assert os.path.exists(str(db) + "-wal")
+
+
+class TestFailureIsReported:
+    """A False from checkpoint_and_release used to carry no reason anywhere."""
+
+    def unopenable(self, tmp_path):
+        """SQLite by its header, garbage by its pages — refused at the first read."""
+        path = tmp_path / "2026-08-26_broken.db"
+        path.write_bytes(b"SQLite format 3\x00" + b"\xff" * 4096)
+        (tmp_path / "2026-08-26_broken.db-wal").write_bytes(b"\xff" * 32)
+        return path
+
+    def test_the_error_reaches_the_caller(self, tmp_path):
+        path = self.unopenable(tmp_path)
+        seen = []
+        assert checkpoint_and_release(str(path), on_error=lambda p, e: seen.append((p, e))) is False
+        assert len(seen) == 1 and seen[0][0] == str(path)
+        assert isinstance(seen[0][1], sqlite3.Error)
+
+    def test_a_success_reports_nothing(self, tmp_path):
+        db = killed_worker_state(tmp_path / "killed", rows=2)
+        seen = []
+        assert checkpoint_and_release(str(db), on_error=lambda p, e: seen.append(e)) is True
+        assert seen == []
+
+    def test_the_sweep_summary_says_why(self, tmp_path):
+        self.unopenable(tmp_path)
+        result = sweep_orphaned_sidecars([str(tmp_path)])
+        assert result["failed"] == 1
+        assert result["errors"] and "2026-08-26_broken.db" in result["errors"][0]
+        assert "Error" in result["errors"][0], "the reason, not just the name"
