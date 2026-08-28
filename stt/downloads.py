@@ -245,6 +245,161 @@ def start_download_monitor(key: str, path: str, total: Optional[int] = None, int
     ).start()
 
 
+# --- Transient network failures -------------------------------------------------
+#
+# Every HuggingFace metadata lookup (list_repo_files, model_info) is a single
+# HTTPS request with no retry of its own, while the file downloads that follow
+# retry five times. On a connection that drops one handshake in twenty — which is
+# the ordinary case outside of a datacentre — the download therefore dies at 0%
+# on the *cheapest* request it makes, and the operator is shown the raw transport
+# text ("[SSL: UNEXPECTED_EOF_WHILE_READING] EOF occurred in violation of
+# protocol (_ssl.c:1016)"), which names neither the cause nor the remedy.
+#
+# Matching is by exception class name and message rather than by isinstance:
+# these modules import stdlib-only (httpx/httpcore/requests are not importable
+# here), and the same failure arrives wrapped in a different library's class
+# depending on which huggingface_hub version made the call.
+
+_MAX_CAUSE_DEPTH = 10
+
+_TRANSIENT_EXC_NAMES = frozenset({
+    "ChunkedEncodingError", "ConnectError", "ConnectTimeout", "ConnectionAbortedError",
+    "ConnectionError", "ConnectionResetError", "IncompleteRead", "NetworkError",
+    "PoolTimeout", "ProtocolError", "ProxyError", "ReadError", "ReadTimeout",
+    "ReadTimeoutError", "RemoteDisconnected", "RemoteProtocolError", "SSLEOFError",
+    "SSLError", "SSLZeroReturnError", "Timeout", "TimeoutError", "WriteError",
+    "WriteTimeout", "gaierror", "herror", "timeout",
+})
+
+_TRANSIENT_MESSAGE_HINTS = (
+    "bad handshake",
+    "connection aborted",
+    "connection refused",
+    "connection reset",
+    "connection timed out",
+    "eof occurred in violation of protocol",
+    "getaddrinfo failed",
+    "handshake operation timed out",
+    "name or service not known",
+    "network is unreachable",
+    "remote end closed connection",
+    "temporary failure in name resolution",
+    "timed out",
+    "unexpected_eof",
+)
+
+# Not retried: a rejected certificate is a stable condition (an intercepting
+# proxy, antivirus TLS inspection, or a wrong system clock), so retrying only
+# delays the message that would let someone fix it.
+_CERTIFICATE_HINTS = (
+    "certificate verify failed",
+    "self signed certificate",
+    "self-signed certificate",
+    "certificate_verify_failed",
+    "unable to get local issuer certificate",
+)
+
+_DNS_HINTS = (
+    "getaddrinfo",
+    "name or service not known",
+    "nodename nor servname",
+    "temporary failure in name resolution",
+)
+
+_TIMEOUT_HINTS = ("timed out", "timeout")
+
+
+def _exception_chain(exc: BaseException) -> List[BaseException]:
+    """`exc` followed by its ``__cause__``/``__context__`` ancestors.
+
+    The transport error is usually two or three re-raises below the exception
+    the caller sees, and huggingface_hub raises `from` in some paths and not in
+    others, so both links are walked. Bounded in case a chain loops.
+    """
+    chain: List[BaseException] = []
+    seen = set()
+    current: Optional[BaseException] = exc
+    while current is not None and len(chain) < _MAX_CAUSE_DEPTH:
+        if id(current) in seen:
+            break
+        seen.add(id(current))
+        chain.append(current)
+        current = current.__cause__ or current.__context__
+    return chain
+
+
+def _chain_text(exc: BaseException) -> str:
+    """Lower-cased class names and messages across the whole cause chain."""
+    return " ".join(f"{type(e).__name__}: {e}" for e in _exception_chain(exc)).lower()
+
+
+def is_transient_network_error(exc: BaseException) -> bool:
+    """Whether `exc` is a transport failure that a retry could plausibly fix.
+
+    A rejected certificate is deliberately excluded: it fails identically every
+    time, so retrying it costs the operator half a minute and tells them nothing.
+    """
+    text = _chain_text(exc)
+    if any(hint in text for hint in _CERTIFICATE_HINTS):
+        return False
+    if any(type(e).__name__ in _TRANSIENT_EXC_NAMES for e in _exception_chain(exc)):
+        return True
+    return any(hint in text for hint in _TRANSIENT_MESSAGE_HINTS)
+
+
+def network_error_message(exc: BaseException, host: str = "huggingface.co") -> Optional[str]:
+    """A sentence an operator can act on, or None if `exc` is not network-shaped.
+
+    Returning None is what keeps this from swallowing real bugs: a KeyError in
+    the download code must still surface as itself.
+    """
+    text = _chain_text(exc)
+    if any(hint in text for hint in _CERTIFICATE_HINTS):
+        return (f"Could not verify the secure connection to {host}. An antivirus, "
+                "firewall or proxy that inspects HTTPS traffic will cause this, and so "
+                "will a system clock that is days out of date.")
+    if not is_transient_network_error(exc):
+        return None
+    if any(hint in text for hint in _DNS_HINTS):
+        return (f"Could not look up {host}. Check the internet connection and the "
+                "DNS settings on this machine.")
+    if any(hint in text for hint in _TIMEOUT_HINTS):
+        return (f"The connection to {host} timed out. The download can be started "
+                "again once the connection is steady.")
+    return (f"The connection to {host} was interrupted before the download could "
+            "start. This is usually a temporary network problem — try again.")
+
+
+def call_with_retry(
+    func: Callable[[], Any],
+    description: str = "request",
+    max_attempts: int = 4,
+    base_delay: float = 2.0,
+    log: Callable[[str], Any] = print,
+    sleep: Callable[[float], Any] = time.sleep,
+) -> Any:
+    """Call `func()`, retrying transient network failures with linear backoff.
+
+    Non-network exceptions (and certificate rejections) propagate on the first
+    attempt — retrying a bug or a stable misconfiguration only delays the report.
+    The final failure is re-raised unchanged so the caller keeps the original
+    traceback; `network_error_message` turns it into operator-facing text.
+    """
+    if max_attempts < 1:
+        raise ValueError("max_attempts must be at least 1")
+    for attempt in range(1, max_attempts + 1):
+        try:
+            return func()
+        except Exception as exc:
+            if attempt >= max_attempts or not is_transient_network_error(exc):
+                raise
+            delay = base_delay * attempt
+            log(f"[WARNING] {description} failed ({type(exc).__name__}: {exc}); "
+                f"retrying in {delay:.0f}s (attempt {attempt}/{max_attempts})")
+            sleep(delay)
+    raise AssertionError("unreachable")  # pragma: no cover
+
+
 def download_url_to_file(url: str, dest_path: str, cancel_check: Optional[Callable[[], bool]] = None, max_attempts: int = 5, log: Callable[[str], Any] = print) -> str:
     """Download a URL to a file with resume + retry, preferring wget/curl.
 

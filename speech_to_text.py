@@ -13650,12 +13650,14 @@ from stt import downloads as _downloads
 from stt.downloads import (  # noqa: F401
     active_downloads,
     active_downloads_lock,
+    call_with_retry,
     cancelled_downloads,
     cleanup_stale_downloads,
     download_url_to_file,
     finish_download,
     load_download_progress,
     monitor_download_progress,
+    network_error_message,
     save_download_progress,
     select_repo_files,
     set_download_total,
@@ -13731,7 +13733,10 @@ def download_hf_repo_files(repo_id, local_dir, download_key, log=print, include=
 
     os.makedirs(local_dir, exist_ok=True)
     local_root = os.path.abspath(local_dir)
-    files = list_repo_files(repo_id=repo_id)
+    # Retried: the file list is one HTTPS request, and losing it aborts a
+    # download that has not yet fetched a byte (the transfers below already retry).
+    files = call_with_retry(lambda: list_repo_files(repo_id=repo_id),
+                            description=f"File list for {repo_id}", log=log)
     if include:
         selected = select_repo_files(files, include)
         if not selected:
@@ -14039,8 +14044,11 @@ def download_model():
             )
 
     except Exception as e:
-        print(f"[ERROR] Error downloading model: {e}")
-        return jsonify({"success": False, "error": str(e)}), 500
+        # A dropped connection gets a sentence the operator can act on rather
+        # than the transport library's own text ("_ssl.c:1016" names nothing).
+        friendly = network_error_message(e)
+        print(f"[{'WARNING' if friendly else 'ERROR'}] Error downloading model: {e}")
+        return jsonify({"success": False, "error": friendly or str(e)}), 500
 
 
 @app.route("/api/models/download-status", methods=["GET"])
@@ -15219,8 +15227,11 @@ def download_faster_whisper_model():
         })
 
     except Exception as e:
-        print(f"[ERROR] Error downloading faster-whisper model: {e}")
-        return jsonify({"success": False, "error": str(e)}), 500
+        # A dropped connection gets a sentence the operator can act on rather
+        # than the transport library's own text ("_ssl.c:1016" names nothing).
+        friendly = network_error_message(e)
+        print(f"[{'WARNING' if friendly else 'ERROR'}] Error downloading faster-whisper model: {e}")
+        return jsonify({"success": False, "error": friendly or str(e)}), 500
 
 
 @app.route("/api/models/faster-whisper/remove", methods=["POST"])
@@ -15937,8 +15948,12 @@ def download_translation_model():
                 try:
                     from huggingface_hub import list_repo_files, hf_hub_url
 
-                    # Get list of files in the repo
-                    files = list_repo_files(repo_id=model_id)
+                    # Get list of files in the repo. Retried: this is one HTTPS
+                    # request, and a dropped handshake here killed the whole
+                    # download before a single byte had been fetched.
+                    files = call_with_retry(lambda: list_repo_files(repo_id=model_id),
+                                            description=f"File list for {model_id}",
+                                            log=dl_logger.warning)
                     dl_logger.info(f"Found {len(files)} files to download: {files}")
 
                     # Download each file using wget
@@ -15977,9 +15992,6 @@ def download_translation_model():
                         dl_logger.info(f"Successfully downloaded: {filename}")
 
                     dl_logger.info("All files downloaded successfully")
-                except Exception as download_error:
-                    dl_logger.error(f"Download failed: {type(download_error).__name__}: {download_error}")
-                    raise
                 finally:
                     stop_monitor.set()
                     dl_logger.info("Stopped progress monitor")
@@ -16032,10 +16044,20 @@ def download_translation_model():
 
             except Exception as e:
                 import traceback
-                dl_logger.error(f"Download failed: {type(e).__name__}: {e}")
-                dl_logger.error(traceback.format_exc())
-                nllb_download_progress = {"status": "error", "progress": 0, "message": str(e)}
-                finish_download(model_id, error=e)
+                # A dropped connection on the operator's line is not a fault in
+                # this program: report it as a warning with a sentence they can
+                # act on, and keep it out of the crash reports. Anything else
+                # keeps its traceback and its error level.
+                friendly = network_error_message(e)
+                if friendly:
+                    dl_logger.warning(f"Download failed: {type(e).__name__}: {e}")
+                    message = friendly
+                else:
+                    dl_logger.error(f"Download failed: {type(e).__name__}: {e}")
+                    dl_logger.error(traceback.format_exc())
+                    message = str(e)
+                nllb_download_progress = {"status": "error", "progress": 0, "message": message}
+                finish_download(model_id, error=message)
             finally:
                 dl_logger.removeHandler(file_handler)
                 file_handler.close()
