@@ -19,7 +19,7 @@ raised: a typo in a phrase list must cost its own rule, not the whole detector.
 from __future__ import annotations
 
 import json
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Set
 
 MUSIC = "M"
 SPEECH = "S"
@@ -202,7 +202,8 @@ def _span_end(blocks: Sequence[Any], start: int, span: Dict[str, Any]) -> int:
 
 
 def apply_rules(blocks: Sequence[Any], rules: Sequence[Rule], *,
-                first_sunday: bool = False) -> List[Span]:
+                first_sunday: bool = False,
+                barred: Optional[Mapping[int, Set[str]]] = None) -> List[Span]:
     """Name every block from the rules, returning any multi-block spans that were formed.
 
     Blocks are labelled in place — the caller already owns them and the persistence layer
@@ -212,6 +213,12 @@ def apply_rules(blocks: Sequence[Any], rules: Sequence[Rule], *,
 
     Ordinals (`Sermon 1`, `Songs 2`) are assigned in one forward pass, so the whole numbering
     re-derives on every run and never drifts from what is on screen.
+
+    ``barred`` names rules that may not claim particular blocks, which is how a block the
+    service already has enough of is handed back to the rules rather than to a fixed
+    fallback. Without it a demoted sermon becomes whatever generic name was chosen for it in
+    advance; with it, the fourteen minutes at the end of a service become the Closing they
+    match, because the rules get to answer the question a second time.
     """
     counters: Dict[str, int] = {}
     seen: Dict[str, bool] = {}
@@ -226,7 +233,10 @@ def apply_rules(blocks: Sequence[Any], rules: Sequence[Rule], *,
         if claimed.get(i):
             continue
         b.label, b.confidence = None, 0.0
+        blocked_here = (barred or {}).get(i) or ()
         for rule in rules:
+            if rule.name in blocked_here:
+                continue
             if not _matches(b, rule.match, is_last_named=(i == last_named)):
                 continue
             if rule.not_when is not None and _matches(b, rule.not_when,

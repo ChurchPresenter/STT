@@ -29,7 +29,9 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Set, Tuple
+
+from stt.phase_rank import apply_limits, base_name, limit_notes, parse_limits
 
 from stt.phase_rules import Span, apply_rules
 
@@ -89,6 +91,7 @@ class Block:
         "label",
         "ongoing",
         "start_bin",
+        "start_minutes",
         "start_ms",
         "unusual",
     )
@@ -106,6 +109,10 @@ class Block:
         self.cues: Dict[str, int] = {}
         self.ongoing = False
         self.unusual: List[str] = []
+        # Minutes from the start of the service. Set once the whole timeline exists, because
+        # it is a position rather than a property of the block: a rule that wants to say "a
+        # sermon does not begin this late" has no way to ask otherwise.
+        self.start_minutes: int = 0
 
     @property
     def minutes(self) -> int:
@@ -116,7 +123,8 @@ class Block:
             "index": self.index, "kind": self.kind,
             "start_bin": self.start_bin, "end_bin": self.end_bin,
             "start_ms": self.start_ms, "end_ms": self.end_ms,
-            "minutes": self.minutes, "label": self.label,
+            "minutes": self.minutes, "start_minutes": self.start_minutes,
+            "label": self.label,
             "confidence": round(self.confidence, 2), "cues": dict(self.cues),
             "ongoing": self.ongoing, "unusual": list(self.unusual),
         }
@@ -482,7 +490,8 @@ def compile_fragment_cues(groups: Optional[Dict[str, Dict[str, Sequence[str]]]]
 
 
 def analyze(rows: Sequence[Tuple], cfg: Optional[dict] = None, *,
-            first_sunday: bool = False, rules: Optional[Sequence] = None) -> dict:
+            first_sunday: bool = False, rules: Optional[Sequence] = None,
+            live: bool = True) -> dict:
     """Full pass: rows in, current phase and block timeline out.
 
     Re-run from scratch on every tick rather than updated incrementally. A three-hour
@@ -494,11 +503,18 @@ def analyze(rows: Sequence[Tuple], cfg: Optional[dict] = None, *,
     Without them the built-in labeller runs, so a caller that has no rule file still works.
     """
     cfg = cfg or {}
+    return analyze_bins(bins_from_transcript(rows, cfg), cfg,
+                        first_sunday=first_sunday, rules=rules, live=live)
+
+
+def bins_from_transcript(rows: Sequence[Tuple], cfg: Optional[dict] = None) -> List[Bin]:
+    """The binning half of :func:`analyze` — transcript rows to minute bins."""
+    cfg = cfg or {}
     cues = dict(compile_cues(cfg.get("cue_phrases", {})))
     cues.update(compile_fragment_cues(cfg.get("cue_fragments")))
     cues_translated = dict(compile_cues(cfg.get("cue_phrases_translated", {})))
     cues_translated.update(compile_fragment_cues(cfg.get("cue_fragments_translated")))
-    bins = bin_rows(
+    return bin_rows(
         rows,
         bin_seconds=int(cfg.get("bin_seconds", 60)),
         music_prob_threshold=float(cfg.get("music_prob_threshold", 0.5)),
@@ -506,6 +522,25 @@ def analyze(rows: Sequence[Tuple], cfg: Optional[dict] = None, *,
         cues=cues,
         cues_translated=cues_translated,
     )
+
+
+def analyze_bins(bins: Sequence[Bin], cfg: Optional[dict] = None, *,
+                 first_sunday: bool = False,
+                 rules: Optional[Sequence] = None,
+                 live: bool = True) -> dict:
+    """The labelling half of :func:`analyze` — minute bins to a named timeline.
+
+    Separated so a finished service can be re-labelled from the bins already stored beside
+    its transcript, which is what ``service_phase_bins`` was persisted for: a candidate
+    setting can be scored against past services with no audio and no model.
+
+    One caveat that has to travel with it. Stored bins carry the cue counts that were
+    computed with the phrase lists in force while the service was recorded, so replaying a
+    candidate that changes ``cue_phrases`` or ``cue_fragments`` from bins measures the old
+    phrases. Replay such a candidate from rows instead — see stt/phase_replay.
+    """
+    cfg = cfg or {}
+    bins = list(bins)
     if not bins:
         return {"current": None, "blocks": [], "bins": [], "classes": "", "notes": [],
                 "spans": []}
@@ -516,6 +551,11 @@ def analyze(rows: Sequence[Tuple], cfg: Optional[dict] = None, *,
         enter_minutes=int(cfg.get("enter_minutes", 2)),
         exit_minutes=int(cfg.get("exit_minutes", 3)),
     )
+    # Position in the service, before anything is named: a rule may match on it.
+    origin_ms = bins[0].start_ms
+    bin_ms = max(1, bins[0].end_ms - bins[0].start_ms)
+    for b in blocks:
+        b.start_minutes = int((b.start_ms - origin_ms) // bin_ms)
     spans: List[Span] = []
     if rules:
         for b in blocks:
@@ -523,7 +563,31 @@ def analyze(rows: Sequence[Tuple], cfg: Optional[dict] = None, *,
         spans = apply_rules(blocks, rules, first_sunday=first_sunday)
     else:
         label_blocks(blocks, bins, cfg, first_sunday=first_sunday)
-    notes = flag_unusual(blocks, cfg)
+    # How many of a phase this service may have — a fact about one congregation, so it
+    # arrives from that church's profile and is absent by default. See stt/phase_rank.
+    #
+    # ``live`` is what decides whether the last block is still a candidate to grow. During a
+    # service it is: capping a phase that is still being spoken would demote it on the
+    # strength of how far it has got so far. Once the service has stopped, nothing will grow
+    # again, and the last block is exactly where a spurious one tends to be — the service
+    # that prompted this had its false sermon at the very end, still flagged ongoing because
+    # a stopped session never closes its final block.
+    demotions = apply_limits(blocks, rules or [], parse_limits(cfg.get("limits")),
+                             closed_only=live)
+    if demotions and rules:
+        # Hand the demoted blocks back to the rules with the capped name barred, so each
+        # one gets the name it actually matches rather than a generic fallback chosen in
+        # advance. The fourteen minutes at the end of the service that prompted this are a
+        # Closing, and only the rules know that.
+        barred: Dict[int, Set[str]] = {}
+        for d in demotions:
+            barred.setdefault(d.block_index, set()).add(base_name(d.was))
+        spans = apply_rules(blocks, rules, first_sunday=first_sunday, barred=barred)
+        for d in demotions:
+            for block in blocks:
+                if block.index == d.block_index:
+                    d.now = block.label
+    notes = flag_unusual(blocks, cfg) + limit_notes(demotions)
     current = blocks[-1] if blocks else None
     return {
         "current": current.to_dict() if current else None,
@@ -863,6 +927,32 @@ def load_corrections(conn: "sqlite3.Connection") -> List[dict]:
         return []
     keys = ("id", "block_index", "start_ms", "end_ms", "kind", "label", "note", "corrected_at")
     return [dict(zip(keys, r)) for r in rows]
+
+
+def bins_from_stored(rows: Sequence[Mapping[str, Any]]) -> List[Bin]:
+    """Rebuild :class:`Bin` objects from persisted ``service_phase_bins`` rows.
+
+    The table exists so a past service can be re-labelled without its audio; this is the
+    step that makes that true. Rows are taken in the order given and re-indexed, so a
+    caller replaying a prefix of a service gets bins numbered from zero.
+    """
+    out: List[Bin] = []
+    for i, row in enumerate(rows):
+        b = Bin(i, int(row.get("start_ms") or 0), int(row.get("end_ms") or 0))
+        b.music = int(row.get("music") or 0)
+        b.speech = int(row.get("speech") or 0)
+        b.quiet = int(row.get("quiet") or 0)
+        b.words = int(row.get("words") or 0)
+        cues = row.get("cues")
+        if cues is None:
+            raw = row.get("cues_json")
+            try:
+                cues = json.loads(raw) if raw else {}
+            except (ValueError, TypeError):
+                cues = {}
+        b.cues = {str(k): int(v) for k, v in dict(cues or {}).items()}
+        out.append(b)
+    return out
 
 
 def load_analysis(conn: "sqlite3.Connection") -> dict:
