@@ -61,6 +61,11 @@ a = Analysis(
         "sentry_sdk.integrations.logging",
         "sentry_sdk.integrations.threading",
         "sentry_sdk.integrations.argv",
+        # Imported by the bootstrapper through their package path: the Sentry
+        # before_send scrubber and the wheels-only install policy. Both are
+        # stdlib-only, which is what lets a frozen bootstrapper use them.
+        "stt.crash_reports",
+        "stt.wheel_policy",
     ],
     hookspath=[],
     hooksconfig={},

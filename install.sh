@@ -60,6 +60,16 @@ detect_os() {
                 print_error "Run STT on an Apple Silicon Mac (M1 or newer), or on a Windows or Linux PC."
                 exit 1
             fi
+            # scipy and scikit-learn (pulled in by librosa) have never
+            # published an arm64 wheel tagged below macosx_12_0 for Python
+            # 3.11, so on Big Sur there is nothing to install and nothing to
+            # fall back to — uv builds from source and fails hours later.
+            MACOS_MAJOR=$(sw_vers -productVersion 2>/dev/null | cut -d. -f1)
+            if [ -n "$MACOS_MAJOR" ] && [ "$MACOS_MAJOR" -lt 12 ] 2>/dev/null; then
+                print_error "This Mac runs macOS $MACOS_MAJOR, and STT needs macOS Monterey (12) or later — the audio libraries it depends on stopped publishing builds for older versions."
+                print_error "The update is free for every Apple Silicon Mac: open System Preferences -> Software Update, install it, then run this installer again."
+                exit 1
+            fi
             print_success "Detected macOS ($ARCH)"
             ;;
         Linux)
@@ -257,6 +267,13 @@ torch_index_url() {
     fi
 }
 
+# Compiled packages that must arrive as wheels or not at all. uv otherwise falls
+# back to building from source when no wheel matches the platform, which needs a
+# compiler this machine may not have; refusing the fallback makes uv pick a
+# release that does ship a wheel here. Mirrors stt/wheel_policy.py, which is the
+# source of truth and carries the tests — keep the two in step.
+ONLY_BINARY="llvmlite,numba,numpy,scikit-learn,scipy,soxr"
+
 # Function to install Python packages
 install_python_deps() {
     print_status "Installing Python dependencies from requirements.txt..."
@@ -265,21 +282,21 @@ install_python_deps() {
         # macOS: standard PyPI PyTorch includes MPS support; no CUDA index needed
         detect_gpu  # Just for informational output
         print_status "Installing packages (MPS/CPU)..."
-        uv pip install -r requirements.txt
+        uv pip install -r requirements.txt --only-binary "$ONLY_BINARY"
     else
         # Linux: install CUDA PyTorch if NVIDIA GPU present, otherwise CPU
         if detect_gpu; then
             index_url=$(torch_index_url)
             if [ -n "$index_url" ]; then
                 print_status "Installing GPU-enabled packages ($index_url)..."
-                uv pip install -r requirements.txt --extra-index-url "$index_url"
+                uv pip install -r requirements.txt --only-binary "$ONLY_BINARY" --extra-index-url "$index_url"
             else
                 print_status "Installing default packages..."
-                uv pip install -r requirements.txt
+                uv pip install -r requirements.txt --only-binary "$ONLY_BINARY"
             fi
         else
             print_status "Installing CPU-only packages..."
-            uv pip install -r requirements.txt
+            uv pip install -r requirements.txt --only-binary "$ONLY_BINARY"
         fi
     fi
 

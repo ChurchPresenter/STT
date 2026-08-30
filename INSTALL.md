@@ -67,13 +67,18 @@ source venv/bin/activate
 
 #### macOS (Apple Silicon) / CPU-only Linux:
 ```bash
-pip install -r requirements.txt
+pip install -r requirements.txt --only-binary llvmlite,numba,numpy,scikit-learn,scipy,soxr
 ```
 
 #### Linux with NVIDIA GPU (CUDA 12.8):
 ```bash
-pip install -r requirements.txt --extra-index-url https://download.pytorch.org/whl/cu128
+pip install -r requirements.txt --only-binary llvmlite,numba,numpy,scikit-learn,scipy,soxr --extra-index-url https://download.pytorch.org/whl/cu128
 ```
+
+`--only-binary` keeps pip from falling back to a source build when no wheel
+matches your platform: those builds need a compiler, and on an older macOS they
+fail after a long download. With the flag, pip picks an earlier release that
+does publish a wheel for your machine instead.
 
 Note: The install.sh script detects your platform and GPU automatically.
 
@@ -274,7 +279,7 @@ up to outweigh that.
 - **NVIDIA minimum:** GPU with 4GB+ VRAM (RTX 2060 / RTX 3050) — enough for transcription with small/medium models
 - **NVIDIA recommended:** GPU with 10GB+ VRAM (RTX 3060 12GB, RTX 4070 or better) — large models and transcription + translation on GPU
 - **CUDA:** 12.8 compatible drivers (NVIDIA driver R570+), Python 3.10 - 3.13
-- **Apple Silicon:** M1 or later. MPS is detected and used automatically for **translation** and for the non-default `whisper` (OpenAI) backend. The default `faster-whisper` backend is CTranslate2, which has no Metal support, so **transcription runs on the CPU** in int8 — fast and memory-efficient, but not GPU-accelerated.
+- **Apple Silicon:** M1 or later, on **macOS Monterey (12) or later** — scipy and scikit-learn, which the audio stack depends on, publish no arm64 wheels for Big Sur, and there is no older release that does. Setup refuses an earlier macOS rather than spending two hours failing to build them from source. MPS is detected and used automatically for **translation** and for the non-default `whisper` (OpenAI) backend. The default `faster-whisper` backend is CTranslate2, which has no Metal support, so **transcription runs on the CPU** in int8 — fast and memory-efficient, but not GPU-accelerated.
 
 > The minimum tiers run CPU-only, which is significantly slower than GPU — larger models add noticeable transcription latency. Lower-spec hardware may still work depending on configuration (e.g. smaller Whisper models, reduced settings), at the cost of accuracy and/or speed. Offloading translation to a remote machine (Live Translation → Remote) keeps the local requirements at the transcription-only tier.
 
@@ -309,7 +314,7 @@ Either:
 source venv/bin/activate
 
 # Reinstall requirements
-pip install -r requirements.txt --force-reinstall
+pip install -r requirements.txt --only-binary llvmlite,numba,numpy,scikit-learn,scipy,soxr --force-reinstall
 ```
 
 ---
@@ -372,7 +377,7 @@ git pull
 source venv/bin/activate
 
 # Update dependencies
-pip install -r requirements.txt --upgrade
+pip install -r requirements.txt --only-binary llvmlite,numba,numpy,scikit-learn,scipy,soxr --upgrade
 
 # Restart the application
 ```

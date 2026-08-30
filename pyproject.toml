@@ -69,6 +69,8 @@ module = [
     "stt.request_origin",
     "stt.session_reset",
     "stt.log_gate",
+    "stt.crash_reports",
+    "stt.wheel_policy",
     "stt.optional_deps",
     "stt.demo_mode",
     "stt.demo_playback",

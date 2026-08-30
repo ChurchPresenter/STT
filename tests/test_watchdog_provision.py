@@ -408,9 +408,10 @@ class TestUnsupportedPlatform:
     same resolution every ten minutes, thirteen times and counting.
     """
 
-    def _mac(self, monkeypatch, *, hardware_arm64, process="arm64"):
+    def _mac(self, monkeypatch, *, hardware_arm64, process="arm64", macos="15.1"):
         monkeypatch.setattr(watchdog.sys, "platform", "darwin")
         monkeypatch.setattr(watchdog.platform, "machine", lambda: process)
+        monkeypatch.setattr(watchdog.platform, "mac_ver", lambda: (macos, ("", "", ""), process))
         monkeypatch.setattr(watchdog, "_mac_hardware_is_arm64",
                             lambda: hardware_arm64)
 
@@ -434,6 +435,41 @@ class TestUnsupportedPlatform:
         # A different diagnosis from the Intel-hardware one, not the same text.
         self._mac(monkeypatch, hardware_arm64=False, process="x86_64")
         assert reason != watchdog._unsupported_platform_reason()
+
+    @pytest.mark.parametrize("macos", ["10.15.7", "11.0", "11.7.10"])
+    def test_an_apple_silicon_mac_on_an_old_macos_is_refused(self, monkeypatch, macos):
+        """The failure that produced this gate: scipy and scikit-learn have
+        never published an arm64 wheel tagged below macosx_12_0 for the Python
+        we install, so uv found nothing to install and nothing to fall back to.
+        It built llvmlite from source instead and failed for two hours, saying
+        "build error" rather than "your macOS is too old"."""
+        self._mac(monkeypatch, hardware_arm64=True, macos=macos)
+        reason = watchdog._unsupported_platform_reason()
+        assert reason and "macOS" in reason
+        # The advice must be the one that works: updating is free, and every
+        # Apple Silicon Mac can take it. Not "buy a new computer".
+        assert "Software Update" in reason
+        assert "Intel" not in reason
+
+    @pytest.mark.parametrize("macos", ["12.0", "13.6.1", "15.1", "26.0"])
+    def test_a_supported_macos_passes(self, monkeypatch, macos):
+        self._mac(monkeypatch, hardware_arm64=True, macos=macos)
+        assert watchdog._unsupported_platform_reason() is None
+
+    def test_an_unreadable_macos_version_is_not_a_refusal(self, monkeypatch):
+        """A failed lookup must not lock anyone out — let setup run and report
+        what it actually hits."""
+        self._mac(monkeypatch, hardware_arm64=True, macos="")
+        assert watchdog._unsupported_platform_reason() is None
+        monkeypatch.setattr(watchdog.platform, "mac_ver",
+                            lambda: (_ for _ in ()).throw(OSError("no")))
+        assert watchdog._macos_major() is None
+
+    def test_the_old_macos_message_is_distinct_from_the_intel_one(self, monkeypatch):
+        self._mac(monkeypatch, hardware_arm64=True, macos="11.0")
+        old_os = watchdog._unsupported_platform_reason()
+        self._mac(monkeypatch, hardware_arm64=False, process="x86_64", macos="11.0")
+        assert old_os != watchdog._unsupported_platform_reason()
 
     @pytest.mark.parametrize("plat,machine", [
         ("linux", "x86_64"), ("linux", "aarch64"), ("win32", "AMD64"),
@@ -482,3 +518,89 @@ class TestUnsupportedPlatform:
         # Existing handlers catch ProvisionError; this must not slip past them
         # as an unhandled crash.
         assert issubclass(watchdog.UnsupportedPlatformError, watchdog.ProvisionError)
+
+
+class TestPermanentDependencyFailures:
+    """Which uv failures a retry can fix, and which it cannot.
+
+    Both shapes below came off real installs. A resolver dead end ("no solution
+    found") and a source build that will not compile are equally hopeless on
+    the next attempt; a download that was cut off is not.
+    """
+
+    @pytest.mark.parametrize("message", [
+        # The llvmlite sdist build, from a macOS 11 Apple Silicon Mac whose
+        # platform tag no longer matched any published wheel.
+        "command failed (1): uv pip install -r requirements.txt — last output: "
+        "returned non-zero exit status 1. | hint: Build failures usually indicate "
+        "a problem with the package or the build environment",
+        "command failed (1): uv pip install — last output: "
+        "× No solution found when resolving dependencies",
+        "command failed (1): uv pip install — last output: "
+        "no wheels with a matching platform tag",
+        "command failed (2): uv pip install — last output: "
+        "your requirements are unsatisfiable",
+        "command failed (1): uv pip install — last output: Failed to build `llvmlite`",
+    ])
+    def test_a_hopeless_install_is_recognised(self, message):
+        assert watchdog._is_permanent_dep_failure(message) is True
+
+    @pytest.mark.parametrize("message", [
+        "command failed (1): uv pip install — last output: "
+        "error sending request for url (https://pypi.org/simple/torch/)",
+        "timed out after 7200s: uv pip install -r requirements.txt",
+        "command failed (1): uv pip install — last output: connection reset by peer",
+        "",
+        None,
+    ])
+    def test_a_transient_failure_is_not(self, message):
+        assert watchdog._is_permanent_dep_failure(message) is False
+
+    def test_resolution_failures_remain_a_narrower_case(self):
+        """_is_resolution_failure means "nothing was installed, the venv is
+        untouched", which the updater relies on to skip a repair reinstall. A
+        build failure is permanent but *did* reach the venv, so the two
+        classifiers must not be collapsed into one."""
+        build = "returned non-zero exit status 1. | hint: Build failures usually indicate"
+        assert watchdog._is_permanent_dep_failure(build) is True
+        assert watchdog._is_resolution_failure(build) is False
+
+
+class TestProvisionFingerprint:
+    """One incident must be one Sentry issue.
+
+    The message ends in the last five lines of uv output, which name a
+    per-run temporary build directory — so the raw message put every attempt on
+    every machine in a group of its own.
+    """
+
+    def test_the_output_tail_does_not_reach_the_fingerprint(self):
+        base = "command failed (1): uv pip install -r requirements.txt"
+        one = watchdog._provision_fingerprint(
+            watchdog.ProvisionError(base + " — last output: /tmp/.tmpG19Y73/bin/python"))
+        two = watchdog._provision_fingerprint(
+            watchdog.ProvisionError(base + " — last output: /tmp/.tmp0cvvGI/bin/python"))
+        assert one == two
+
+    def test_home_directories_do_not_reach_the_fingerprint(self):
+        """Otherwise two machines failing identically are two issues, and the
+        operator's username is the thing telling them apart."""
+        one = watchdog._provision_fingerprint(
+            watchdog.ProvisionError("command failed (1): /Users/xmedia/.local/bin/uv pip install"))
+        two = watchdog._provision_fingerprint(
+            watchdog.ProvisionError("command failed (1): /Users/pastudios/.local/bin/uv pip install"))
+        assert one == two
+        assert not any("xmedia" in part for part in one)
+
+    def test_different_failures_stay_apart(self):
+        build = watchdog._provision_fingerprint(watchdog.ProvisionError(
+            "command failed (1): uv pip install — last output: "
+            "hint: Build failures usually indicate a problem"))
+        blip = watchdog._provision_fingerprint(watchdog.ProvisionError(
+            "command failed (1): uv pip install — last output: connection reset"))
+        assert build != blip
+
+    def test_the_exception_type_is_part_of_the_key(self):
+        message = "cannot run here"
+        assert watchdog._provision_fingerprint(watchdog.ProvisionError(message)) != \
+            watchdog._provision_fingerprint(watchdog.UnsupportedPlatformError(message))

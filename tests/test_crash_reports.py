@@ -1,6 +1,10 @@
 """What crash reports carry off the machine, and which ones never leave."""
 
-from stt.crash_reports import is_websocket_handover, scrub_event
+from stt.crash_reports import (
+    is_websocket_handover,
+    redact_home_paths,
+    scrub_event,
+)
 
 
 def _handover_event(exc_type="ConnectionError", filename="engineio/async_drivers/_websocket_wsgi.py"):
@@ -93,3 +97,63 @@ def test_subprocess_span_descriptions_lose_their_arguments():
     assert spans[0]["description"] == "ffmpeg"
     assert "data" not in spans[0]
     assert spans[1]["description"] == "SELECT 1"  # untouched
+
+
+# ─── home-directory redaction ────────────────────────────────────────
+
+def test_a_posix_home_becomes_a_placeholder():
+    assert redact_home_paths("/Users/xmedia/.stt/app/.venv/bin/python3") == \
+        "<home>/.stt/app/.venv/bin/python3"
+    assert redact_home_paths("/home/ai/.stt/logs/x.log") == "<home>/.stt/logs/x.log"
+
+
+def test_a_windows_home_becomes_a_placeholder():
+    assert redact_home_paths(r"C:\Users\cp\.stt\app\requirements.txt") == \
+        r"<home>\.stt\app\requirements.txt"
+
+
+def test_a_username_containing_a_space_is_redacted_whole():
+    """The half-redaction that would leak a surname. The user segment runs to
+    the next separator, not to the next space."""
+    out = redact_home_paths(r"C:\Users\Ada Lovelace\.local\bin\uv.EXE pip install")
+    assert "Ada" not in out and "Lovelace" not in out
+    assert out == r"<home>\.local\bin\uv.EXE pip install"
+
+
+def test_a_path_that_is_not_a_home_is_left_alone():
+    """An SMB share starts with a double slash and names no operator."""
+    unchanged = "//192.168.2.7/BCOS_ARCHIVE/_AUTOMATIC_BACKUP/2026/07/x.ts"
+    assert redact_home_paths(unchanged) == unchanged
+
+
+def test_non_strings_pass_through():
+    assert redact_home_paths(None) is None
+    assert redact_home_paths(3) == 3
+
+
+def test_a_log_message_is_redacted():
+    """Provisioning failures reach Sentry as log records, and the message
+    becomes the issue title — which is where the username was showing up."""
+    event = {"logentry": {
+        "message": "[SETUP] Provisioning failed: /Users/xmedia/.stt/app",
+        "formatted": "[SETUP] Provisioning failed: /Users/xmedia/.stt/app",
+        "params": ["/Users/xmedia/.stt", 7],
+    }}
+    out = scrub_event(event)
+    assert "xmedia" not in str(out)
+    assert out["logentry"]["params"] == ["<home>/.stt", 7]
+
+
+def test_an_exception_message_is_redacted():
+    event = {"exception": {"values": [
+        {"type": "ProvisionError",
+         "value": "command failed (1): /Users/xmedia/.local/bin/uv pip install"},
+    ]}}
+    out = scrub_event(event)
+    assert out["exception"]["values"][0]["value"] == \
+        "command failed (1): <home>/.local/bin/uv pip install"
+
+
+def test_a_top_level_message_is_redacted():
+    assert scrub_event({"message": "failed at /home/ai/.stt"})["message"] == \
+        "failed at <home>/.stt"

@@ -203,6 +203,13 @@ function Get-TorchIndexUrl {
     return "https://download.pytorch.org/whl/cu126"
 }
 
+# Compiled packages that must arrive as wheels or not at all. uv/pip otherwise
+# fall back to building from source when no wheel matches the platform, which
+# needs a compiler this machine may not have; refusing the fallback makes the
+# resolver pick a release that does ship a wheel here. Mirrors
+# stt/wheel_policy.py, which is the source of truth and carries the tests.
+$ONLY_BINARY = "llvmlite,numba,numpy,scikit-learn,scipy,soxr"
+
 # ─── Install Python packages ────────────────────────────────────────
 function Install-PythonDeps {
     Print-Status "Installing Python dependencies from requirements.txt..."
@@ -214,26 +221,26 @@ function Install-PythonDeps {
     if (Test-Command "uv") {
         if ($indexUrl) {
             Print-Status "Installing GPU-enabled packages ($indexUrl)..."
-            & uv pip install --python $PYTHON_BIN -r $reqFile --extra-index-url $indexUrl
+            & uv pip install --python $PYTHON_BIN -r $reqFile --only-binary $ONLY_BINARY --extra-index-url $indexUrl
         } else {
             Print-Status "Installing default packages..."
-            & uv pip install --python $PYTHON_BIN -r $reqFile
+            & uv pip install --python $PYTHON_BIN -r $reqFile --only-binary $ONLY_BINARY
         }
     } else {
         # Fallback to pip
         & $PYTHON_BIN -m pip install --upgrade pip
         if ($indexUrl) {
             Print-Status "Installing GPU-enabled packages ($indexUrl)..."
-            & $PYTHON_BIN -m pip install -r $reqFile --extra-index-url $indexUrl
+            & $PYTHON_BIN -m pip install -r $reqFile --only-binary $ONLY_BINARY --extra-index-url $indexUrl
         } else {
             Print-Status "Installing default packages..."
-            & $PYTHON_BIN -m pip install -r $reqFile
+            & $PYTHON_BIN -m pip install -r $reqFile --only-binary $ONLY_BINARY
         }
     }
 
     if ($LASTEXITCODE -ne 0) {
         Print-Error "Some packages failed to install. Check the output above."
-        Print-Warning "You can try installing manually: .venv\Scripts\pip install -r requirements.txt"
+        Print-Warning "You can try installing manually: .venv\Scripts\pip install -r requirements.txt --only-binary $ONLY_BINARY"
     } else {
         Print-Success "Python dependencies installed"
     }

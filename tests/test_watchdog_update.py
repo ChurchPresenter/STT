@@ -371,6 +371,42 @@ def test_provisioning_failure_is_captured_to_sentry(monkeypatch):
     assert captured == [boom, "flushed"], "failure must be captured then flushed"
 
 
+def test_a_fingerprint_is_applied_when_the_sdk_supports_it(monkeypatch):
+    """Grouping is what keeps one stuck machine from filing an issue per retry."""
+    import contextlib
+
+    captured, scope = [], types.SimpleNamespace(fingerprint=None)
+    fake = types.ModuleType("sentry_sdk")
+    fake.capture_exception = lambda e: captured.append(e)
+    fake.flush = lambda timeout=None: captured.append("flushed")
+
+    @contextlib.contextmanager
+    def new_scope():
+        yield scope
+
+    fake.new_scope = new_scope
+    monkeypatch.setitem(sys.modules, "sentry_sdk", fake)
+
+    boom = Exception("x")
+    watchdog._sentry_capture(boom, fingerprint=["provisioning", "a", "b"])
+    assert scope.fingerprint == ["provisioning", "a", "b"]
+    assert captured == [boom, "flushed"]
+
+
+def test_an_sdk_without_new_scope_still_reports(monkeypatch):
+    """The report matters more than its grouping: an SDK that cannot scope must
+    not turn a crash report into silence."""
+    captured = []
+    fake = types.ModuleType("sentry_sdk")  # no new_scope attribute
+    fake.capture_exception = lambda e: captured.append(e)
+    fake.flush = lambda timeout=None: captured.append("flushed")
+    monkeypatch.setitem(sys.modules, "sentry_sdk", fake)
+
+    boom = Exception("x")
+    watchdog._sentry_capture(boom, fingerprint=["provisioning", "a", "b"])
+    assert captured == [boom, "flushed"]
+
+
 def test_sentry_capture_without_sdk_does_not_raise(monkeypatch):
     monkeypatch.setitem(sys.modules, "sentry_sdk", None)  # import raises ImportError
     watchdog._sentry_capture(Exception("x"))  # must be a silent no-op

@@ -28,6 +28,12 @@ datasets>=2.14.0
 
 # Audio processing
 soundfile>=0.12.0
+# Deliberately unpinned, and deliberately not removed: panns-inference and
+# torchlibrosa both require it, so a pin here would only fight them. It drags in
+# the compiled scientific stack (numba/llvmlite, scikit-learn, scipy, soxr),
+# which is where every source-build failure on a user machine has come from —
+# see stt/wheel_policy.py, whose --only-binary list the installers pass so uv
+# backtracks to a release with a wheel instead of trying to compile one.
 librosa>=0.10.0
 pydub>=0.25.1
 

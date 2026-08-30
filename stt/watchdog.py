@@ -41,6 +41,17 @@ import zipfile
 from typing import ClassVar, Optional
 
 try:
+    from stt.crash_reports import redact_home_paths, scrub_event
+    from stt.wheel_policy import only_binary_args
+except ImportError:  # pragma: no cover - depends on how the process was started
+    # deploy/stt-watchdog.service and com.stt.watchdog.plist run this file as a
+    # plain script, so sys.path[0] is stt/ and the package is not importable.
+    # crash_reports is stdlib-only, which is what lets the bootstrapper use it.
+    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    from stt.crash_reports import redact_home_paths, scrub_event
+    from stt.wheel_policy import only_binary_args
+
+try:
     import certifi
     _SSL_CTX: Optional[ssl.SSLContext] = ssl.create_default_context(cafile=certifi.where())
 except Exception as e:
@@ -669,14 +680,43 @@ def _mac_hardware_is_arm64():
     return platform.machine() == "arm64"
 
 
+#: Oldest macOS that can install the dependency stack. scipy and scikit-learn
+#: — both pulled in by librosa, which panns-inference requires — have never
+#: published an arm64 wheel tagged below macosx_12_0 for the Python we install,
+#: so on Big Sur there is no wheel to find and no version to fall back to.
+MIN_MACOS_MAJOR = 12
+MIN_MACOS_NAME = "Monterey (12)"
+
+
+def _macos_major():
+    """This Mac's major macOS version, or None when it cannot be read."""
+    try:
+        release = platform.mac_ver()[0]
+    except Exception:
+        return None
+    try:
+        return int(str(release).split(".")[0])
+    except (AttributeError, IndexError, ValueError):
+        return None
+
+
 def _unsupported_platform_reason():
     """None when this machine can run STT, else a user-facing explanation.
 
-    The only unsupported platform is a Mac that is not Apple Silicon: PyTorch
-    published its last macOS x86_64 wheels with 2.2.2, so the pinned torch in
-    requirements.txt can never resolve there and uv fails with "no wheels with a
-    matching platform tag". That is permanent, not a transient setup failure.
-    Every other OS/arch returns None — this is not a general allowlist."""
+    Two permanent conditions, both Macs. A Mac that is not Apple Silicon:
+    PyTorch published its last macOS x86_64 wheels with 2.2.2, so the pinned
+    torch in requirements.txt can never resolve there. And an Apple Silicon Mac
+    on macOS 11 or older: the compiled scientific packages stopped tagging
+    their arm64 wheels for it, and no older release of scipy or scikit-learn
+    ever carried one, so there is nothing for the resolver to fall back to.
+
+    That second case reached us as an install retrying every ten minutes for
+    hours. uv found no matching llvmlite wheel, quietly fell back to the source
+    distribution, and failed to compile it on a machine with no toolchain — a
+    two-hour failure that said "build error", not "your macOS is too old".
+
+    Both are permanent, not transient setup failures. Every other OS/arch
+    returns None — this is not a general allowlist."""
     if sys.platform != "darwin":
         return None
     if not _mac_hardware_is_arm64():
@@ -692,6 +732,17 @@ def _unsupported_platform_reason():
             "Silicon Mac, and its dependencies have no Intel-Mac builds. Install "
             "the Apple Silicon (arm64) build of STT instead."
         )
+    major = _macos_major()
+    # An unreadable version is not a refusal: let setup try and report what it
+    # actually hits, rather than turning a failed lookup into a locked-out Mac.
+    if major is not None and major < MIN_MACOS_MAJOR:
+        return (
+            f"This Mac runs macOS {major}, and STT needs macOS "
+            f"{MIN_MACOS_NAME} or later — the audio libraries it depends on "
+            "stopped publishing builds for older versions. The update is free "
+            "for every Apple Silicon Mac: open System Preferences → Software "
+            "Update, install it, then start STT again."
+        )
     return None
 
 
@@ -700,6 +751,27 @@ _RESOLUTION_FAILURE_SIGNS = (
     "no wheels with a matching platform tag",
     "are unsatisfiable",
 )
+
+
+_BUILD_FAILURE_SIGNS = (
+    "build failures usually indicate",
+    "failed to build",
+    "returned non-zero exit status",
+)
+
+
+def _is_permanent_dep_failure(message):
+    """True when a dependency install cannot succeed on this machine as it stands.
+
+    Two shapes, both hopeless on repeat: uv gave up resolving, or it fell back
+    to a source distribution and the compile failed (no wheel for this
+    interpreter, no toolchain to build one). Neither is a network blip, so the
+    retry loop must not keep hammering every ten minutes — but it must not give
+    up either: someone can install the missing toolchain an hour later and the
+    next attempt then succeeds. Callers stretch the interval instead.
+    """
+    low = (message or "").lower()
+    return any(sign in low for sign in _RESOLUTION_FAILURE_SIGNS + _BUILD_FAILURE_SIGNS)
 
 
 def _is_resolution_failure(message):
@@ -1072,7 +1144,13 @@ class Provisioner:
             # Include the last output lines so remote crash reports carry the
             # actual error, not just the exit code.
             detail = f" — last output: {' | '.join(tail)}" if tail else ""
-            raise ProvisionError(f"command failed ({code}): {' '.join(str(c) for c in cmd)}{detail}")
+            # The command line names the venv interpreter and the requirements
+            # file, both under the operator's home directory, and this message
+            # travels to Sentry as an issue title and as a log record. Sentry
+            # Logs bypass before_send, so redact at the source rather than in
+            # the hook.
+            raise ProvisionError(redact_home_paths(
+                f"command failed ({code}): {' '.join(str(c) for c in cmd)}{detail}"))
         return code
 
     # -- environment detection ----------------------------------------------
@@ -1557,7 +1635,12 @@ class Provisioner:
                 "press Retry — setup resumes where it left off."
             )
         py = venv_python()
+        # --only-binary: uv falls back to a source build when no wheel matches
+        # the platform, which on a machine with no compiler fails after a long
+        # download and looks like "setup is stuck". Refusing the fallback makes
+        # uv backtrack to a release that does publish a wheel here instead.
         cmd = [self._uv, "pip", "install", "--python", py, "-r", req]
+        cmd += only_binary_args()
         gpu = self._has_nvidia()
         if gpu and sys.platform.startswith(("linux", "win")):
             # Chosen by compute capability, not by the presence of nvidia-smi: cu128
@@ -3187,13 +3270,32 @@ def _run_crash_report_test():
 # First-run setup UI
 # ---------------------------------------------------------------------------
 
+#: Backoff ceilings, in seconds. A transient failure is worth re-checking every
+#: ten minutes; one that needs a human (a missing compiler, an unsatisfiable
+#: requirement) is worth re-checking a few times a day, and no more.
+_RETRY_CAP_TRANSIENT = 600
+_RETRY_CAP_PERMANENT = 21600  # 6 hours
+
+
 def _run_provisioning_headless(max_attempts=None):
-    """Provision with retry+backoff (30s doubling to 10min, unbounded by
-    default). Headless means unattended — an autostarted kiosk must self-heal
-    from a transient failure (network blip mid-download, a prerequisite
-    installed a minute later) instead of exiting and staying down until
-    someone logs in. Steps are idempotent, so a retry resumes where it
-    left off; the GUI path has its Retry button for the same purpose."""
+    """Provision with retry+backoff (30s doubling, unbounded by default).
+    Headless means unattended — an autostarted kiosk must self-heal from a
+    transient failure (network blip mid-download, a prerequisite installed a
+    minute later) instead of exiting and staying down until someone logs in.
+    Steps are idempotent, so a retry resumes where it left off; the GUI path
+    has its Retry button for the same purpose.
+
+    The backoff ceiling depends on what failed. A dependency install that
+    cannot resolve, or that fell back to a source build and could not compile
+    it, will fail identically on the next attempt: those stretch to six hours
+    rather than ten minutes, so a machine waiting on someone to install a
+    toolchain still heals itself without re-running a doomed install 144 times
+    a day.
+
+    Only the first failure is reported. The retries are logged at warning, not
+    error: an error record becomes a Sentry issue, and one stuck machine
+    otherwise mints a fresh issue per attempt because the attempt number is in
+    the message."""
     delay, attempt = 30, 0
     while True:
         attempt += 1
@@ -3208,14 +3310,19 @@ def _run_provisioning_headless(max_attempts=None):
             _sentry_capture(e)
             raise
         except Exception as e:
-            logging.error(f"[SETUP] Provisioning failed (attempt {attempt}): {e}")
+            permanent = _is_permanent_dep_failure(str(e))
             if attempt == 1:
-                _sentry_capture(e)  # once — a retry loop must not spam reports
+                # No attempt counter here: it is part of the Sentry grouping key.
+                logging.error(f"[SETUP] Provisioning failed: {e}")
+                _sentry_capture(e, fingerprint=_provision_fingerprint(e))
+            else:
+                logging.warning(f"[SETUP] Provisioning failed again (attempt {attempt}): {e}")
             if max_attempts is not None and attempt >= max_attempts:
                 return False
             logging.info(f"[SETUP] Retrying in {delay}s...")
             time.sleep(delay)
-            delay = min(delay * 2, 600)
+            delay = min(delay * 2,
+                        _RETRY_CAP_PERMANENT if permanent else _RETRY_CAP_TRANSIENT)
 
 
 class ProvisionWindow:
@@ -3281,7 +3388,9 @@ class ProvisionWindow:
             except Exception as e:
                 self._q.put(("log", f"[ERROR] {e}"))
                 self._q.put(("done", False))
-                _sentry_capture(e)
+                # Same grouping as the headless path: an operator pressing
+                # Retry five times must not mint five issues.
+                _sentry_capture(e, fingerprint=_provision_fingerprint(e))
 
         threading.Thread(target=work, daemon=True).start()
 
@@ -3542,13 +3651,44 @@ def _block_until_stopped(state):
 _SENTRY_DEFAULT_DSN = "https://eff01fdec5e9330b80ffd96093038588@o4511050918723584.ingest.us.sentry.io/4511714251702272"
 
 
-def _sentry_capture(exc):
+def _provision_fingerprint(exc):
+    """A stable Sentry grouping key for a provisioning failure.
+
+    The raw message cannot group: it ends in the last five lines of uv output,
+    which name a per-run temporary build directory, so every machine and every
+    attempt lands on its own issue. Keep the part that identifies the failure —
+    the command, with home directories already redacted by ``Provisioner._run``
+    — and whether it is the kind that a retry can fix.
+    """
+    message = redact_home_paths(str(exc))
+    command = message.split(" — last output:")[0].strip()
+    kind = "permanent" if _is_permanent_dep_failure(message) else "transient"
+    return ["provisioning", type(exc).__name__, command, kind]
+
+
+def _sentry_capture(exc, fingerprint=None):
     """Best-effort capture+flush of a watchdog-side exception (e.g. a
     provisioning failure). Silent no-op when the SDK is absent or Sentry is
     disabled; the flush matters because the headless path exits right after."""
     try:
         import sentry_sdk
-        sentry_sdk.capture_exception(exc)
+    except Exception:
+        return
+    scope_cm = None
+    if fingerprint:
+        try:
+            scope_cm = sentry_sdk.new_scope()
+        except Exception:
+            # An SDK too old for new_scope, or a scope API that moved. Grouping
+            # is a nicety; the report is the point, so fall through without it.
+            scope_cm = None
+    try:
+        if scope_cm is not None:
+            with scope_cm as scope:
+                scope.fingerprint = fingerprint
+                sentry_sdk.capture_exception(exc)
+        else:
+            sentry_sdk.capture_exception(exc)
         sentry_sdk.flush(timeout=5)
     except Exception:
         pass
@@ -3581,6 +3721,14 @@ def _init_sentry():
             send_default_pii=bool(cr.get("sentry_send_pii_optin", False)),
             # Frame locals can hold install paths and config values.
             include_local_variables=False,
+            # Drops sys.argv and rewrites home directories to <home>. Without
+            # it a provisioning failure puts the operator's username in the
+            # issue title, which the server process has never done.
+            # Annotated with plain dicts, which is what the hook actually
+            # receives; the SDK's stub says Event (a TypedDict) and the two do
+            # not unify. crash_reports must stay stdlib-only — it is imported
+            # by the frozen bootstrapper — so it cannot import the type.
+            before_send=scrub_event,  # type: ignore[arg-type]
             # Otherwise the SDK sends socket.gethostname().
             server_name="stt",
             # The watchdog logs via the logging module — these become Sentry Logs

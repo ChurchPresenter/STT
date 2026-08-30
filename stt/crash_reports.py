@@ -1,6 +1,6 @@
 """What leaves the machine in a crash report, and what never should.
 
-Two jobs, both running inside Sentry's ``before_send`` hook:
+Three jobs, all running inside Sentry's ``before_send`` hook:
 
 **Scrubbing.** The UI promises that no transcription content is sent. Request
 bodies carry transcript text (``/api/translate``), glossary and dictionary
@@ -9,6 +9,15 @@ entries and file paths; the query string carries the ``?key=`` access token;
 username; subprocess span descriptions carry the full command line, which for
 ffmpeg names the input device and for media jobs the file being processed.
 All of that is stripped here. Stack traces, versions and OS context stay.
+
+**Redacting home directories.** A path under ``/Users/<name>``,
+``/home/<name>`` or ``C:\\Users\\<name>`` names the operator, and those paths
+are all over provisioning failures: the venv interpreter, the requirements
+file, the uv binary. They reach Sentry inside the *message*, which becomes the
+issue title, so the username ends up on a dashboard even though every other
+scrub passed. ``redact_home_paths`` is also applied where such a message is
+built (see ``Provisioner._run``), because Sentry Logs are shipped by a separate
+pipeline that never runs ``before_send``.
 
 **Dropping websocket-upgrade signals.** ``engineio`` completes a websocket
 handshake by *raising* out of the WSGI app — ``ConnectionError`` under
@@ -26,6 +35,7 @@ Stdlib-only: events come in as the plain dicts Sentry hands to the hook.
 
 from __future__ import annotations
 
+import re
 from typing import Any, Dict, Optional
 
 #: The engineio frame that raises to hand the socket over to the WSGI server,
@@ -40,6 +50,41 @@ _HANDOVER_EXCEPTIONS = frozenset({"ConnectionError", "StopIteration"})
 
 #: Request fields that can hold user content or the access token.
 _REQUEST_FIELDS_TO_DROP = ("data", "query_string", "cookies", "headers", "env")
+
+#: A home directory, POSIX and Windows. The user segment is matched greedily up
+#: to the next separator so a name containing a space ("C:\\Users\\Ada Lovelace\\")
+#: is redacted whole; over-redacting a stray token is harmless, leaking half a
+#: surname is not.
+_HOME_PATTERNS = (
+    re.compile(r"/(?:Users|home)/[^/\\\n]+", re.IGNORECASE),
+    re.compile(r"[A-Za-z]:\\Users\\[^/\\\n]+", re.IGNORECASE),
+)
+
+#: What replaces it. Keeps the shape of the path ("<home>/.stt/app/...") so the
+#: report still says which file, just not whose.
+_HOME_PLACEHOLDER = "<home>"
+
+
+def redact_home_paths(text: str) -> str:
+    """Replace home directories in ``text`` with ``<home>``.
+
+    Returns non-strings unchanged so it can be applied to fields that Sentry
+    may fill with ``None`` or a nested structure.
+    """
+    if not isinstance(text, str):
+        return text
+    for pattern in _HOME_PATTERNS:
+        text = pattern.sub(_HOME_PLACEHOLDER, text)
+    return text
+
+
+def _redact_in_place(container: Optional[Dict[str, Any]], *keys: str) -> None:
+    """Apply :func:`redact_home_paths` to ``keys`` of ``container``, if present."""
+    if not container:
+        return
+    for key in keys:
+        if key in container:
+            container[key] = redact_home_paths(container[key])
 
 
 def _frame_is_websocket_handover(frame: Dict[str, Any]) -> bool:
@@ -85,6 +130,15 @@ def scrub_event(event: Dict[str, Any], hint: Any = None) -> Optional[Dict[str, A
     extra = event.get("extra")
     if extra:
         extra.pop("sys.argv", None)
+    # The message becomes the issue title. A provisioning failure quotes the
+    # whole uv command line, so the operator's home directory is in it.
+    _redact_in_place(event, "message")
+    _redact_in_place(event.get("logentry"), "message", "formatted")
+    params = (event.get("logentry") or {}).get("params")
+    if isinstance(params, list):
+        event["logentry"]["params"] = [redact_home_paths(p) for p in params]
+    for value in ((event.get("exception") or {}).get("values")) or ():
+        _redact_in_place(value, "value")
     # Subprocess spans are named after the full command line, which for ffmpeg
     # carries the input device name and for media jobs the file path.
     for span in event.get("spans") or ():

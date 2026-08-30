@@ -27,6 +27,8 @@ import tempfile
 from datetime import datetime, timedelta
 from typing import Sequence, Tuple
 
+from stt.wheel_policy import only_binary_args
+
 log = logging.getLogger(__name__)
 
 # Timeouts (seconds) for the individual git invocations.
@@ -253,7 +255,7 @@ def _sync_deps(repo_dir: str) -> bool:
         return False
     try:
         r = subprocess.run(
-            [uv, "pip", "install", "-r", req_path],
+            [uv, "pip", "install", "-r", req_path, *only_binary_args()],
             cwd=repo_dir,
             capture_output=True,
             text=True,

@@ -383,7 +383,7 @@ class TestHeadlessProvisioningRetry:
                     raise result
 
         monkeypatch.setattr(watchdog, "Provisioner", FakeProvisioner)
-        monkeypatch.setattr(watchdog, "_sentry_capture", lambda e: None)
+        monkeypatch.setattr(watchdog, "_sentry_capture", lambda e, **kw: None)
         monkeypatch.setattr(watchdog.time, "sleep", sleeps.append)
 
     def test_transient_failures_retry_with_backoff(self, monkeypatch):
@@ -411,6 +411,53 @@ class TestHeadlessProvisioningRetry:
         assert watchdog._run_provisioning_headless() is True
         assert max(sleeps) == 600
         assert sleeps == [30, 60, 120, 240, 480, 600, 600, 600]
+
+    def test_a_dependency_build_failure_backs_off_for_hours(self, monkeypatch):
+        """The failure that produced this test: llvmlite moved its arm64 wheel
+        to a newer macOS tag, so on an older Mac uv fell back to the sdist and
+        could not compile it. Ten-minute retries then re-ran a doomed install
+        144 times a day. Retry stays unbounded — someone can install the missing
+        toolchain — but the interval stretches."""
+        sleeps = []
+        build_failure = watchdog.ProvisionError(
+            "command failed (1): uv pip install -r requirements.txt — last output: "
+            "returned non-zero exit status 1. | hint: Build failures usually "
+            "indicate a problem with the package or the build environment")
+        self._patch(monkeypatch, [build_failure] * 12 + [None], sleeps)
+        assert watchdog._run_provisioning_headless() is True
+        assert max(sleeps) == watchdog._RETRY_CAP_PERMANENT
+        assert sleeps[:5] == [30, 60, 120, 240, 480]
+
+    def test_an_unresolvable_requirement_backs_off_for_hours(self, monkeypatch):
+        sleeps = []
+        self._patch(monkeypatch,
+                    [watchdog.ProvisionError(
+                        "command failed (1): uv pip install — last output: "
+                        "No solution found when resolving dependencies")] * 12 + [None],
+                    sleeps)
+        assert watchdog._run_provisioning_headless() is True
+        assert max(sleeps) == watchdog._RETRY_CAP_PERMANENT
+
+    def test_only_the_first_failure_is_reported(self, monkeypatch):
+        """One stuck machine used to mint a fresh Sentry issue per attempt: the
+        retry was logged at error, and the attempt counter in the message put
+        each one in its own group. Report once, then log at warning."""
+        sleeps, captured, records = [], [], []
+        self._patch(monkeypatch, [watchdog.ProvisionError("net blip")] * 4 + [None], sleeps)
+        monkeypatch.setattr(watchdog, "_sentry_capture",
+                            lambda e, **kw: captured.append((e, kw)))
+        monkeypatch.setattr(watchdog.logging, "error",
+                            lambda msg, *a: records.append(("error", msg)))
+        monkeypatch.setattr(watchdog.logging, "warning",
+                            lambda msg, *a: records.append(("warning", msg)))
+        assert watchdog._run_provisioning_headless() is True
+        assert len(captured) == 1
+        assert captured[0][1]["fingerprint"][0] == "provisioning"
+        levels = [level for level, _ in records]
+        assert levels == ["error", "warning", "warning", "warning"]
+        # The attempt counter must never appear in an error, or it becomes the
+        # grouping key and one incident becomes N issues.
+        assert not any("attempt" in msg for level, msg in records if level == "error")
 
     def test_an_unsupported_platform_is_not_retried(self, monkeypatch):
         """The failure that produced this test retried a resolution that could
