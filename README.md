@@ -154,6 +154,7 @@ Run once at startup via Task Scheduler:
 - [PIPELINE.md](PIPELINE.md) — how audio becomes a caption: the four processes, every stage and the number that governs it, and what happens when translation declines.
 - [INSTALL.md](INSTALL.md) — detailed installation instructions, system requirements, and troubleshooting.
 - [DESIGN.md](DESIGN.md) — colours, typography and component rules for the control UI.
+- [docs/control-endpoints.md](docs/control-endpoints.md) — driving STT from a Stream Deck, Bitfocus Companion or ChurchPresenter: marking a phase from a button, reading the current one, and the token a control link carries.
 
 ## System Requirements
 

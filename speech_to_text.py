@@ -1002,6 +1002,7 @@ from stt.phase_marks import (
     resolve as _phase_marks_resolve,
 )
 from stt.phase_rules import load_rules as _phase_rules_load
+from stt.control_auth import refuse_reason as _control_refuse_reason
 from stt.phase_profiles import (
     DEFAULT_PROFILE as _phase_default_profile,
     apply_to_profile as _phase_apply_to_profile,
@@ -6185,8 +6186,53 @@ def mark_service_phase():
     """
     if not check_ip_whitelist():
         return jsonify({"success": False, "error": "Access denied"}), 403
+    return _phase_mark_apply(_control_params(keep_blank=True))
 
+
+@app.route("/api/control/phase-mark", methods=["GET", "POST"])
+def control_phase_mark():
+    """The same mark, reachable from a button that can only send a GET.
+
+    Bitfocus Companion's simplest action is an HTTP GET, and every route that changes
+    something here is POST-only, so that button gets a 405. Rather than relax the method on
+    the route the browser uses — a GET that mutates is one image tag away from being fired
+    by any page the operator's browser loads — this is a separate door that will not accept
+    the ambient credentials a drive-by would ride on. The access token has to be in the URL,
+    which a button has forever and a hostile page cannot know. See stt/control_auth.
+
+    A mark outranks the detector everywhere downstream, so one press at the start of the
+    preaching is worth more than any amount of tuning — and it is also evidence the learner
+    reads back afterwards.
+    """
     data = _control_params(keep_blank=True)
+    refused = _control_refuse_reason(
+        data, token=str(config.get("web_server", {}).get("access_token") or ""),
+        method=request.method)
+    if refused:
+        return jsonify({"success": False, "error": refused}), 403
+    result = _phase_mark_apply(data)
+    # A stream deck shows a line of text, not a JSON body.
+    if isinstance(result, tuple):
+        return result
+    payload = result.get_json() if hasattr(result, "get_json") else result
+    if isinstance(payload, dict) and payload.get("success"):
+        payload = dict(payload)
+        payload["text"] = _phase_mark_text(data, payload)
+        return jsonify(payload)
+    return result
+
+
+def _phase_mark_text(data, payload):
+    """One line a control surface can display back to whoever pressed the button."""
+    if str(data.get("undo") or "").lower() in ("1", "true", "yes"):
+        return "Undid the last mark" if payload.get("removed") else "Nothing to undo"
+    if str(data.get("end") or "").lower() in ("1", "true", "yes"):
+        return "Marked the end"
+    return "Marked %s" % ((data.get("label") or "").strip()[:120] or "a phase")
+
+
+def _phase_mark_apply(data):
+    """Record, move or undo a mark. Shared by the page's route and the control link."""
     db_path, is_live, err = _archive_resolve_db(data.get("session"))
     if err:
         return err

@@ -61,7 +61,8 @@ def session_db(tmp_path, spec="M" * 5 + "S" * 12, name="2026-03-01_093218.db", a
     return path
 
 
-def make_ns(*, live_db=None, params=None, args=None, archive=(), saved=None):
+def make_ns(*, live_db=None, params=None, args=None, archive=(), saved=None,
+            access_token="", method="POST"):
     """The routes under test, with the archive enumeration supplied by the caller.
 
     ``archive`` is what _archive_session_paths would have swept: the whitelist a ``session``
@@ -78,7 +79,8 @@ def make_ns(*, live_db=None, params=None, args=None, archive=(), saved=None):
          "_archive_open_ro", "_archive_unreadable", "rerun_service_phase",
          "list_service_phase_sessions",
          "save_service_phase_settings", "get_service_phase_transcript",
-         "mark_service_phase"],
+         "mark_service_phase", "_phase_mark_apply", "control_phase_mark",
+         "_phase_mark_text"],
         extra_globals={
             "os": os,
             "_db_iter_databases": lambda dirs: list(archive),
@@ -97,13 +99,18 @@ def make_ns(*, live_db=None, params=None, args=None, archive=(), saved=None):
             "_phase_merge_config": __import__(
                 "stt.phase_profiles", fromlist=["x"]).merge_config,
             "_service_phase_profile": lambda: None,
+            # The control link's own gate; the page's route does not use it.
+            "_control_refuse_reason": __import__(
+                "stt.control_auth", fromlist=["x"]).refuse_reason,
             "_service_phase_save": save_analysis,
             "_sermon_read_rows": __import__("stt.sermon_summary", fromlist=["x"]).read_sermon_rows,
             "save_config": lambda cfg: saved.update(cfg),
-            "config": {"service_phase": dict(CFG)},
+            "config": {"service_phase": dict(CFG),
+                       "web_server": {"access_token": access_token}},
             "request": type("R", (), {
                 "remote_addr": "127.0.0.1",
                 "args": args or {},
+                "method": method,
             })(),
             "jsonify": lambda payload: payload,
             "check_ip_whitelist": lambda: True,
@@ -879,3 +886,67 @@ class TestMark:
         assert body["success"] is True and body["removed"] == 0
         assert [c["start_ms"] for c in body["corrections"] if c["end_ms"] is None] \
             == [1_200_000]
+
+
+class TestControlLink:
+    """The door a stream-deck button comes through.
+
+    Companion's simplest action is an HTTP GET, and every route that changes something here
+    is POST-only. Rather than relax the method on the route the operator's browser uses —
+    where a GET that mutates is one image tag away from being fired by any page that browser
+    loads — the control link is separate and refuses the ambient credentials a drive-by
+    would ride on.
+    """
+
+    TOKEN = "button-token"
+
+    def call(self, db, *, token="", method="GET", **params):
+        if token:
+            params = dict(params, key=token)
+        return make_ns(live_db=db, params=params, access_token=self.TOKEN,
+                       method=method)["control_phase_mark"]()
+
+    def test_a_button_with_the_token_marks_the_phase(self, tmp_path):
+        db = session_db(tmp_path)
+        body = self.call(db, token=self.TOKEN, label="Sermon 1", kind="S", at_ms=1_500_000)
+        assert body["success"] is True
+        assert body["corrections"][0]["label"] == "Sermon 1"
+
+    def test_the_reply_carries_a_line_a_stream_deck_can_show(self, tmp_path):
+        db = session_db(tmp_path)
+        body = self.call(db, token=self.TOKEN, label="Sermon 1", at_ms=1_500_000)
+        assert body["text"] == "Marked Sermon 1"
+
+    def test_a_get_without_the_token_is_refused(self, tmp_path):
+        # The cookie-and-whitelist case a hostile page would ride on.
+        db = session_db(tmp_path)
+        body, status = self.call(db, label="Sermon 1", at_ms=1_500_000)
+        assert status == 403 and body["success"] is False
+
+    def test_the_wrong_token_is_refused(self, tmp_path):
+        db = session_db(tmp_path)
+        _, status = self.call(db, token="nope", label="Sermon 1", at_ms=1_500_000)
+        assert status == 403
+
+    def test_a_post_goes_through_as_it_always_did(self, tmp_path):
+        db = session_db(tmp_path)
+        body = self.call(db, method="POST", label="Sermon 1", at_ms=1_500_000)
+        assert body["success"] is True
+
+    def test_an_undo_says_what_it_did(self, tmp_path):
+        db = session_db(tmp_path)
+        self.call(db, token=self.TOKEN, label="Sermon 1", at_ms=1_500_000)
+        body = self.call(db, token=self.TOKEN, undo="1")
+        assert body["text"] == "Undid the last mark"
+
+    def test_an_end_press_says_so(self, tmp_path):
+        db = session_db(tmp_path)
+        self.call(db, token=self.TOKEN, label="Sermon 1", at_ms=1_500_000)
+        body = self.call(db, token=self.TOKEN, end="1", at_ms=1_600_000)
+        assert body["text"] == "Marked the end"
+
+    def test_a_press_with_no_name_is_still_refused(self, tmp_path):
+        # The control link does not lower the bar on what a mark needs.
+        db = session_db(tmp_path)
+        _, status = self.call(db, token=self.TOKEN, at_ms=1_500_000)
+        assert status == 400
