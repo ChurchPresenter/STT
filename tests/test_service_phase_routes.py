@@ -91,6 +91,12 @@ def make_ns(*, live_db=None, params=None, args=None, archive=(), saved=None):
             "_session_unreadable": unreadable,
             "_archive_unreadable_seen": {},
             "_sermon_summary_config": lambda: {},
+            # Profiles are how one installation describes its own kinds of service. These
+            # tests are about the routes, so they run with none configured — which is also
+            # every install that has not described anything, and must behave as it always did.
+            "_phase_merge_config": __import__(
+                "stt.phase_profiles", fromlist=["x"]).merge_config,
+            "_service_phase_profile": lambda: None,
             "_service_phase_save": save_analysis,
             "_sermon_read_rows": __import__("stt.sermon_summary", fromlist=["x"]).read_sermon_rows,
             "save_config": lambda cfg: saved.update(cfg),

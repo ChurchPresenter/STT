@@ -3,6 +3,12 @@
   "_baseline_comment": "These defaults are deliberately plain. They describe a service with songs, one or more sermons, and an optional communion — not any particular congregation's running order. The numbers below are starting points, not measurements of your church: correct a few services on /service-phase and let the learner propose values from what you actually do.",
 
   "_match_comment": "A match clause may test: kind ('M' music, 'S' speaking, '_' quiet) or kinds (a list), min_minutes / max_minutes (both inclusive), cues ({group: minimum total hits}), cue_fragments ({group: minimum number of DIFFERENT fragments seen}), before_first / after_first (a phase name, for ordering), and is_last_named (the final block that can carry a name).",
+  "_service_comment": "Numbers this kind of service is judged by, overriding the same keys in config.json's service_phase block for sessions using this profile. Shipped empty on purpose: how long a sermon runs and how long a closing may be are facts about one congregation, and a figure shipped here would be wrong for every other installation without its operator ever seeing it. Add what your services actually do, or correct a few on /service-phase and let the learner propose them.",
+  "service": {},
+
+  "_limits_comment": "How many of a phase a service of this kind has, e.g. {\"Sermon\": {\"max\": 2}}. The detector names each block on its own, so a service with an extra long talk in it gets an extra sermon; a limit keeps the longest ones and hands the rest back to the rules, which is how a talk after the closing songs ends up named as whatever it really is. Optional per phase: \"fallback\" to force a name instead of re-matching, and \"closed_only\" (default true) so a phase still being spoken is never demoted. Shipped empty for the same reason as service above.",
+  "limits": {},
+
   "_span_comment": "A rule with a span swallows the blocks after the one it matched: extend_while_kinds lists what may be absorbed, max_inner_block_minutes caps how long an absorbed block may be, and ends_on_kind_minutes ends the span when a block of that kind reaches that length. Use it for a phase that is not one continuous stretch of audio.",
 
   "phases": [

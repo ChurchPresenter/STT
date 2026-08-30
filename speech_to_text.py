@@ -1002,6 +1002,17 @@ from stt.phase_marks import (
     resolve as _phase_marks_resolve,
 )
 from stt.phase_rules import load_rules as _phase_rules_load
+from stt.phase_profiles import (
+    DEFAULT_PROFILE as _phase_default_profile,
+    apply_to_profile as _phase_apply_to_profile,
+    list_profiles as _phase_list_profiles,
+    load_profile as _phase_load_profile,
+    merge_config as _phase_merge_config,
+    profile_path as _phase_profile_path,
+    seed_missing as _phase_seed_profile,
+    select_profile as _phase_select_profile,
+    slugify_profile as _phase_slugify_profile,
+)
 from stt.session_index import (
     describe as _session_describe,
     index as _session_index,
@@ -6306,6 +6317,56 @@ def _service_phase_learn_scan(limit=200):
         finally:
             conn.close()
     return phases
+
+
+@app.route("/api/service-phase/profiles")
+def list_service_phase_profiles():
+    """The service types this installation has described, and which one is in force.
+
+    ``source`` is the file that actually answered. An operator whose profile is missing gets
+    the shipped rules instead, and without saying so the page would show a profile name over
+    a timeline that had nothing to do with it.
+    """
+    if not check_ip_whitelist():
+        return jsonify({"success": False, "error": "Access Denied"}), 403
+    profile = _service_phase_profile()
+    known = _phase_list_profiles(CONFIG_DIR)
+    active = _service_phase_profile_name()
+    return jsonify({
+        "success": True,
+        "active": active,
+        "configured": active in known,
+        "profiles": known,
+        "schedule": (config.get("service_phase", {}) or {}).get("profiles") or [],
+        "source": getattr(profile, "source", ""),
+        "service": getattr(profile, "service", {}) or {},
+        "limits": getattr(profile, "limits", {}) or {},
+        "labels": sorted({r.name for r in (getattr(profile, "rules", None) or [])}),
+    })
+
+
+@app.route("/api/service-phase/profile", methods=["POST"])
+def set_service_phase_profile():
+    """Use a different profile for this session, and create it from the template if asked.
+
+    Two separate things on purpose. Choosing a profile is a decision about this service and
+    takes effect immediately; creating one writes a file, and that write never overwrites an
+    existing profile — an operator's tuning must not be replaced by defaults.
+    """
+    if not check_ip_whitelist():
+        return jsonify({"success": False, "error": "Access Denied"}), 403
+    data = _control_params()
+    name = _phase_slugify_profile(str(data.get("profile") or ""))
+    if not name:
+        return jsonify({"success": False, "error": "A profile name is required."}), 400
+    created = None
+    if str(data.get("create") or "").strip().lower() in ("1", "true", "yes", "on"):
+        created = _phase_seed_profile(CONFIG_DIR, name, PHASE_RULES_TEMPLATE_FILE)
+    _service_phase_profile_state["name"] = name
+    _service_phase_profile_state["profile"] = None   # re-read under the new name
+    profile = _service_phase_profile()
+    return jsonify({"success": True, "active": name, "created": created,
+                    "source": getattr(profile, "source", "")})
 
 
 @app.route("/api/service-phase/learn", methods=["POST"])
@@ -12647,6 +12708,12 @@ def start_transcription():
         # Send start command through queue
         control_queue.put({"command": "start"})
 
+        # Which kind of service this is, decided once from when it started. Everything
+        # downstream reads it: the detector's thresholds, the cap on how many sermons a
+        # service of this kind has, and — recorded in the session — what the learner may
+        # take as evidence about this kind of service rather than any other.
+        _service_phase_choose_profile()
+
         # Update state - don't set running=True yet, worker will do that after initialization
         transcription_state["status"] = "starting"
         transcription_state["message"] = (
@@ -16967,20 +17034,73 @@ def _service_phase_first_sunday(db_path):
 
 
 def _service_phase_config():
-    return config.get("service_phase", {}) or {}
+    # The machine's own settings with this service type's on top: bin width and dominance
+    # describe this machine's audio, how long a sermon runs describes this service.
+    return _phase_merge_config(config.get("service_phase", {}) or {},
+                               _service_phase_profile())
 
 
 PHASE_RULES_FILE = os.path.join(CONFIG_DIR, "service_phases.json")
 PHASE_RULES_TEMPLATE_FILE = os.path.join(BUNDLE_DIR, "config", "service_phases.default.json")
 
 
-def _service_phase_rules():
-    """The phase-naming rules, re-read each tick so an edit takes effect without a restart.
+# Which profile this session is being judged by, and the profile itself, cached on the
+# file's mtime so the every-tick re-read stays free while an edit still lands within the
+# interval. The name is chosen once when transcription starts; the file behind it may be
+# edited mid-service, which is the whole point of not caching by name alone.
+_service_phase_profile_state = {"name": "", "mtime": 0.0, "path": "", "profile": None}
+
+
+def _service_phase_profile_name():
+    """The profile this session is being judged by, decided once at Start."""
+    return _service_phase_profile_state.get("name") or _phase_default_profile
+
+
+def _service_phase_choose_profile(started_at=None):
+    """Pick the profile for a service starting now, and remember it for the session.
+
+    By day and time, so nobody has to remember to choose one; an operator's override in the
+    config wins, for the week the calendar is wrong about.
+    """
+    cfg = config.get("service_phase", {}) or {}
+    when = datetime.fromtimestamp(started_at or time.time())
+    name = _phase_select_profile(cfg.get("profiles") or [], when,
+                                 override=str(cfg.get("profile") or ""))
+    _service_phase_profile_state["name"] = name
+    return name
+
+
+def _service_phase_profile():
+    """The rules and numbers for this kind of service, re-read when its file changes.
 
     Reading a small JSON file every 20 seconds is nothing next to re-deriving the session,
-    and the alternative — caching — means an operator who fixes a rule mid-service has to
-    restart the server to see it, on the one machine that must not be restarted mid-service.
+    and the alternative — caching by name — means an operator who fixes a rule mid-service
+    has to restart the server to see it, on the one machine that must not be restarted
+    mid-service. So the cache key is the file's mtime, which costs a stat.
     """
+    name = _service_phase_profile_name()
+    path = _phase_profile_path(CONFIG_DIR, name)
+    try:
+        mtime = os.path.getmtime(path)
+    except OSError:
+        mtime = 0.0
+    state = _service_phase_profile_state
+    if state.get("profile") is not None and state.get("path") == path \
+            and state.get("mtime") == mtime:
+        return state["profile"]
+    try:
+        profile = _phase_load_profile(CONFIG_DIR, name, PHASE_RULES_TEMPLATE_FILE)
+    except Exception:
+        profile = None
+    state["path"], state["mtime"], state["profile"] = path, mtime, profile
+    return profile
+
+
+def _service_phase_rules():
+    """The phase-naming rules for this session's profile."""
+    profile = _service_phase_profile()
+    if profile is not None and profile.rules:
+        return profile.rules
     try:
         return _phase_rules_load(PHASE_RULES_FILE, PHASE_RULES_TEMPLATE_FILE)
     except Exception:
@@ -17008,6 +17128,15 @@ def _service_phase_tick(is_running):
     db_path = _service_phase_session_db()
     if not db_path or not os.path.exists(db_path):
         return
+    # Recorded against the session rather than only held in memory, so the learner can tell
+    # a Sunday morning's evidence from a Wednesday's, and so a replay months later knows
+    # which profile produced these labels. write_missing, because it is a fact about how the
+    # session started rather than something that changed.
+    try:
+        _session_meta_write_missing(
+            db_path, {"service_phase.profile": _service_phase_profile_name()})
+    except Exception:
+        pass  # provenance must never cost a caption
     try:
         conn = sqlite3.connect(db_path, timeout=5)
         try:
