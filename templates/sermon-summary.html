@@ -48,6 +48,14 @@
       .ss-state.running, .ss-state.pending { color: var(--warning); background: rgba(234,179,8,0.15); }
       .ss-state.error { color: var(--danger); background: rgba(239,68,68,0.15); }
       .ss-summary { color: var(--text-secondary); line-height: 1.7; margin-bottom: 14px; }
+      /* A summary whose sermon has moved under it is still the summary of that preaching —
+         it is stated above the text rather than replacing it, because a boundary nudge does
+         not make the words wrong. */
+      .ss-moved {
+        color: var(--warning); font-size: 0.88em; line-height: 1.5;
+        margin-bottom: 12px; padding: 8px 10px; border-radius: var(--radius-sm);
+        background: rgba(234,179,8,0.10); border-left: 3px solid var(--warning);
+      }
       /* Permanent, so the row does not reflow when the state changes — the wording is the
          only thing that moves. Deliberately not called .ss-state: that is the per-card
          status pill, and reusing the name stripped its padding and uppercase. */
@@ -222,6 +230,56 @@
     return Math.max(1, Math.round(((entry.end_ms || 0) - (entry.start_ms || 0)) / 60000));
   }
 
+  function clockOf(ms) {
+    if (!ms) return '';
+    const d = new Date(ms);
+    return String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0');
+  }
+
+  // The card showed a minute count and never the range itself, so an operator could not see
+  // that the sermon's edges had moved — which is the one thing this note is about.
+  function rangeOf(entry) {
+    const from = clockOf(entry.start_ms), to = clockOf(entry.end_ms);
+    return from && to ? from + '–' + to : '';
+  }
+
+  function shift(ms) {
+    const s = Math.round(Math.abs(ms) / 1000);
+    const mins = Math.floor(s / 60), secs = s % 60;
+    const size = mins ? (mins + ' min' + (secs ? ' ' + secs + 's' : '')) : (secs + 's');
+    return (ms < 0 ? 'earlier by ' : 'later by ') + size;
+  }
+
+  // Says what moved, not that something did: the operator's next decision is whether the
+  // change is worth a re-run, and that depends entirely on how much moved.
+  function movedNote(entry) {
+    const c = entry.range_changed;
+    if (!c) return '';
+    // A shift smaller than a minute leaves the clock reading identically, and "10:08 →
+    // 10:08" reads as a bug rather than a 30-second move — which is the commonest size of
+    // move there is, since boundaries land on one-minute bins.
+    const edge = (name, wasMs, nowMs, delta) => {
+      const was = clockOf(wasMs), now = clockOf(nowMs);
+      return was === now
+        ? name + ' moved ' + shift(delta)
+        : name + ' ' + was + ' → ' + now + ' (' + shift(delta) + ')';
+    };
+    const parts = [];
+    if (c.start_delta_ms) {
+      parts.push(edge('start', c.was_start_ms, c.start_ms, c.start_delta_ms));
+    }
+    if (c.end_delta_ms) {
+      parts.push(edge('end', c.was_end_ms, c.end_ms, c.end_delta_ms));
+    }
+    if (c.was_label && c.label && c.was_label !== c.label) {
+      parts.push('renamed ' + c.was_label + ' → ' + c.label);
+    }
+    if (!parts.length) return '';
+    return '<div class="ss-moved">The sermon has changed since this was written: '
+      + esc(parts.join(', ')) + '. The summary still describes the earlier range — '
+      + 'press Regenerate to rewrite it.</div>';
+  }
+
   // One language per column, each complete and each copyable on its own. A media team
   // publishes one language at a time, so the useful unit is a column rather than the pair —
   // and stacking them made the second read as a footnote to the first rather than the same
@@ -267,13 +325,15 @@
       + '<div class="ss-head">'
       +   '<span class="ss-label">' + esc(entry.label || 'Sermon') + '</span>'
       +   '<span class="ss-state ' + esc(state) + '">' + esc(SS_STATE[state] || state) + '</span>'
-      +   '<span class="ss-meta">' + minutesOf(entry) + ' min'
+      +   '<span class="ss-meta">' + (rangeOf(entry) ? esc(rangeOf(entry)) + ' · ' : '')
+      +     minutesOf(entry) + ' min'
       +     (entry.model ? ' · ' + esc(entry.model) : '')
       +     (entry.generated_at ? ' · ' + esc(entry.generated_at) : '') + '</span>'
       +   '<span style="margin-left: auto; display: inline-flex; gap: 8px;">'
       +     '<button type="button" onclick="regenerate(\'' + esc(entry.fingerprint) + '\')">Regenerate</button>'
       +   '</span>'
       + '</div>'
+      + movedNote(entry)
       + body
       + (entry.transcript
           ? '<details class="ss-transcript"><summary>Transcript ('

@@ -15,6 +15,7 @@ import pytest
 
 from conftest import extract_definitions
 from stt.coercion import coerce_float, coerce_int
+from stt.llm_priority import KIND_CAPTION, PeerActivity
 
 
 class _Request:
@@ -26,9 +27,10 @@ class _Request:
         return self._payload
 
 
-def call_translate(payload, *, remote=None, translated="TRANSLATED"):
+def call_translate(payload, *, remote=None, translated="TRANSLATED", activity=None):
     """Run the route; returns (body, status). Status is 200 when the route omits it."""
     calls = {"translated": 0, "cached": 0}
+    activity = PeerActivity() if activity is None else activity
 
     def _translate_live_text(text, *a, **kw):
         calls["translated"] += 1
@@ -53,6 +55,9 @@ def call_translate(payload, *, remote=None, translated="TRANSLATED"):
             "coerce_float": coerce_float,
             "_paired_client_ok": lambda ip=None: True,
             "_register_translation_client": lambda ip: None,
+            "_peer_activity": activity,
+            "_ACT_CAPTION": KIND_CAPTION,
+            "time": __import__("time"),
             "get_server_text_cache": _Cache,
             "translate_live_text": _translate_live_text,
             "_should_cache_translation": lambda a, b: True,
@@ -62,6 +67,31 @@ def call_translate(payload, *, remote=None, translated="TRANSLATED"):
     result = ns["translate_remote"]()
     body, status = result if isinstance(result, tuple) else (result, 200)
     return body, status, calls
+
+
+class TestCaptionActivityIsRecorded:
+    """The route is where the machine holding the model learns captions are in flight.
+
+    Nothing else on this machine knows: it is not transcribing, so its own translation
+    loop never runs and never reports a backlog. Without this record the sermon summariser
+    reads the machine as idle and takes the generation lock out from under a live service.
+    """
+
+    def test_a_translated_caption_is_recorded(self):
+        activity = PeerActivity()
+        call_translate({"text": "Слово"}, activity=activity)
+        assert activity.last_seen(KIND_CAPTION) > 0
+
+    def test_an_oversized_payload_is_not(self):
+        # It never reaches the model, so it must not hold a summary back either.
+        activity = PeerActivity()
+        call_translate({"text": "я" * 9000}, activity=activity)
+        assert activity.last_seen(KIND_CAPTION) == 0
+
+    def test_an_empty_caption_is_not(self):
+        activity = PeerActivity()
+        call_translate({"text": "   "}, activity=activity)
+        assert activity.last_seen(KIND_CAPTION) == 0
 
 
 class TestLengthCap:

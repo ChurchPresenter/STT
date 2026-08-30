@@ -46,6 +46,7 @@ from stt.sermon_summary import (
     sermon_ranges,
     set_progress,
     snap_chapters,
+    note_range_change,
     supersede,
     transcript_text,
     unfinished,
@@ -618,10 +619,25 @@ class TestUnfinished:
         other = self.stored("done", label="Sermon 2", start_ms=BASE + 60 * MIN)
         assert unfinished([self.block()], [other]) == [self.block()]
 
-    def test_a_row_at_a_different_start_does_not_count(self):
-        # The block moved, so the stored summary describes other material.
-        assert unfinished([self.block()], [self.stored("done", start_ms=BASE + 5 * MIN)]) \
-            == [self.block()]
+    def test_a_moved_boundary_is_still_the_sermon_it_summarised(self):
+        """The re-trigger this rule exists to stop.
+
+        Matching the exact start meant a sermon whose edge had drifted by one bin read as
+        never summarised, so the end-of-session catch-up wrote a second summary of preaching
+        that already had one. One real service ended up holding two, 30 seconds apart.
+        """
+        moved = self.stored("done", start_ms=BASE + 5 * MIN, end_ms=BASE + 30 * MIN)
+        assert unfinished([self.block()], [moved]) == []
+
+    def test_a_renumbered_sermon_is_still_the_same_sermon(self):
+        # A merge renumbers the block, and a merge is exactly when the boundary moves.
+        renamed = self.stored("done", label="Sermon 2", start_ms=BASE, end_ms=BASE + 30 * MIN)
+        assert unfinished([self.block()], [renamed]) == []
+
+    def test_a_summary_of_a_different_stretch_does_not_count(self):
+        # No overlap at all: this is another sermon, and it is still owed.
+        elsewhere = self.stored("done", start_ms=BASE + 60 * MIN, end_ms=BASE + 90 * MIN)
+        assert unfinished([self.block()], [elsewhere]) == [self.block()]
 
     def test_non_sermon_blocks_are_never_owed(self):
         assert unfinished([self.block(label="Songs 1")], []) == []
@@ -1000,6 +1016,7 @@ class TestReadingAnOlderSchema:
         c = self.legacy(tmp_path)
         got = load_summaries(c)[0]
         assert got["progress"] == "" and got["summary_translated"] == ""
+        assert got["range_changed"] is None
         assert got["chapters"] == [{"ts_ms": 100, "title": "Opening", "title_translated": ""}]
         c.close()
 
@@ -1142,3 +1159,84 @@ class TestSourceLanguage:
     ])
     def test_same_language(self, source, target, expected):
         assert same_language(source, target) is expected
+
+
+class TestRangeChangeNote:
+    """Recording that a sermon's range moved under a summary already written for it.
+
+    The alternative — writing a second summary — is what this whole rule replaced, so the
+    note is the only thing the operator gets to see that anything happened.
+    """
+
+    @pytest.fixture()
+    def conn(self, tmp_path):
+        c = sqlite3.connect(tmp_path / "session.db")
+        ensure_tables(c)
+        save_summary(c, fingerprint="fp1", label="Sermon 1", start_ms=BASE,
+                     end_ms=BASE + 30 * MIN, status=STATUS_DONE, transcript="text",
+                     summary="A summary.")
+        yield c
+        c.close()
+
+    def test_a_fresh_summary_carries_no_note(self, conn):
+        assert load_summary(conn, "fp1")["range_changed"] is None
+
+    def test_the_note_round_trips(self, conn):
+        assert note_range_change(conn, "fp1", {"start_delta_ms": -30_000}) == 1
+        assert load_summary(conn, "fp1")["range_changed"] == {"start_delta_ms": -30_000}
+
+    def test_it_leaves_the_summary_itself_alone(self, conn):
+        note_range_change(conn, "fp1", {"start_delta_ms": -30_000})
+        got = load_summary(conn, "fp1")
+        assert got["summary"] == "A summary." and got["status"] == STATUS_DONE
+        assert got["start_ms"] == BASE and got["label"] == "Sermon 1"
+
+    def test_it_can_be_cleared(self, conn):
+        note_range_change(conn, "fp1", {"start_delta_ms": -30_000})
+        note_range_change(conn, "fp1", None)
+        assert load_summary(conn, "fp1")["range_changed"] is None
+
+    def test_an_unknown_fingerprint_writes_nothing(self, conn):
+        # Never an upsert: a note must not conjure a row with placeholder ranges.
+        assert note_range_change(conn, "nope", {"start_delta_ms": 1}) == 0
+        assert len(load_summaries(conn)) == 1
+
+    def test_unreadable_json_reads_as_no_note(self, conn):
+        conn.execute("UPDATE sermon_summaries SET range_changed = 'not json'")
+        conn.commit()
+        assert load_summary(conn, "fp1")["range_changed"] is None
+
+
+class TestSupersedeAcrossARenumber:
+    """A merge moves the boundary and renumbers the block in the same breath.
+
+    Matching the whole label meant the superseded summary survived under its old number,
+    which is the two-disagreeing-summaries case supersede exists to prevent.
+    """
+
+    @pytest.fixture()
+    def conn(self, tmp_path):
+        c = sqlite3.connect(tmp_path / "session.db")
+        ensure_tables(c)
+        yield c
+        c.close()
+
+    def store(self, conn, fp, label, start_ms, end_ms):
+        save_summary(conn, fingerprint=fp, label=label, start_ms=start_ms, end_ms=end_ms,
+                     status=STATUS_DONE, transcript="t", summary="s")
+
+    def test_a_renumbered_overlapping_summary_is_superseded(self, conn):
+        self.store(conn, "old", "Sermon 1", BASE, BASE + 30 * MIN)
+        self.store(conn, "new", "Sermon 2", BASE, BASE + 45 * MIN)
+        assert supersede(conn, label="Sermon 2", start_ms=BASE, end_ms=BASE + 45 * MIN,
+                         keep="new") == 1
+        assert [r["fingerprint"] for r in load_summaries(conn)] == ["new"]
+
+    def test_another_phase_is_still_left_alone(self, conn):
+        # The prefix has to agree: naming an overlapping stretch Communion must not erase
+        # the sermon's summary.
+        self.store(conn, "sermon", "Sermon 1", BASE, BASE + 30 * MIN)
+        self.store(conn, "comm", "Communion 1", BASE, BASE + 30 * MIN)
+        assert supersede(conn, label="Communion 1", start_ms=BASE, end_ms=BASE + 30 * MIN,
+                         keep="comm") == 0
+        assert len(load_summaries(conn)) == 2

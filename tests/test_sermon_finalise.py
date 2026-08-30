@@ -14,23 +14,34 @@ import time
 import pytest
 
 from conftest import extract_definitions
+from stt.sermon_scheduling import (
+    DEFAULT_PAUSE_CEILING_SECONDS,
+    finalise_expired,
+    pause_fields,
+)
 from stt.sermon_summary import wait_while
 
 
 def make_ns(state=None, cfg=None, sleep=None, clock=None):
     state = {} if state is None else state
-    return extract_definitions(
+    pause_state = {"paused": False}
+    ns = extract_definitions(
         "speech_to_text.py",
         ["sermon_finalising", "_sermon_set_finalising", "_sermon_finalise_deadline",
-         "_sermon_wait_for_finalise"],
+         "_sermon_wait_for_finalise", "_sermon_pause_ceiling", "_sermon_note_pause"],
         extra_globals={
             "time": clock or time,
             "sleep": sleep or (clock.sleep if clock else (lambda s: None)),
             "transcription_state": state,
             "_sermon_summary_config": lambda: cfg or {},
             "_sermon_wait_while": wait_while,
+            "_sermon_finalise_expired": finalise_expired,
+            "_sermon_pause_fields": pause_fields,
+            "_SERMON_PAUSE_CEILING": DEFAULT_PAUSE_CEILING_SECONDS,
+            "_sermon_pause_state": pause_state,
             "coerce_int": __import__("stt.coercion", fromlist=["x"]).coerce_int,
-        }), state
+        })
+    return ns, state
 
 
 class TestDeadline:
@@ -225,3 +236,92 @@ class TestTheStopWaitsForIt:
         ns["_sermon_set_finalising"](True)
         assert ns["_sermon_wait_for_finalise"]("[DB-CLEANUP]") <= 30
         assert clock.slept, "it did wait; it simply did not wait forever"
+
+
+class TestStandingAsideDoesNotLoseTheSession:
+    """A run that pauses for the *next* service must not have its session delivered.
+
+    Once the summariser stands aside for a new service, a deadline counted in wall clock
+    expires while the run is parked: the flag reads clear, the file mover ships the session
+    and the local copy is deleted, and the run wakes up and writes a summary into a
+    database nobody will ever open. So the deadline counts working time only — bounded, in
+    turn, by a ceiling, because "does not count" must not mean "forever".
+    """
+
+    def _finalising_run(self, cfg=None):
+        clock = FakeTime()
+        ns, state = make_ns(cfg=cfg or {"finalise_max_seconds": 600}, clock=clock)
+        ns["_sermon_set_finalising"](True)
+        return ns, state, clock
+
+    def test_a_run_that_never_pauses_still_expires_on_time(self):
+        ns, _, clock = self._finalising_run()
+        clock.t += 599
+        assert ns["sermon_finalising"]() is True
+        clock.t += 2
+        assert ns["sermon_finalising"]() is False
+
+    def test_time_spent_standing_aside_does_not_expire_the_hold(self):
+        ns, _, clock = self._finalising_run()
+        ns["_sermon_note_pause"](True)
+        clock.t += 5000  # a whole service went by with the run parked
+        assert ns["sermon_finalising"]() is True
+
+    def test_work_resumed_after_a_pause_is_what_counts(self):
+        ns, _, clock = self._finalising_run()
+        ns["_sermon_note_pause"](True)
+        clock.t += 5000
+        ns["_sermon_note_pause"](False)
+        clock.t += 599
+        assert ns["sermon_finalising"]() is True, "only 599s of work has actually happened"
+        clock.t += 2
+        assert ns["sermon_finalising"]() is False
+
+    def test_the_ceiling_ends_an_endless_hold(self):
+        # Services back to back all day: the files matter more than the summary.
+        ns, _, clock = self._finalising_run(
+            cfg={"finalise_max_seconds": 600, "finalise_pause_max_seconds": 3600})
+        ns["_sermon_note_pause"](True)
+        clock.t += 3601
+        assert ns["sermon_finalising"]() is False
+
+    def test_pausing_twice_does_not_restart_the_pause_clock(self):
+        # The worker polls this every few seconds while it is held.
+        ns, state, clock = self._finalising_run()
+        ns["_sermon_note_pause"](True)
+        first = state["finalising_paused_at"]
+        clock.t += 30
+        ns["_sermon_note_pause"](True)
+        assert state["finalising_paused_at"] == first
+
+    def test_resuming_without_a_pause_changes_nothing(self):
+        ns, state, _ = self._finalising_run()
+        ns["_sermon_note_pause"](False)
+        assert state["finalising_paused_total"] == 0.0
+
+    def test_pauses_accumulate_across_several_services(self):
+        ns, state, clock = self._finalising_run()
+        for _ in range(3):
+            ns["_sermon_note_pause"](True)
+            clock.t += 100
+            ns["_sermon_note_pause"](False)
+            clock.t += 10
+        assert state["finalising_paused_total"] == 300.0
+
+    def test_a_new_run_starts_with_a_clean_ledger(self):
+        ns, state, clock = self._finalising_run()
+        ns["_sermon_note_pause"](True)
+        clock.t += 100
+        ns["_sermon_note_pause"](False)
+        ns["_sermon_set_finalising"](False)
+        ns["_sermon_set_finalising"](True)
+        assert state["finalising_paused_total"] == 0.0
+        assert state["finalising_paused_at"] == 0.0
+
+    def test_the_ceiling_is_configurable_and_clamped(self):
+        ns, _ = make_ns(cfg={"finalise_pause_max_seconds": 7200})
+        assert ns["_sermon_pause_ceiling"]() == 7200
+        ns2, _ = make_ns(cfg={"finalise_pause_max_seconds": 5})
+        assert ns2["_sermon_pause_ceiling"]() == 300
+        ns3, _ = make_ns()
+        assert ns3["_sermon_pause_ceiling"]() == int(DEFAULT_PAUSE_CEILING_SECONDS)

@@ -659,6 +659,104 @@ def sermon_ranges(blocks: Sequence[dict], corrections: Sequence[dict] = (), *,
             and int(b.get("minutes") or 0) >= int(min_minutes)]
 
 
+def _overlaps(a_start: int, a_end: int, b_start: int, b_end: int) -> bool:
+    """Whether two ranges share any time at all. Touching end-to-start does not count."""
+    return a_start < b_end and a_end > b_start
+
+
+def covering_summary(stored: Sequence[dict], *, start_ms: int, end_ms: int,
+                     label_prefix: str = SERMON_LABEL_PREFIX) -> Optional[dict]:
+    """The finished summary this range already belongs to, if there is one.
+
+    Overlap is the test, because that is what "the same sermon" means once the edges can
+    move — the same reason :func:`supersede` uses it. What is deliberately *not* part of the
+    test is the ordinal: labels are renumbered in one forward pass on every run, so a merge
+    turns "Sermon 1" into "Sermon 2" while describing the same preaching, and matching the
+    numbered label would call that a different sermon. The prefix still has to agree, so a
+    Communion block that grew over a sermon cannot claim the sermon's summary.
+
+    Only ``done`` counts. A pending, running or failed row has nothing worth preserving, and
+    the end-of-session catch-up exists to finish exactly those.
+    """
+    for row in stored:
+        if row.get("status") != STATUS_DONE:
+            continue
+        if not str(row.get("label") or "").startswith(label_prefix):
+            continue
+        was_start = int(row.get("start_ms") or 0)
+        was_end = int(row.get("end_ms") or 0)
+        if was_end <= was_start:
+            # A row that never recorded where it ended — an interrupted write, or a shape
+            # from before. Its start landing inside the block is the most that can honestly
+            # be asked of it, and it is what the old exact-start rule tested anyway.
+            if int(start_ms) <= was_start < int(end_ms):
+                return dict(row)
+            continue
+        if _overlaps(was_start, was_end, int(start_ms), int(end_ms)):
+            return dict(row)
+    return None
+
+
+def range_change(existing: dict, *, start_ms: int, end_ms: int,
+                 label: str = "") -> Optional[dict]:
+    """What has moved since a summary was written, or None if nothing has.
+
+    The deltas are what the operator is actually asking about — "did the sermon grow, and by
+    how much" — so they are computed once here rather than in the page, where a reader would
+    have to subtract two epoch stamps by eye. A relabel with an unchanged range still counts
+    as a change worth reporting: it is how a merge shows up.
+    """
+    was_start = int(existing.get("start_ms") or 0)
+    was_end = int(existing.get("end_ms") or 0)
+    was_label = str(existing.get("label") or "")
+    moved = was_start != int(start_ms) or was_end != int(end_ms)
+    relabelled = bool(label) and label != was_label
+    if not moved and not relabelled:
+        return None
+    return {
+        "was_start_ms": was_start,
+        "was_end_ms": was_end,
+        "start_ms": int(start_ms),
+        "end_ms": int(end_ms),
+        "start_delta_ms": int(start_ms) - was_start,
+        "end_delta_ms": int(end_ms) - was_end,
+        "was_label": was_label,
+        "label": label or was_label,
+    }
+
+
+ACTION_QUEUE = "queue"
+ACTION_NOTE = "note"
+ACTION_SKIP = "skip"
+
+
+def scan_action(stored: Sequence[dict], *, start_ms: int, end_ms: int, fingerprint: str,
+                manual: bool = False,
+                label_prefix: str = SERMON_LABEL_PREFIX) -> str:
+    """What the scan should do about this block: summarise it, note it, or nothing.
+
+    The rule the operator feels. A sermon is summarised automatically **once**; after that,
+    the detector re-deriving its boundaries or an operator regrouping the blocks changes what
+    the range covers, and the answer to that is to say so, not to write a second summary of
+    the same preaching. One real service produced two full summaries of one sermon over a
+    30-second start shift, and the re-runs — three in ten minutes — were what starved the
+    live captions of the shared model.
+
+    ``manual`` is the operator asking for it, which is always allowed: that is what makes
+    the second summary a decision rather than an accident. It must not be conflated with
+    "skip the settle window", which the end-of-session catch-up also does while remaining
+    an automatic path.
+    """
+    if any(r.get("fingerprint") == fingerprint for r in stored):
+        return ACTION_SKIP  # this exact text is already summarised, running or queued
+    if manual:
+        return ACTION_QUEUE
+    if covering_summary(stored, start_ms=start_ms, end_ms=end_ms,
+                        label_prefix=label_prefix) is not None:
+        return ACTION_NOTE
+    return ACTION_QUEUE
+
+
 def unfinished(blocks: Sequence[dict], stored: Sequence[dict], *,
                min_minutes: int = 8,
                label_prefix: str = SERMON_LABEL_PREFIX) -> List[dict]:
@@ -671,9 +769,12 @@ def unfinished(blocks: Sequence[dict], stored: Sequence[dict], *,
 
     Matched on the block's own range rather than on a fingerprint, because the caller is
     asking "does this sermon have a summary", not "is this specific text summarised".
+
+    Overlap, not an identical start. Matching the exact ``start_ms`` meant a sermon whose
+    boundary had drifted by one bin read as never summarised, and the catch-up wrote a
+    second summary of preaching that already had one — the same fault as the scan's, arriving
+    by another door.
     """
-    done = {(int(r.get("start_ms") or 0), (r.get("label") or ""))
-            for r in stored if r.get("status") == STATUS_DONE}
     out = []
     for block in blocks:
         label = (block.get("label") or "")
@@ -681,7 +782,9 @@ def unfinished(blocks: Sequence[dict], stored: Sequence[dict], *,
             continue
         if int(block.get("minutes") or 0) < int(min_minutes):
             continue
-        if (int(block.get("start_ms") or 0), label) in done:
+        if covering_summary(stored, start_ms=int(block.get("start_ms") or 0),
+                            end_ms=int(block.get("end_ms") or 0),
+                            label_prefix=label_prefix) is not None:
             continue
         out.append(block)
     return out
@@ -724,7 +827,8 @@ _DDL = (
 # existing table, so a session summarised under an earlier build keeps the older shape and
 # the write would fail on the missing column.
 _ADDED_COLUMNS = (("sermon_summaries", "progress", "TEXT"),
-                  ("sermon_summaries", "summary_translated", "TEXT"))
+                  ("sermon_summaries", "summary_translated", "TEXT"),
+                  ("sermon_summaries", "range_changed", "TEXT"))
 
 STATUS_PENDING = "pending"
 STATUS_RUNNING = "running"
@@ -800,6 +904,22 @@ def save_summary(conn: "sqlite3.Connection", *, fingerprint: str, label: str,
     return int(row[0]) if row else 0
 
 
+def _range_changed_dict(raw: Any) -> Optional[dict]:
+    """The stored range-change note as a dict, or None when there is none.
+
+    Stored as JSON in one column rather than as four: it is a note for a reader, written
+    once and never queried on, and a column per field would be four migrations for a
+    payload that only ever moves together.
+    """
+    if not raw:
+        return None
+    try:
+        value = json.loads(str(raw))
+    except (ValueError, TypeError):
+        return None
+    return value if isinstance(value, dict) else None
+
+
 def _to_dict(row: Dict[str, Any]) -> dict:
     """One stored row as the API shape, reading by name with defaults.
 
@@ -832,6 +952,7 @@ def _to_dict(row: Dict[str, Any]) -> dict:
         "generated_at": row.get("generated_at") or "",
         "progress": row.get("progress") or "",
         "summary_translated": row.get("summary_translated") or "",
+        "range_changed": _range_changed_dict(row.get("range_changed")),
     }
 
 
@@ -896,6 +1017,35 @@ def mark_error(conn: "sqlite3.Connection", fingerprint: str, error: str) -> int:
     return int(cur.rowcount or 0)
 
 
+def _label_prefix(label: str) -> str:
+    """A phase label without its ordinal: "Sermon 2" -> "Sermon".
+
+    The trailing number is the detector's, re-derived every run, so it is never part of
+    identity. Anything without one is its own prefix.
+    """
+    return re.sub(r"\s+\d+$", "", str(label or "")).strip() or str(label or "")
+
+
+def note_range_change(conn: "sqlite3.Connection", fingerprint: str,
+                      change: Optional[dict]) -> int:
+    """Record against a finished summary that the sermon's range has moved under it.
+
+    An UPDATE for the same reason :func:`mark_error` is one: the caller knows a fingerprint
+    and a note, and writing a row from those defaults would replace a real sermon's label and
+    range with placeholders. Passing ``None`` clears the note, which is what a regeneration
+    does once the summary matches its range again.
+    """
+    payload = json.dumps(change, ensure_ascii=False) if change else None
+    try:
+        cur = conn.execute(
+            "UPDATE sermon_summaries SET range_changed = ? WHERE fingerprint = ?",
+            (payload, fingerprint))
+    except sqlite3.Error:
+        return 0  # an older database without the column; the summary itself is unaffected
+    conn.commit()
+    return int(cur.rowcount or 0)
+
+
 def supersede(conn: "sqlite3.Connection", *, label: str, start_ms: int, end_ms: int,
               keep: str) -> int:
     """Drop earlier summaries of the same sermon, keeping fingerprint ``keep``.
@@ -908,12 +1058,19 @@ def supersede(conn: "sqlite3.Connection", *, label: str, start_ms: int, end_ms: 
 
     Same reason a partial summary made on request while the preaching was still going is
     replaced by the complete one when the block closes.
+
+    Matched on the label's *prefix*, not the whole label. Ordinals re-derive on every run, so
+    the merge that moved the boundary is also what turned "Sermon 1" into "Sermon 2"; an
+    equality test let the superseded row survive under its old number, leaving the two
+    disagreeing summaries this exists to prevent. The prefix still has to agree, so naming an
+    adjacent stretch something else cannot erase the summary before it.
     """
+    prefix = _label_prefix(label)
     try:
         cur = conn.execute(
-            "DELETE FROM sermon_summaries WHERE label = ? AND fingerprint != ? "
+            "DELETE FROM sermon_summaries WHERE label LIKE ? AND fingerprint != ? "
             "AND start_ms < ? AND end_ms > ?",
-            (label, keep, int(end_ms), int(start_ms)))
+            (prefix + "%", keep, int(end_ms), int(start_ms)))
     except sqlite3.Error:
         return 0
     conn.commit()

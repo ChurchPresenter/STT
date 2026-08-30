@@ -1049,6 +1049,34 @@ from stt.sermon_summary import (
     chapter_range as _sermon_chapter_range,
     transcript_text as _sermon_transcript_text,
     unfinished as _sermon_unfinished,
+    ACTION_NOTE as _SERMON_ACTION_NOTE,
+    ACTION_SKIP as _SERMON_ACTION_SKIP,
+    covering_summary as _sermon_covering,
+    note_range_change as _sermon_note_range_change,
+    range_change as _sermon_range_change,
+    scan_action as _sermon_scan_action,
+)
+from stt.llm_priority import (
+    KIND_CAPTION as _ACT_CAPTION,
+    KIND_HEARTBEAT as _ACT_HEARTBEAT,
+    PeerActivity as _PeerActivity,
+    hold_poll_seconds as _hold_poll_seconds,
+    quiet_window as _quiet_window,
+    stale_window as _stale_window,
+    summariser_wait_reason as _summariser_wait_reason,
+)
+# Evidence that a paired machine has a service running, kept apart from
+# _translation_clients on purpose: that map is refreshed by pairing traffic and by any
+# route calling _register_translation_client, so a summariser reading it would see its own
+# footprint and never find this machine quiet. Only real caption work and the transcription
+# heartbeat land here — see stt/llm_priority.py.
+_peer_activity = _PeerActivity()
+from stt.sermon_scheduling import (
+    DEFAULT_PAUSE_CEILING_SECONDS as _SERMON_PAUSE_CEILING,
+    defer_scan as _sermon_defer_scan,
+    finalise_expired as _sermon_finalise_expired,
+    hold_reason as _sermon_hold_reason,
+    pause_fields as _sermon_pause_fields,
 )
 from stt.phase_learn import (
     apply_proposals as _phase_learn_apply,
@@ -1292,6 +1320,10 @@ from stt.translation_utils import (
 )
 from stt.tts_queue import SpokenTracker
 from stt.translation_backfill import BackfillAttempts, select_backfill_ids
+from stt.translation_attempts import (
+    LiveTranslationAttempts as _LiveTranslationAttempts,
+    persist_decision as _persist_decision,
+)
 
 
 def _apply_glossary(text, source_lang, target_lang):
@@ -6030,8 +6062,11 @@ def generate_sermon_summary():
     except Exception as e:
         return jsonify({"success": False, "error": f"{type(e).__name__}: {e}"}), 500
 
+    # manual=True: the operator is asking, so a sermon that already has a summary may be
+    # summarised again. This is the only caller that passes it — the end-of-session catch-up
+    # also sets ignore_settle, and it must stay bound by the one-summary rule.
     queued = _sermon_summary_scan(blocks, db_path, ignore_settle=True, is_live=is_live,
-                                  corrections=corrections)
+                                  corrections=corrections, manual=True)
     cfg = _sermon_summary_config()
     return jsonify({
         "success": True, "live": is_live, "queued": queued,
@@ -8671,6 +8706,10 @@ def translate_remote():
         return jsonify({"success": False,
                         "error": f"Text too long: {len(text)} chars exceeds the {_max_chars}-char limit."}), 413
 
+    # Caption work about to happen: the summariser must not take the generation lock now.
+    # Recorded after the rejections above so a malformed payload cannot hold a summary back.
+    _peer_activity.record(client_ip, _ACT_CAPTION, time.time())
+
     source_lang = data.get("source_lang", cfg.get("source_language", "auto"))
     target_lang = data.get("target_lang", cfg.get("target_language", "en"))
     return_extras = bool(data.get("return_extras", False))
@@ -8765,11 +8804,15 @@ def summarize_remote():
         return jsonify({"success": False,
                         "error": detail if kind is None else "no model on this machine"}), 503
 
-    if _sermon_captions_waiting():
+    _defer = _summarise_defer_reason()
+    if _defer:
         return jsonify({"success": False, "busy": True,
-                        "error": "Translating captions; try again shortly."}), 503
+                        "error": f"{_defer}; try again shortly."}), 503
 
-    _register_translation_client(request.remote_addr)
+    # Deliberately NOT _register_translation_client here. A summarise request is not
+    # caption work, and recording it kept the caller "active" for the 60s window
+    # /api/translate/unload scans — so this machine refused to release its model because
+    # of the summariser that had just asked for it.
     max_tokens = coerce_int(data.get("max_tokens"), 220, lo=16, hi=4096)
     try:
         text = _sermon_llm_generate(system_prompt, user_text, max_tokens, llm_cfg)
@@ -9225,6 +9268,10 @@ def translate_remote_heartbeat():
     _hb_port = coerce_int((request.get_json(silent=True) or {}).get("port"), 0,
                           lo=0, hi=65535)
     _register_translation_client(client_ip, _hb_port or None)
+    # The load-bearing signal for summary deferral: this arrives every ~20s for exactly as
+    # long as that machine's transcription runs, including the silent stretches during
+    # music and prayer where no caption is offloaded at all.
+    _peer_activity.record(client_ip, _ACT_HEARTBEAT, time.time())
     if _hb_port:
         # A moved to a different port, or we learned it for the first time.
         _remember_client_port(client_ip, _hb_port)
@@ -17009,19 +17056,49 @@ _sermon_busy = threading.Event()
 # more polite than it needed to be, which is the safe direction to be wrong in.
 _translation_pending = {"count": 0, "at": 0.0}
 
+# Longest one stand-aside between chunks may last before the caller re-decides. It is a
+# poll bound, not a give-up: a service can run for an hour and the sermon simply waits.
+_SERMON_YIELD_MAX_SECONDS = 3600.0
+
 
 def _sermon_summary_config():
     return config.get("sermon_summary", {}) or {}
 
 
-def _sermon_captions_waiting():
-    """Whether live translation currently has captions queued."""
-    if not _sermon_summary_config().get("pause_on_backlog", True):
-        return False
+def _summarise_defer_reason():
+    """Why the summariser must not generate right now, or None — see stt/llm_priority.py.
+
+    Asked on whichever machine is about to run a generation, which is not necessarily the
+    machine that knows: an offload server is not transcribing and its own pump never
+    publishes, so its evidence is what the paired machine has sent it. All four inputs are
+    gathered here and the rule itself lives in the module, so the route, the yield and the
+    worker cannot answer this question differently.
+    """
+    cfg = _sermon_summary_config()
     state = _translation_pending
-    if time.time() - float(state.get("at") or 0) > 5.0:
-        return False  # nothing has reported recently; the pump is idle or off
-    return int(state.get("count") or 0) > 0
+    return _summariser_wait_reason(
+        now=time.time(),
+        transcribing=bool(_ts_get("running", False)),
+        last_heartbeat_at=_peer_activity.last_seen(_ACT_HEARTBEAT),
+        last_caption_at=_peer_activity.last_seen(_ACT_CAPTION),
+        local_pending_count=int(state.get("count") or 0),
+        local_pending_at=float(state.get("at") or 0),
+        quiet_seconds=_quiet_window(cfg.get("peer_quiet_seconds")),
+        stale_after=_stale_window(cfg.get("pending_stale_seconds")),
+        defer_while_live=cfg.get("defer_while_live", True),
+        pause_on_backlog=cfg.get("pause_on_backlog", True),
+    )
+
+
+def _sermon_captions_waiting():
+    """Whether live captions need the shared model right now.
+
+    Kept as a name because it reads well at the call sites; what changed is that it is no
+    longer answered from this machine's translation pump alone. On the machine that holds
+    the model that pump is not even running, which is how this check came to always
+    answer "no" while a service's captions were queueing behind a summary chunk.
+    """
+    return _summarise_defer_reason() is not None
 
 
 def _sermon_yield():
@@ -17030,12 +17107,27 @@ def _sermon_yield():
     The summariser holds the generation lock for one chunk at a time; this is the gap in
     between, and it widens while captions are actually queued. Without it a sermon's worth
     of back-to-back chunks would win the lock every time simply by asking first.
+
+    The bound is deliberately long: with deferral on, "wait" can legitimately mean "until
+    this service ends", and the caller re-checks and defers again rather than pushing past
+    it. Nothing is lost by waiting — the sermon stays queued.
     """
     socketio.sleep(0.5)
     waited = 0.0
-    while _sermon_captions_waiting() and waited < 120.0 and not _server_shutting_down.is_set():
-        socketio.sleep(1.0)
-        waited += 1.0
+    while waited < _SERMON_YIELD_MAX_SECONDS and not _server_shutting_down.is_set():
+        reason = _summarise_defer_reason()
+        if not reason:
+            break
+        interval, should_log = _hold_poll_seconds(waited)
+        if should_log:
+            print(f"[SERMON] holding the model: {reason}", flush=True)
+        # Time parked here does not count against the end-of-session deadline either: this
+        # is the same standing aside the worker does, just inside a run rather than before
+        # one, and the session it is holding back is equally not being worked on.
+        _sermon_note_pause(True)
+        socketio.sleep(interval)
+        waited += interval
+    _sermon_note_pause(False)
 
 
 def _sermon_model_label(llm_cfg):
@@ -17263,43 +17355,74 @@ def _sermon_generate_waiting(system_prompt, user_text, max_tokens, llm_cfg,
                              attempts=40, on_wait=None):
     """One call, waiting out a busy peer rather than losing the sermon over it.
 
-    A peer says busy while it has captions queued, which during a service is most of the
+    A peer says busy while a service is live on it, which during that service is all of the
     time and between services is never. Retrying is therefore the whole point: the work is
-    not urgent and the caption backlog it is waiting on is, so a chunk that waits several
-    minutes has cost nothing anyone was watching.
+    not urgent and the captions it is waiting on are, so a chunk that waits out a service
+    has cost nothing anyone was watching.
+
+    The bound is wall clock rather than a count of attempts, and standing aside costs no
+    attempt. A fixed count of retries is a bound on *how busy the peer was*, and under
+    deferral it would expire mid-service and throw away a part of a sermon for the sole
+    reason that the machine was doing exactly what it was told to do.
     """
-    for attempt in range(max(1, attempts)):
-        if _server_shutting_down.is_set():
-            return None
+    wait_seconds = coerce_int(_sermon_summary_config().get("peer_wait_seconds"),
+                              15, lo=2, hi=300)
+    deadline = time.time() + max(_sermon_pause_ceiling(), max(1, attempts) * wait_seconds)
+    announced = False
+    while not _server_shutting_down.is_set() and time.time() < deadline:
+        hold = _summarise_defer_reason()
+        if hold:
+            if not announced:
+                announced = True
+                print(f"[SERMON] waiting to generate: {hold}", flush=True)
+                if on_wait:
+                    on_wait()
+            _sermon_note_pause(True)
+            socketio.sleep(wait_seconds)
+            continue
+        _sermon_note_pause(False)
         try:
             return _sermon_llm_generate(system_prompt, user_text, max_tokens, llm_cfg)
         except _SermonUnavailable:
             raise  # fatal for the whole sermon, not just this part
         except _PeerBusy:
-            if attempt == 0:
-                print("[SERMON] peer is translating captions; waiting", flush=True)
+            if not announced:
+                announced = True
+                print("[SERMON] peer is busy with a service; waiting", flush=True)
                 if on_wait:
                     on_wait()
-            socketio.sleep(coerce_int(_sermon_summary_config().get("peer_wait_seconds"),
-                                      15, lo=2, hi=300))
-    print("[SERMON] peer stayed busy; giving up on this part", flush=True)
+            _sermon_note_pause(True)
+            socketio.sleep(wait_seconds)
+    print("[SERMON] gave up waiting for the model on this part", flush=True)
     return None
 
 
 def _sermon_summary_scan(blocks, db_path, ignore_settle=False, is_live=True,
-                         corrections=()):
+                         corrections=(), manual=False):
     """Queue any sermon that has finished and settled and has no summary yet.
 
     Called from the phase tick, which already holds the freshly derived blocks. Identity is
-    the transcript fingerprint: a block whose boundaries moved is new material and gets a
+    the transcript fingerprint: a block whose text has changed is new material and gets a
     new row, while an unchanged one is never queued twice.
 
     ``ignore_settle`` is the operator pressing the button: they can see the sermon is over,
     so the wait that exists to let a back-dated boundary settle is theirs to skip. It also
     bypasses the enabled flag, because asking for a summary is asking for one.
+
+    ``manual`` is narrower and must not be inferred from it: the end-of-session catch-up
+    also skips the settle window, and it is an automatic path. Only ``manual`` allows a
+    sermon that already has a summary to be summarised again — see sermon_summary.scan_action.
     """
     cfg = _sermon_summary_config()
-    if not cfg.get("enabled", False) and not ignore_settle:
+    if _sermon_defer_scan(enabled=cfg.get("enabled", False), ignore_settle=ignore_settle,
+                          transcription_running=bool(_ts_get("running", False)),
+                          defer_while_live=cfg.get("defer_while_live", True)):
+        # Nothing is queued or even recorded while a service is running. It has to be the
+        # whole scan rather than just the queue put: a stored "pending" row with nothing
+        # queued behind it is indistinguishable from a queued one to the _sermon_load
+        # check below, so the end-of-session catch-up would skip the very sermon it was
+        # called to finish.
+        # Nothing is lost — what a service owes is recomputed from its blocks at the stop.
         return 0
     # A phase the operator marked live is a correction like any other by the time it gets
     # here — the resolution is what turns "the sermon starts now" into the stretch it
@@ -17336,13 +17459,35 @@ def _sermon_summary_scan(blocks, db_path, ignore_settle=False, is_live=True,
             if not rows:
                 continue
             fp = _sermon_fingerprint(rows)
-            if _sermon_load(conn, fp):
+            label = block.get("label") or "Sermon"
+            stored = _sermon_load_all(conn)
+            action = _sermon_scan_action(stored, start_ms=start_ms, end_ms=end_ms,
+                                         fingerprint=fp, manual=manual)
+            if action == _SERMON_ACTION_SKIP:
                 seen[(start_ms, end_ms)] = signature
                 continue  # already summarised, running, or queued
-            _sermon_save(conn, fingerprint=fp, label=block.get("label") or "Sermon",
+            if action == _SERMON_ACTION_NOTE:
+                # This preaching already has a summary and the block has moved under it.
+                # Say so against the summary that exists rather than writing a second one:
+                # a boundary nudge is not new material, and re-running it costs a full pass
+                # over the model that live captions are sharing.
+                covering = _sermon_covering(stored, start_ms=start_ms, end_ms=end_ms)
+                change = _sermon_range_change(covering, start_ms=start_ms, end_ms=end_ms,
+                                              label=label) if covering else None
+                if change and covering.get("range_changed") != change:
+                    _sermon_note_range_change(conn, covering.get("fingerprint") or "", change)
+                    _sermon_emit(_sermon_load(conn, covering.get("fingerprint") or "") or {},
+                                 os.path.basename(db_path))
+                    print(f"[SERMON] {label}: range moved under an existing summary "
+                          f"(start {change['start_delta_ms'] / 1000:+.0f}s, "
+                          f"end {change['end_delta_ms'] / 1000:+.0f}s); "
+                          f"not re-summarising — use Regenerate", flush=True)
+                seen[(start_ms, end_ms)] = signature
+                continue
+            _sermon_save(conn, fingerprint=fp, label=label,
                          start_ms=start_ms, end_ms=end_ms, status=_SERMON_PENDING,
                          transcript=_sermon_transcript_text(rows))
-            _sermon_supersede(conn, label=block.get("label") or "Sermon",
+            _sermon_supersede(conn, label=label,
                               start_ms=start_ms, end_ms=end_ms, keep=fp)
             _sermon_queue.put((db_path, fp, is_live))
             seen[(start_ms, end_ms)] = signature
@@ -17414,6 +17559,15 @@ def _sermon_summarize_one(db_path, fingerprint_value, is_live=True):
                 pass
 
         def store(status, **kw):
+            # save_summary is an upsert, so a run whose row was superseded while it was
+            # queued would re-insert it on completion — which is how one real service ended
+            # up holding two finished summaries of one sermon after supersede had deleted
+            # one of them. If the row is gone, the decision to drop it has already been
+            # taken; finishing the work does not reopen it.
+            if not _sermon_load(conn, fingerprint_value):
+                print(f"[SERMON] {entry['label']}: superseded while it ran; "
+                      f"discarding the result", flush=True)
+                return {}
             _sermon_save(conn, fingerprint=fingerprint_value, label=entry["label"],
                          start_ms=start_ms, end_ms=end_ms, status=status,
                          transcript=entry.get("transcript") or _sermon_transcript_text(rows),
@@ -17576,6 +17730,40 @@ def _sermon_finalise_deadline():
     return coerce_int(_sermon_summary_config().get("finalise_max_seconds"), 1800, lo=30, hi=14400)
 
 
+def _sermon_pause_ceiling():
+    """Longest a finished session may be held in total, standing aside included."""
+    return coerce_int(_sermon_summary_config().get("finalise_pause_max_seconds"),
+                      int(_SERMON_PAUSE_CEILING), lo=300, hi=172800)
+
+
+# Whether the summariser is currently standing aside, mirrored locally so the poll loops
+# that call _sermon_note_pause every second do not write to the shared state — which is a
+# manager dict, and every write to it is an IPC round trip.
+_sermon_pause_state = {"paused": False}
+
+
+def _sermon_note_pause(pausing):
+    """Start or stop the clock on time the summariser spends standing aside.
+
+    Only time that is actually delaying a finished session counts. Safe to call from a poll
+    loop: it writes only on a change of state.
+    """
+    pausing = bool(pausing)
+    if _sermon_pause_state["paused"] == pausing:
+        return
+    _sermon_pause_state["paused"] = pausing
+    try:
+        paused_at, paused_total = _sermon_pause_fields(
+            now=time.time(),
+            paused_at=float(transcription_state.get("finalising_paused_at") or 0),
+            paused_total=float(transcription_state.get("finalising_paused_total") or 0),
+            pausing=pausing)
+        transcription_state["finalising_paused_at"] = paused_at
+        transcription_state["finalising_paused_total"] = paused_total
+    except Exception:
+        pass  # a shared-state write must never break the summary path
+
+
 def sermon_finalising():
     """Whether an end-of-session summary run is still owed, honouring its deadline.
 
@@ -17586,14 +17774,25 @@ def sermon_finalising():
     A timestamp goes with it because a flag is a promise that something will clear it, and a
     crashed summariser makes a liar of it. Past the deadline the flag reads as clear, so the
     worst case is a late delivery rather than a machine that will not start again.
+
+    The deadline measures *working* time, not wall clock. A run that stood aside for the
+    next service has not been running for an hour, and counting that hour would expire the
+    flag while the run was still parked — the session would be delivered and its local copy
+    deleted, and the run would wake up and write a summary into a database nobody will ever
+    open. A separate ceiling bounds the total hold, so "does not count" cannot mean
+    "forever": past it the session ships without its summary, which is the safe direction.
     """
     try:
         if not transcription_state.get("finalising"):
             return False
         since = float(transcription_state.get("finalising_since") or 0)
+        paused_at = float(transcription_state.get("finalising_paused_at") or 0)
+        paused_total = float(transcription_state.get("finalising_paused_total") or 0)
     except Exception:
         return False
-    if since and time.time() - since > _sermon_finalise_deadline():
+    if since and _sermon_finalise_expired(
+            now=time.time(), since=since, paused_at=paused_at, paused_total=paused_total,
+            deadline=_sermon_finalise_deadline(), max_total=_sermon_pause_ceiling()):
         return False
     return True
 
@@ -17625,6 +17824,10 @@ def _sermon_set_finalising(active):
     try:
         transcription_state["finalising"] = bool(active)
         transcription_state["finalising_since"] = time.time() if active else 0
+        # A new run starts with a clean pause ledger; a finished one leaves none behind.
+        transcription_state["finalising_paused_at"] = 0.0
+        transcription_state["finalising_paused_total"] = 0.0
+        _sermon_pause_state["paused"] = False
     except Exception:
         pass  # a shared-state write must never break the stop path
 
@@ -17695,7 +17898,33 @@ def _sermon_summary_worker():
     Single-threaded on purpose: two sermons summarising at once would double the contention
     for the shared model with nothing waiting on either of them.
     """
+    waited = 0.0
     while not _server_shutting_down.is_set():
+        # Checked before the get, not after: taking an item and then sitting on it would
+        # hide the work from _sermon_finalise_session, which watches the queue and the busy
+        # flag to know whether anything is still owed.
+        hold = _sermon_hold_reason(
+            transcription_running=bool(_ts_get("running", False)),
+            transcription_starting=_ts_get("status") == "starting",
+            defer_while_live=_sermon_summary_config().get("defer_while_live", True))
+        if hold:
+            if not _sermon_queue.empty():
+                # Only account for a pause that is actually delaying something: an idle
+                # worker during a service is not holding a session back.
+                interval, should_log = _hold_poll_seconds(waited)
+                if should_log:
+                    print(f"[SERMON] {_sermon_queue.qsize()} sermon(s) waiting: {hold}",
+                          flush=True)
+                _sermon_note_pause(True)
+                waited += interval
+                socketio.sleep(interval)
+                continue
+            socketio.sleep(1.0)
+            continue
+        if waited:
+            print("[SERMON] resuming; the machine is free", flush=True)
+        _sermon_note_pause(False)
+        waited = 0.0
         try:
             db_path, fp, is_live = _sermon_queue.get(timeout=1.0)
         except Empty:
@@ -17731,6 +17960,9 @@ def _reset_caches_on_session_change():
         print(f"[SESSION] Could not clear translation cache: {e}", flush=True)
     _invalidate_entries_cache()
     _set_mt_baseline_label("")
+    # Ids restart low in a new session database, so a carried-over retry count would be
+    # spent on an unrelated caption.
+    _live_translate_attempts.reset()
 
 
 def emit_new_entries():
@@ -17897,10 +18129,26 @@ def _translation_debug_enabled():
     return os.environ.get("STT_TRANSLATION_DEBUG", "").strip().lower() in ("1", "true", "yes")
 
 
+def _remote_translate_timeout():
+    """(connect, read) seconds for one offloaded caption, from live_translation.remote."""
+    _cfg = (config.get("live_translation", {}) or {}).get("remote", {}) or {}
+    return (coerce_int(_cfg.get("connect_timeout_seconds"), 5, lo=1, hi=60),
+            coerce_int(_cfg.get("timeout_seconds"), 15, lo=2, hi=120))
+
+
 def _translate_via_remote(text, source_lang, target_lang, endpoint,
                           return_extras=False, num_alternatives=0, generation_params=None,
                           raise_on_error=False):
-    """Send text to a remote machine's /api/translate endpoint."""
+    """Send text to a remote machine's /api/translate endpoint.
+
+    The timeouts are configurable but the read default stays at 15s deliberately. It is not
+    a latency budget for the peer's model — a healthy pair answers in about 1.5s — it is
+    how long a caption may hold up the pump, which translates up to three captions serially
+    per cycle. Raising it turns one slow peer into a multi-minute stall of every caption
+    including the cached ones; the answer to a peer that cannot keep up is to find out why,
+    not to wait longer. Connect is split out so an unplugged peer fails in seconds rather
+    than burning the whole read budget per caption.
+    """
     try:
         payload = {
             "text": text,
@@ -17912,7 +18160,8 @@ def _translate_via_remote(text, source_lang, target_lang, endpoint,
         if generation_params:
             payload["generation_params"] = generation_params
         _rt_t0 = time.perf_counter()
-        resp = _peer_request("POST", endpoint, "/api/translate", json=payload, timeout=15)
+        resp = _peer_request("POST", endpoint, "/api/translate", json=payload,
+                             timeout=_remote_translate_timeout())
         resp.raise_for_status()
         data = resp.json()
         # Round-trip latency Machine A experiences for this offloaded translation
@@ -18758,6 +19007,7 @@ def emit_translated_entries():
             # never produces new ones: it has no model, and the alternatives are an
             # LLM endpoint or a paired machine. Left to the loop below, an operator's
             # drop-in session with any untranslated row would try all three.
+            _now_cycle = time.time()
             if not _whisper_translation_active and not DEMO:
                 for _e in entries:
                     if _e[10]:
@@ -18766,6 +19016,13 @@ def emit_translated_entries():
                         continue  # translation already stored in DB
                     if cache.get(_e[0], _e[2], target_lang) or cache.get(_e[0], _e[2], target_lang, accept_stale_lang=True):
                         continue
+                    if not _live_translate_attempts.should_attempt(_e[0], _now_cycle):
+                        # Tried recently and nothing translated it. Retrying every 0.5s
+                        # cycle would spend a 15s timeout per cycle per caption on a slow
+                        # peer, which would stall the pump far worse than the fallback it
+                        # is repairing. It stays out of the backlog count for the same
+                        # reason: it is not waiting on the model, it is waiting on a clock.
+                        continue
                     _pending_fresh.append(_e[0])
                 if len(_pending_fresh) > max_translations_per_cycle:
                     _backlogged = True
@@ -18773,7 +19030,10 @@ def emit_translated_entries():
                 else:
                     _allowed_fresh = set(_pending_fresh)
                 # Published for the sermon summariser, which shares the local model and
-                # steps aside while captions are queued.
+                # steps aside while captions are queued. Republished inside the loop below
+                # as well: one publish per cycle goes stale during the very cycle it
+                # matters, because a backlogged cycle spends 15s per caption in the remote
+                # call and the summariser reads the age of this timestamp, not its count.
                 _translation_pending["count"] = len(_pending_fresh)
                 _translation_pending["at"] = time.time()
                 if _backlogged != _translation_backlog_state["active"]:
@@ -18811,6 +19071,12 @@ def emit_translated_entries():
             for idx, entry in enumerate(e for e in entries if not e[10]):
                 seg_id = entry[0]
                 original_text = entry[2]
+                # Re-stamp the backlog hint as the cycle goes. Published once at the top of
+                # the cycle it is already a minute old by the end of a backlogged one, and
+                # the summariser reads a stale hint as "the pump is idle" — which is how a
+                # sermon chunk came to take the model in the middle of a service.
+                if _translation_pending["count"]:
+                    _translation_pending["at"] = time.time()
 
                 # Whisper-based translation: translations saved to DB by subprocess
                 # (subprocess cache is in separate memory, so read from DB instead)
@@ -18956,56 +19222,74 @@ def emit_translated_entries():
                             translated_text = extracted if extracted else translate_live_text(original_text, source_lang, target_lang)
                         extras = None
 
-                    # Warmup guard: while the local model is still loading, translate_live_text
-                    # returns the source unchanged. Don't cache/persist that echo — leave the row
-                    # NULL so it retries next cycle and translates correctly once the model is up.
-                    if not is_live_translation_ready():
-                        if dbg:
-                            _dbg_branches.append((seg_id, "warmup_skip"))
-                        continue
                     # Read before anything else translates on this thread: the record
                     # is the last call's, and the in-progress line below makes one.
                     _mt_engine, _mt_model = last_mt_provenance()
-
-                    if extras is not None:
+                    # Two ways translate_live_text hands back the source text rather than a
+                    # translation, and they need different answers:
+                    #
+                    #   the model is still loading — an echo, not an attempt. Show nothing,
+                    #   store nothing; the row stays NULL and is picked up once it is up.
+                    #
+                    #   nothing translated it (remote timed out with fallback "skip", or the
+                    #   LLM declined) — show the source, because the operator needs to see
+                    #   the caption, but never store it. Storing it is what made 30 of 448
+                    #   captions in one service permanently Russian in an English SRT: the
+                    #   row stops matching translated_text IS NULL, so neither this loop nor
+                    #   the backfill nor the replay can ever reach it again.
+                    _show_it, _persist_it = _persist_decision(
+                        _mt_engine, MT_ENGINE_NONE, is_live_translation_ready())
+                    if not _show_it:
+                        if dbg:
+                            _dbg_branches.append((seg_id, "warmup_skip"))
+                        continue
+                    if not _persist_it:
+                        _live_translate_attempts.record_failure(seg_id, translated_text,
+                                                                time.time())
+                        if dbg:
+                            _dbg_branches.append((seg_id, "mt_none(display-only)"))
+                    elif extras is not None:
                         cache.set_with_extras(seg_id, original_text, translated_text, target_lang,
                                               confidence=extras.get("confidence"), alternatives=extras.get("alternatives", []))
                     else:
                         cache.set(seg_id, original_text, translated_text, target_lang)
 
-                    # Save translation to database
-                    try:
-                        current_db = _ts_get("db_name")
-                        if current_db and os.path.exists(current_db):
-                            # timeout/busy_timeout match every other short-lived writer here
-                            # (e.g. /api/transcription/correct). The transcription worker holds
-                            # the session's long-lived connection, so a partial snapshot or a
-                            # finalize batch can be mid-write when this lands; on the default
-                            # 5s this raised "database is locked" instead of waiting, and a lost
-                            # write leaves the row NULL to be retried every cycle thereafter.
-                            with sqlite3.connect(current_db, timeout=30.0) as _tconn:
-                                _tconn.execute("PRAGMA busy_timeout=30000")
-                                _tconn.execute(
-                                    "UPDATE transcriptions SET translated_text = ?, translation_language = ?,"
-                                    " translation_ts_ms = ?, mt_engine = ?, mt_model = ? WHERE id = ?",
-                                    (translated_text, target_lang, int(time.time() * 1000),
-                                     _mt_engine, _mt_model, seg_id),
-                                )
-                                _tconn.commit()
-                                if dbg:
-                                    _row = _tconn.execute("SELECT translated_text FROM transcriptions WHERE id = ?", (seg_id,)).fetchone()
-                                    _reread = _row[0] if _row else "<no row>"
-                                    _dbg_branches.append((seg_id, "fresh(persist=ok)"))
-                                    if not _reread:
-                                        print(f"[TRANS-DBG] seg {seg_id} committed but re-read translated_text={_reread!r} (persist not sticking)", flush=True)
-                        elif dbg:
-                            _dbg_branches.append((seg_id, "fresh(persist=no-db)"))
-                    except Exception as e:
-                        # Translation still shows from cache, but won't survive a
-                        # page reload — surface the reason instead of hiding it
-                        print(f"[TRANSLATION] DB save failed for segment {seg_id}: {e}", flush=True)
-                        if dbg:
-                            _dbg_branches.append((seg_id, f"fresh(persist=FAIL:{e})"))
+                    # Save translation to database — only for a caption something actually
+                    # translated; see the decision above.
+                    if _persist_it:
+                        _live_translate_attempts.record_success(seg_id)
+                        try:
+                            current_db = _ts_get("db_name")
+                            if current_db and os.path.exists(current_db):
+                                # timeout/busy_timeout match every other short-lived writer here
+                                # (e.g. /api/transcription/correct). The transcription worker holds
+                                # the session's long-lived connection, so a partial snapshot or a
+                                # finalize batch can be mid-write when this lands; on the default
+                                # 5s this raised "database is locked" instead of waiting, and a lost
+                                # write leaves the row NULL to be retried every cycle thereafter.
+                                with sqlite3.connect(current_db, timeout=30.0) as _tconn:
+                                    _tconn.execute("PRAGMA busy_timeout=30000")
+                                    _tconn.execute(
+                                        "UPDATE transcriptions SET translated_text = ?, translation_language = ?,"
+                                        " translation_ts_ms = ?, mt_engine = ?, mt_model = ? WHERE id = ?",
+                                        (translated_text, target_lang, int(time.time() * 1000),
+                                         _mt_engine, _mt_model, seg_id),
+                                    )
+                                    _tconn.commit()
+                                    if dbg:
+                                        _row = _tconn.execute("SELECT translated_text FROM transcriptions WHERE id = ?", (seg_id,)).fetchone()
+                                        _reread = _row[0] if _row else "<no row>"
+                                        _dbg_branches.append((seg_id, "fresh(persist=ok)"))
+                                        if not _reread:
+                                            print(f"[TRANS-DBG] seg {seg_id} committed but re-read translated_text={_reread!r} (persist not sticking)", flush=True)
+                            elif dbg:
+                                _dbg_branches.append((seg_id, "fresh(persist=no-db)"))
+                        except Exception as e:
+                            # Translation still shows from cache, but won't survive a
+                            # page reload — surface the reason instead of hiding it
+                            print(f"[TRANSLATION] DB save failed for segment {seg_id}: {e}", flush=True)
+                            if dbg:
+                                _dbg_branches.append((seg_id, f"fresh(persist=FAIL:{e})"))
 
                 # Skip known Whisper hallucinations in translated text
                 if is_whisper_hallucination(translated_text):
@@ -19105,6 +19389,9 @@ def emit_translated_entries():
 
 
 _translation_backfill = BackfillAttempts()
+# Captions the live loop could not translate: retried on a cooldown, given up on after
+# a few tries, and never written into the database as their own translation.
+_live_translate_attempts = _LiveTranslationAttempts()
 _translation_backfill_session = {"id": None}
 
 
