@@ -5001,7 +5001,7 @@ socket_io_logger = logging.getLogger("socketio")
 # Polled endpoints that log an unchanging value would otherwise ship the same
 # record every minute forever (Sentry Logs are unsampled). Gate them on the
 # value actually changing.
-from stt.log_gate import ChangeGate  # noqa: E402
+from stt.log_gate import ChangeGate, is_benign_wsgi_message  # noqa: E402
 
 _poll_log_gate = ChangeGate()
 
@@ -5015,19 +5015,19 @@ log.setLevel(logging.ERROR)
 
 
 class _SuppressBenignWSGINoise(logging.Filter):
-    """Drop the harmless 'write() before start_response' AssertionError that the
-    werkzeug dev server logs for Socket.IO polling/transport requests under
-    async_mode='threading' (the request finishes without the normal WSGI
-    response path). The connection still works; this is cosmetic noise. All
-    other werkzeug errors pass through unchanged."""
+    """Drop werkzeug records that report no fault of ours.
+
+    Which messages, and why a logger filter is the right place, are documented
+    in stt/log_gate.py — the short version is that this runs before the hook
+    sentry-sdk uses to turn ERROR records into issues, so it stops the crash
+    report too. All other werkzeug errors pass through unchanged."""
 
     def filter(self, record):
         try:
-            if "write() before start_response" in record.getMessage():
-                return False
+            message = record.getMessage()
         except Exception:
-            pass
-        return True
+            return True
+        return not is_benign_wsgi_message(message)
 
 
 log.addFilter(_SuppressBenignWSGINoise())
