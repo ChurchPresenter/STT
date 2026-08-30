@@ -1092,7 +1092,9 @@ from stt.sermon_scheduling import (
 from stt.phase_learn import (
     apply_proposals as _phase_learn_apply,
     collect as _phase_learn_collect,
+    group_by_service as _phase_learn_shapes,
     propose_all as _phase_learn_propose,
+    read_marked_phases as _phase_learn_marks,
 )
 from stt.db_maintenance import (
     checkpoint_and_release as _db_checkpoint_and_release,
@@ -6297,6 +6299,7 @@ def _service_phase_learn_scan(limit=200):
     """
     paths = sorted(_db_iter_databases(_sidecar_sweep_dirs()), reverse=True)[:limit]
     phases = []
+    profiles = {}
     for path in paths:
         try:
             # Same recovery as the review pages: a session the process died during is
@@ -6307,7 +6310,20 @@ def _service_phase_learn_scan(limit=200):
             _archive_unreadable(path, e, "open")
             continue
         try:
-            phases.extend(_phase_learn_collect([(os.path.basename(path), conn)], with_text=True))
+            name = os.path.basename(path)
+            found = _phase_learn_collect([(name, conn)], with_text=True)
+            # A live mark is the strongest boundary evidence there is, and it was being
+            # discarded: it carries no end and no block index, so the corrections reader
+            # rejects it. Only stretches nothing else already names are taken, so a mark the
+            # operator later corrected does not count twice.
+            claimed = [(p.start_ms, p.end_ms) for p in found]
+            for marked in _phase_learn_marks(conn, name, resolve=_phase_marks_resolve):
+                if any(marked.start_ms < e and s_ < marked.end_ms for s_, e in claimed):
+                    continue
+                found.append(marked)
+            phases.extend(found)
+            if found:
+                profiles[name] = _session_profile_name(conn)
         except Exception as e:
             # One unreadable session must not stop the sweep — but a learner that read
             # nothing has to say why, or it reports "no corrections" for an archive it
@@ -6316,7 +6332,65 @@ def _service_phase_learn_scan(limit=200):
             continue
         finally:
             conn.close()
-    return phases
+    return phases, profiles
+
+
+def _session_profile_name(conn):
+    """Which profile a recorded session was judged by, if it recorded one."""
+    try:
+        row = conn.execute("SELECT value FROM session_meta WHERE key = ?",
+                           ("service_phase.profile",)).fetchone()
+    except Exception:
+        return None
+    return str(row[0]) if row and row[0] else None
+
+
+def _phase_learn_for_profile(baseline):
+    """Proposals from the services of this kind, not from every service ever recorded.
+
+    A Sunday morning prior learned from Wednesday evenings is worse than no prior: the two
+    have different lengths and different shapes, which is the whole reason profiles exist.
+    Sessions recorded before profiles existed carry no profile and count towards the default
+    only; the reply says how many were set aside so an operator can see why the evidence is
+    thinner than the archive.
+    """
+    phases, profiles = _service_phase_learn_scan()
+    active = _service_phase_profile_name()
+    mine = [p for p in phases if (profiles.get(p.session) or _phase_default_profile) == active]
+    shapes = _phase_learn_shapes(mine, profiles)
+    result = _phase_learn_propose(mine, _service_phase_config(), baseline,
+                                  shapes=shapes, profile_name=active)
+    result["set_aside"] = len({p.session for p in phases}) - len({p.session for p in mine})
+    return result
+
+
+def _phase_write_profile(name, proposals, keys):
+    """Write accepted proposals into this profile's own file, atomically.
+
+    Written through a temporary file and a rename, with the previous version kept beside it:
+    this is the file the detector reads every twenty seconds, and a half-written one during a
+    service would take the rules down with it.
+    """
+    path = _phase_profile_path(CONFIG_DIR, name)
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            raw = json.load(handle)
+    except (OSError, ValueError):
+        with open(PHASE_RULES_TEMPLATE_FILE, "r", encoding="utf-8") as handle:
+            raw = json.load(handle)
+    updated = _phase_apply_to_profile(raw, proposals, keys)
+    os.makedirs(CONFIG_DIR, exist_ok=True)
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as handle:
+        json.dump(updated, handle, ensure_ascii=False, indent=2)
+    if os.path.exists(path):
+        try:
+            shutil.copyfile(path, path + ".backup")
+        except OSError:
+            pass  # a missing backup is not a reason to refuse the change
+    os.replace(tmp, path)
+    _service_phase_profile_state["profile"] = None   # re-read on the next tick
+    return path
 
 
 @app.route("/api/service-phase/profiles")
@@ -6382,8 +6456,7 @@ def learn_service_phase_settings():
         baseline = {}
 
     try:
-        result = _phase_learn_propose(_service_phase_learn_scan(), _service_phase_config(),
-                                      baseline)
+        result = _phase_learn_for_profile(baseline)
     except Exception as e:
         return jsonify({"success": False, "error": f"{type(e).__name__}: {e}"}), 500
 
@@ -6411,15 +6484,29 @@ def apply_service_phase_settings():
     try:
         # Re-derived here rather than taken from the request: a proposal is a claim about
         # the archive, and the archive is what should decide it, not a posted number.
-        fresh = _phase_learn_propose(_service_phase_learn_scan(), _service_phase_config(),
-                                     baseline)
-        updated = _phase_learn_apply(_service_phase_config(), fresh["proposals"], keys)
-        config["service_phase"] = updated
-        save_config(config)
+        fresh = _phase_learn_for_profile(baseline)
+        proposals = {p["key"]: p for p in fresh["proposals"]}
+        # Each number goes where the detector will actually read it. A threshold belongs in
+        # the rule that owns it and a cap in the profile's limits; only the cue phrases are
+        # genuinely config, because the cue compiler is what reads them. Proposing a
+        # threshold into the config block is how sermon_min_minutes came to be applied and
+        # then ignored by everything.
+        to_profile = [k for k in keys if (proposals.get(k) or {}).get("target") != "config"]
+        to_config = [k for k in keys if (proposals.get(k) or {}).get("target") == "config"]
+        written = None
+        if to_profile:
+            written = _phase_write_profile(_service_phase_profile_name(), proposals,
+                                           to_profile)
+        updated = config.get("service_phase", {}) or {}
+        if to_config:
+            updated = _phase_learn_apply(updated, fresh["proposals"], to_config)
+            config["service_phase"] = updated
+            save_config(config)
     except Exception as e:
         return jsonify({"success": False, "error": f"{type(e).__name__}: {e}"}), 500
 
-    return jsonify({"success": True, "applied": keys, "service_phase": updated})
+    return jsonify({"success": True, "applied": keys, "profile_file": written,
+                    "service_phase": updated})
 
 
 @app.route("/corrections")

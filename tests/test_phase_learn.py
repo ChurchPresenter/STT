@@ -10,17 +10,25 @@ import sqlite3
 
 import pytest
 
+from stt.phase_marks import resolve as resolve_marks
 from stt.phase_learn import (
     MIN_SAMPLES,
+    CorrectedPhase,
+    ServiceShape,
     apply_proposals,
     collect,
+    group_by_service,
     propose_all,
+    propose_counts,
     propose_durations,
     propose_fragments,
+    propose_service_length,
     read_corrected_phases,
+    read_marked_phases,
 )
 
 MIN = 60_000
+BASE = 1_700_000_000_000
 BASELINE = {"sermon_min_minutes": 8, "songs_min_minutes": 3,
             "typical_music_max_minutes": 30, "typical_speaking_max_minutes": 60}
 
@@ -287,3 +295,139 @@ class TestAnchoredCorrectionsBeatTheIndex:
         assert len(got) == 1 and got[0].minutes == 11
         assert got[0].kind == "S", "the kind came from the block it named"
 
+
+class TestMarksAreEvidence:
+    """A live mark is the strongest boundary statement anyone makes, and it was discarded.
+
+    A mark carries no end and no block index, so both branches of read_corrected_phases
+    reject it — which meant the operator pressing "the sermon starts now" taught the
+    detector nothing at all.
+    """
+
+    def session(self, tmp_path, marks=(), blocks=(), name="s.db"):
+        path = tmp_path / name
+        conn = sqlite3.connect(path)
+        conn.execute("CREATE TABLE service_phase_corrections (id INTEGER PRIMARY KEY "
+                     "AUTOINCREMENT, block_index INTEGER, start_ms INTEGER, "
+                     "end_ms INTEGER, kind TEXT, label TEXT, note TEXT, corrected_at TEXT)")
+        conn.execute("CREATE TABLE service_phase_blocks (block_index INTEGER PRIMARY KEY, "
+                     "kind TEXT, start_bin INTEGER, end_bin INTEGER, start_ms INTEGER, "
+                     "end_ms INTEGER, minutes INTEGER, label TEXT, confidence REAL, "
+                     "cues_json TEXT, ongoing INTEGER, unusual_json TEXT)")
+        for b in blocks:
+            conn.execute("INSERT INTO service_phase_blocks VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                         (b["index"], b["kind"], 0, 0, b["start_ms"], b["end_ms"],
+                          b["minutes"], b["label"], 0.7, "{}", int(b.get("ongoing", 0)), "[]"))
+        for m in marks:
+            conn.execute("INSERT INTO service_phase_corrections (block_index, start_ms, "
+                         "end_ms, kind, label, note, corrected_at) "
+                         "VALUES (NULL,?,NULL,?,?,'','2026-08-30T12:00:00')",
+                         (m["start_ms"], m.get("kind", "S"), m["label"]))
+        conn.commit()
+        return conn
+
+    def block(self, start, end, label="Sermon 1", ongoing=False):
+        return {"index": 0, "kind": "S", "start_ms": start, "end_ms": end,
+                "minutes": max(1, (end - start) // MIN), "label": label,
+                "ongoing": ongoing}
+
+    def test_a_closed_mark_becomes_a_corrected_phase(self, tmp_path):
+        conn = self.session(tmp_path,
+                            marks=[{"start_ms": BASE + 5 * MIN, "label": "Sermon"}],
+                            blocks=[self.block(BASE, BASE + 40 * MIN)])
+        got = read_marked_phases(conn, "s.db", resolve=resolve_marks)
+        assert [(p.label, p.minutes) for p in got] == [("Sermon", 35)]
+
+    def test_an_open_mark_is_not_evidence(self, tmp_path):
+        # It was still running, so it says nothing about how long that phase was.
+        conn = self.session(tmp_path,
+                            marks=[{"start_ms": BASE + 5 * MIN, "label": "Sermon"}],
+                            blocks=[self.block(BASE, BASE + 40 * MIN, ongoing=True)])
+        assert read_marked_phases(conn, "s.db", resolve=resolve_marks,
+                                  now_ms=BASE + 40 * MIN) == []
+
+    def test_a_session_with_no_tables_yields_nothing(self, tmp_path):
+        conn = sqlite3.connect(tmp_path / "bare.db")
+        assert read_marked_phases(conn, "bare.db", resolve=resolve_marks) == []
+
+
+class TestServiceShape:
+    def phase(self, session, label, minutes, start_minute=0):
+        start = BASE + start_minute * MIN
+        return CorrectedPhase(session, label, "S", start, start + minutes * MIN, minutes)
+
+    def test_it_counts_what_each_service_contained(self):
+        shapes = group_by_service([
+            self.phase("a.db", "Sermon 1", 30, 10),
+            self.phase("a.db", "Sermon 2", 47, 50),
+            self.phase("b.db", "Sermon 1", 39, 9),
+        ])
+        assert [s.counts.get("Sermon") for s in shapes] == [2, 1]
+
+    def test_it_measures_how_long_the_service_ran(self):
+        shapes = group_by_service([self.phase("a.db", "Songs 1", 5, 0),
+                                   self.phase("a.db", "Sermon 1", 30, 100)])
+        assert shapes[0].end_minutes == 130
+
+    def test_the_profile_travels_with_the_service(self):
+        shapes = group_by_service([self.phase("a.db", "Sermon 1", 30)],
+                                  {"a.db": "sunday-morning"})
+        assert shapes[0].profile == "sunday-morning"
+
+
+class TestProposeCounts:
+    def shape(self, session, sermons, minutes=120):
+        return ServiceShape(session, {"Sermon": sermons}, minutes)
+
+    def test_it_proposes_the_usual_number(self):
+        shapes = [self.shape("a", 2), self.shape("b", 2), self.shape("c", 2),
+                  self.shape("d", 2)]
+        got = propose_counts(shapes, {})[0]
+        assert got.suggested == 2 and got.actionable
+
+    def test_one_unusual_service_does_not_raise_the_cap(self):
+        # A Christmas service with three sermons must not describe every other Sunday.
+        shapes = [self.shape("a", 2), self.shape("b", 2), self.shape("c", 3),
+                  self.shape("d", 2)]
+        assert propose_counts(shapes, {})[0].suggested == 2
+
+    def test_too_little_evidence_is_said_rather_than_guessed(self):
+        got = propose_counts([self.shape("a", 2)], {})[0]
+        assert not got.actionable
+        assert "needs 4" in got.evidence
+
+    def test_it_does_not_repropose_what_is_already_set(self):
+        shapes = [self.shape(str(i), 2) for i in range(4)]
+        assert not propose_counts(shapes, {"Sermon": {"max": 2}})[0].actionable
+
+    def test_the_evidence_names_the_counts(self):
+        shapes = [self.shape(str(i), 2) for i in range(4)]
+        assert "2, 2, 2, 2" in propose_counts(shapes, {})[0].evidence
+
+
+class TestProposeServiceLength:
+    def test_it_proposes_a_length_from_the_services(self):
+        shapes = [ServiceShape(str(i), {"Sermon": 2}, 120 + i) for i in range(4)]
+        got = propose_service_length(shapes, {})[0]
+        assert got.actionable and 120 <= got.suggested <= 123
+
+    def test_too_little_evidence_is_said_rather_than_guessed(self):
+        got = propose_service_length([ServiceShape("a", {}, 120)], {})[0]
+        assert not got.actionable
+
+
+class TestProposalsSayWhereTheyLand:
+    """The dead end this closes: a number applied somewhere the detector never reads."""
+
+    def test_a_threshold_is_aimed_at_the_profile(self):
+        phases = [CorrectedPhase("s%d.db" % i, "Sermon 1", "S", BASE,
+                                 BASE + 30 * MIN, 30) for i in range(4)]
+        got = propose_all(phases, {}, {})
+        targets = {p["key"]: p["target"] for p in got["proposals"]}
+        assert targets["sermon_min_minutes"] == "profile"
+
+    def test_cue_phrases_are_aimed_at_the_config(self):
+        # The cue compiler genuinely reads them there.
+        got = propose_all([], {}, {})
+        targets = {p["key"]: p["target"] for p in got["proposals"]}
+        assert targets["cue_fragments.communion_verse"] == "config"

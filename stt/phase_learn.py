@@ -23,7 +23,7 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 # How many corrected examples a knob needs before it is worth proposing anything. Four is
 # not statistics; it is the point at which a number stops being one operator's afternoon.
@@ -37,16 +37,22 @@ _TOKEN = re.compile(r"\w+", re.UNICODE)
 class Proposal:
     """One suggested setting, and everything needed to judge it."""
 
-    __slots__ = ("baseline", "current", "evidence", "key", "samples", "suggested")
+    __slots__ = ("baseline", "current", "evidence", "key", "samples", "suggested",
+                 "target")
 
     def __init__(self, key: str, *, baseline: Any, current: Any, suggested: Any,
-                 samples: int, evidence: str) -> None:
+                 samples: int, evidence: str, target: str = "profile") -> None:
         self.key = key
         self.baseline = baseline
         self.current = current
         self.suggested = suggested
         self.samples = samples
         self.evidence = evidence
+        # Where applying this actually writes. Worth carrying, because the two destinations
+        # are not interchangeable: a threshold belongs in the rule the detector reads, and
+        # writing it to the config block instead is how sermon_min_minutes came to be
+        # proposed, applied, and then ignored by everything.
+        self.target = target
 
     @property
     def actionable(self) -> bool:
@@ -56,7 +62,8 @@ class Proposal:
     def to_dict(self) -> dict:
         return {"key": self.key, "baseline": self.baseline, "current": self.current,
                 "suggested": self.suggested, "samples": self.samples,
-                "evidence": self.evidence, "actionable": self.actionable}
+                "evidence": self.evidence, "actionable": self.actionable,
+                "target": self.target}
 
 
 class CorrectedPhase:
@@ -228,7 +235,7 @@ def propose_fragments(phases: Sequence[CorrectedPhase], group: str, label: str, 
     others = [p for p in phases if _base_name(p.label) != label and p.text]
     if len(wanted) < MIN_SAMPLES:
         return [Proposal("cue_fragments.%s" % group, baseline=None, current=None,
-                         suggested=[], samples=len(wanted),
+                         suggested=[], samples=len(wanted), target="config",
                          evidence="needs %d corrected %s, has %d"
                                   % (MIN_SAMPLES, label, len(wanted)))]
 
@@ -251,7 +258,7 @@ def propose_fragments(phases: Sequence[CorrectedPhase], group: str, label: str, 
     picked = [phrase for phrase, _ in candidates[:max_new]]
     return [Proposal(
         "cue_fragments.%s" % group, baseline=None, current=sorted(have)[:6],
-        suggested=picked, samples=len(wanted),
+        suggested=picked, samples=len(wanted), target="config",
         evidence="phrases in %d of %d corrected %s and in none of the %d other phases"
                  % (need, len(wanted), label, len(others)))]
 
@@ -262,16 +269,145 @@ def _phrases(text: str, n: int = 3) -> List[str]:
     return [" ".join(words[i:i + n]) for i in range(max(0, len(words) - n + 1))]
 
 
+class ServiceShape:
+    """What one corrected service turned out to look like."""
+
+    __slots__ = ("counts", "end_minutes", "profile", "session")
+
+    def __init__(self, session: str, counts: Dict[str, int], end_minutes: int,
+                 profile: Optional[str] = None) -> None:
+        self.session = session
+        self.counts = counts
+        self.end_minutes = end_minutes
+        self.profile = profile
+
+
+def read_marked_phases(conn: "sqlite3.Connection", session: str, *,
+                       resolve: Any, now_ms: int = 0) -> List[CorrectedPhase]:
+    """The phases an operator marked live, as evidence.
+
+    A mark is the strongest statement about a boundary anyone makes — a person in the room
+    saying "the sermon starts now" — and it was being discarded: a mark carries no end and
+    no block index, so both branches of :func:`read_corrected_phases` reject it.
+
+    ``resolve`` is passed in rather than imported so this module keeps its one job and its
+    stdlib-only imports; the caller hands it :func:`stt.phase_marks.resolve`, which is the
+    single implementation of where a marked phase ends. Only closed spans count: an open one
+    was still running, and says nothing about how long that phase was.
+    """
+    try:
+        rows = conn.execute(
+            "SELECT id, block_index, start_ms, end_ms, kind, label, note, corrected_at "
+            "FROM service_phase_corrections ORDER BY id").fetchall()
+        blocks = conn.execute(
+            "SELECT block_index, kind, start_ms, end_ms, minutes, label, ongoing "
+            "FROM service_phase_blocks ORDER BY block_index").fetchall()
+    except sqlite3.Error:
+        return []
+    keys = ("id", "block_index", "start_ms", "end_ms", "kind", "label", "note",
+            "corrected_at")
+    corrections = [dict(zip(keys, r)) for r in rows]
+    block_dicts = [{"block_index": b[0], "kind": b[1], "start_ms": b[2], "end_ms": b[3],
+                    "minutes": b[4], "label": b[5], "ongoing": bool(b[6])} for b in blocks]
+    anchor_ms = now_ms or max((int(b["end_ms"] or 0) for b in block_dicts), default=0)
+    out: List[CorrectedPhase] = []
+    for span in resolve(corrections, block_dicts, now_ms=anchor_ms):
+        if span.get("open"):
+            continue
+        start, end = int(span.get("start_ms") or 0), int(span.get("end_ms") or 0)
+        if end <= start:
+            continue
+        out.append(CorrectedPhase(session, str(span.get("label") or ""),
+                                  str(span.get("kind") or ""), start, end,
+                                  max(1, round((end - start) / 60000.0))))
+    return out
+
+
+def group_by_service(phases: Sequence[CorrectedPhase],
+                     profiles: Optional[Mapping[str, str]] = None) -> List[ServiceShape]:
+    """One entry per corrected service: what it contained and how long it ran."""
+    by_session: Dict[str, List[CorrectedPhase]] = {}
+    for phase in phases:
+        by_session.setdefault(phase.session, []).append(phase)
+    shapes: List[ServiceShape] = []
+    for session, found in sorted(by_session.items()):
+        counts: Dict[str, int] = {}
+        for phase in found:
+            name = _base_name(phase.label)
+            counts[name] = counts.get(name, 0) + 1
+        start = min(p.start_ms for p in found)
+        end = max(p.end_ms for p in found)
+        shapes.append(ServiceShape(session, counts,
+                                   max(1, round((end - start) / 60000.0)),
+                                   (profiles or {}).get(session)))
+    return shapes
+
+
+def _mode(values: Sequence[int]) -> Optional[int]:
+    """The commonest value, ties going to the smaller.
+
+    A mode rather than a maximum, deliberately. One Christmas service with three sermons
+    must not raise a church's cap for every ordinary Sunday afterwards; the usual shape is
+    what a limit should describe.
+    """
+    if not values:
+        return None
+    counts: Dict[int, int] = {}
+    for value in values:
+        counts[value] = counts.get(value, 0) + 1
+    return sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))[0][0]
+
+
+def propose_counts(shapes: Sequence[ServiceShape], limits: Mapping[str, Any], *,
+                   label: str = "Sermon") -> List[Proposal]:
+    """How many of a phase this installation's services usually contain."""
+    seen = [s.counts.get(label, 0) for s in shapes if s.counts.get(label)]
+    key = "max_%ss" % label.lower()
+    current = ((limits or {}).get(label) or {}).get("max")
+    if len(seen) < MIN_SAMPLES:
+        return [Proposal(key, baseline=None, current=current, suggested=current,
+                         samples=len(seen),
+                         evidence="needs %d corrected services, has %d"
+                                  % (MIN_SAMPLES, len(seen)))]
+    return [Proposal(key, baseline=None, current=current, suggested=_mode(seen),
+                     samples=len(seen),
+                     evidence="%d corrected services: %s"
+                              % (len(seen), ", ".join(str(n) for n in seen)))]
+
+
+def propose_service_length(shapes: Sequence[ServiceShape],
+                           service: Mapping[str, Any]) -> List[Proposal]:
+    """How long a service of this kind runs, for a rule about when one can still start."""
+    lengths = [s.end_minutes for s in shapes if s.end_minutes]
+    current = (service or {}).get("service_length_minutes")
+    if len(lengths) < MIN_SAMPLES:
+        return [Proposal("service_length_minutes", baseline=None, current=current,
+                         suggested=current, samples=len(lengths),
+                         evidence="needs %d corrected services, has %d"
+                                  % (MIN_SAMPLES, len(lengths)))]
+    return [Proposal("service_length_minutes", baseline=None, current=current,
+                     suggested=_percentile(lengths, 0.9), samples=len(lengths),
+                     evidence="90th percentile of %d services (%d-%d min)"
+                              % (len(lengths), min(lengths), max(lengths)))]
+
+
 def propose_all(phases: Sequence[CorrectedPhase], cfg: Dict[str, Any],
-                baseline: Dict[str, Any]) -> Dict[str, Any]:
+                baseline: Dict[str, Any], *,
+                shapes: Optional[Sequence[ServiceShape]] = None,
+                profile_name: Optional[str] = None) -> Dict[str, Any]:
     """Everything this installation's corrections support, with the evidence attached."""
     proposals = propose_durations(phases, cfg, baseline)
     proposals += propose_fragments(phases, "communion_verse", "Communion",
                                    known=(cfg.get("cue_fragments") or {}).get("communion_verse"))
+    shapes = list(shapes or group_by_service(phases))
+    proposals += propose_counts(shapes, cfg.get("limits") or {})
+    proposals += propose_service_length(shapes, cfg)
     return {
         "min_samples": MIN_SAMPLES,
         "sessions": len({p.session for p in phases}),
         "corrections": len(phases),
+        "services": len(shapes),
+        "profile": profile_name,
         "proposals": [p.to_dict() for p in proposals],
         "actionable": sum(1 for p in proposals if p.actionable),
     }
