@@ -5674,7 +5674,7 @@ def get_service_phase():
                 result = _service_phase_analyze(
                     _service_phase_rows(conn), cfg,
                     first_sunday=_service_phase_first_sunday(db_path),
-                    rules=_service_phase_rules())
+                    rules=_service_phase_rules(), live=is_live)
             else:
                 result = _service_phase_load(conn)
             corrections = _service_phase_corrections(conn)
@@ -5962,7 +5962,7 @@ def rerun_service_phase():
             result = _service_phase_analyze(
                 _service_phase_rows(conn), cfg,
                 first_sunday=_service_phase_first_sunday(db_path),
-                rules=_service_phase_rules())
+                rules=_service_phase_rules(), live=is_live)
             written = _service_phase_save(conn, result)
         finally:
             conn.close()
@@ -13013,6 +13013,16 @@ def stop_transcription():
             except Exception as e:
                 log(f"[STOP-CLEANUP] Error sending unload command: {e}")
 
+            # The worker has had its unload command and released the session by now, so this
+            # is the first safe moment to write the settled timeline: one last pass with the
+            # service treated as over, which is what lets a phase limit judge the final
+            # block. Off the stop route's thread, so a lock or a slow re-derive cannot delay
+            # the stop the operator is waiting on.
+            try:
+                _service_phase_settle(_stopping_db_path)
+            except Exception as e:
+                log(f"[STOP-CLEANUP] Could not settle the service phases: {e}")
+
             with _transcription_state_lock:
                 if transcription_state["status"] == "stopping":
                     transcription_state["status"] = "stopped"
@@ -17276,7 +17286,7 @@ def _service_phase_tick(is_running):
             result = _service_phase_analyze(
                 _service_phase_rows(conn), cfg,
                 first_sunday=_service_phase_first_sunday(db_path),
-                rules=_service_phase_rules())
+                rules=_service_phase_rules(), live=True)
             _service_phase_save(conn, result)
             # Read on the same connection: what the operator has corrected decides which
             # stretches are sermons and where they begin, so the summariser must see it.
@@ -18094,18 +18104,84 @@ def _sermon_set_finalising(active):
         pass  # a shared-state write must never break the stop path
 
 
+def _service_phase_settled_blocks(conn, db_path):
+    """This session's blocks as a finished service, without writing anything.
+
+    A stopped session never closes its final block, so the stored timeline always ends in an
+    ongoing one — and the last block is exactly where a spurious phase sits. Re-deriving with
+    ``live=False`` is what lets a phase limit judge it. Falls back to the stored blocks if
+    the transcript cannot be re-read, because a slightly stale timeline is a better answer
+    than none.
+    """
+    try:
+        cfg = _service_phase_config()
+        result = _service_phase_analyze(
+            _service_phase_rows(conn), cfg,
+            first_sunday=_service_phase_first_sunday(db_path),
+            rules=_service_phase_rules(), live=False)
+        blocks = result.get("blocks") or []
+        if blocks:
+            return blocks
+    except Exception as e:
+        print(f"[SERVICE-PHASE] could not settle the timeline ({type(e).__name__}: {e})")
+    return _service_phase_load(conn).get("blocks", [])
+
+
+def _service_phase_settle(db_path):
+    """Re-derive and save the timeline once more, as a service that is over.
+
+    The tick runs while the service is running, so its last block is always ``ongoing`` —
+    a stopped session never closes its final block. Anything that treats an ongoing block
+    as still able to grow therefore never gets to judge that one, and the last block is
+    exactly where a spurious phase sits: the service that prompted the phase limits ended
+    with a fourteen-minute "Sermon 3" that was really the closing.
+
+    So the stop does one last pass with ``live=False``. Nothing can grow now, every block is
+    final, and the stored timeline the summariser and the review page read is the settled
+    one rather than the last snapshot of a service in progress.
+    """
+    if not db_path or not os.path.exists(db_path):
+        return
+    try:
+        cfg = _service_phase_config()
+        if not cfg.get("enabled", True):
+            return
+        conn = sqlite3.connect(db_path, timeout=15)
+        try:
+            result = _service_phase_analyze(
+                _service_phase_rows(conn), cfg,
+                first_sunday=_service_phase_first_sunday(db_path),
+                rules=_service_phase_rules(), live=False)
+            _service_phase_save(conn, result)
+        finally:
+            conn.close()
+        for note in result.get("notes") or []:
+            print(f"[SERVICE-PHASE] {note}", flush=True)
+    except Exception as e:
+        # Best-effort, like every other diagnostic on the stop path: a session must be
+        # deliverable even if its timeline could not be settled.
+        print(f"[SERVICE-PHASE] final pass failed ({type(e).__name__}: {e})", flush=True)
+
+
 def _sermon_begin_finalising(db_path):
     """Queue any sermon this session still owes. True if the models must stay loaded.
 
     Called from the stop path with the session that is ending. Returning False — the common
     case — means nothing is outstanding and the stop proceeds exactly as it always did.
+
+    What a service owes is read off its blocks, and the stored ones still describe a service
+    in progress — the tick that wrote them ran while it was. So the timeline is re-derived
+    here as finished, in memory and read-only: the stop route calls this on its own thread
+    while the worker is still tearing the session down and holding the database, which is no
+    place to be writing. Persisting the settled timeline happens later, once the worker has
+    let go (see _service_phase_settle).
     """
     cfg = _sermon_summary_config()
     if not cfg.get("enabled", False) or not db_path or not os.path.exists(db_path):
         return False
     try:
         with _archive_open_ro(db_path, is_live=True) as conn:
-            blocks = _service_phase_load(conn).get("blocks", [])
+            blocks = _service_phase_settled_blocks(conn, db_path)
             corrections = _service_phase_corrections(conn)
             stored = _sermon_load_all(conn)
         min_minutes = coerce_int(cfg.get("min_minutes"), 8, lo=1, hi=240)

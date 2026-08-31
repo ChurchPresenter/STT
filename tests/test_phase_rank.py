@@ -240,3 +240,37 @@ class TestNotes:
 
     def test_no_demotions_says_nothing(self):
         assert limit_notes([]) == []
+
+
+class TestAStoppedServiceSettles:
+    """The gap that survived the first cut of this, caught by replaying the real service.
+
+    A stopped session never closes its final block: the tick that wrote the timeline ran
+    while the service was running, so the last block is always ``ongoing``. Anything that
+    exempts an ongoing block therefore never judges that one — and the last block is exactly
+    where a spurious phase sits. The service that prompted these limits ended with a
+    fourteen-minute "Sermon 3" that was really the closing, still flagged ongoing hours
+    later.
+    """
+
+    def service(self):
+        # This morning's shape, with the final block still marked ongoing as a stopped
+        # session leaves it.
+        return service_with_ongoing_tail()
+
+    def test_while_the_service_runs_the_last_block_is_left_alone(self):
+        blocks = self.service()
+        assert rank_and_limit(blocks, name="Sermon", max_count=2,
+                              fallback_label="Speaking", closed_only=True) == []
+        assert labels(blocks)[-1] == "Sermon 3"
+
+    def test_once_it_has_stopped_the_last_block_is_judged(self):
+        blocks = self.service()
+        out = rank_and_limit(blocks, name="Sermon", max_count=2,
+                             fallback_label="Speaking", closed_only=False)
+        assert [d.was for d in out] == ["Sermon 3"]
+        assert labels(blocks) == ["Sermon 1", "Sermon 2", "Speaking"]
+
+
+def service_with_ongoing_tail():
+    return service(("Sermon 1", 30, 13), ("Sermon 2", 47, 50), ("Sermon 3", 14, 110, True))
