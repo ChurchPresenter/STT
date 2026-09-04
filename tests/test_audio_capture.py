@@ -21,7 +21,9 @@ import pytest
 
 from stt.audio_capture import (
     FFmpegAudioCapture,
+    _open_failure_message,
     create_compatible_audio_source,
+    normalise_exit_code,
     summarise_ffmpeg_error,
     parse_asound_cards,
     resolve_audio_device_by_name,
@@ -435,6 +437,21 @@ class TestFfmpegErrorSummary:
         "Error opening input files: Input/output error",
     ]
 
+    # The same failure as captured from ffmpeg 8.1 on Windows. It is here because
+    # every fixture above is Unix-shaped, and the difference is not cosmetic: the
+    # tag carries a bare hex address with no "0x", so a stripper written against
+    # the macOS form silently left it in place on the one platform whose device
+    # problems prompted this filtering. A green suite proved nothing.
+    REAL_WINDOWS = [
+        "ffmpeg version 8.1-essentials_build-www.gyan.dev Copyright (c) 2000-2026 the FFmpeg developers",
+        "  built with gcc 15.2.0 (Rev11, Built by MSYS2 project)",
+        "  configuration: --enable-gpl --enable-version3 --enable-static",
+        "  libavutil      60. 26.100 / 60. 26.100",
+        "[in#0 @ 000002375ec46e00] Error opening input: I/O error",
+        "Error opening input file audio=Totally Bogus Mic.",
+        "Error opening input files: I/O error",
+    ]
+
     def test_the_banner_is_dropped(self):
         summary = summarise_ffmpeg_error(self.REAL)
         assert "ffmpeg version" not in summary
@@ -448,6 +465,24 @@ class TestFfmpegErrorSummary:
         """It changes every run and means nothing to a reader."""
         assert "0x8b6c10000" not in summarise_ffmpeg_error(self.REAL)
         assert "Error opening input: Input/output error" in summarise_ffmpeg_error(self.REAL)
+
+    def test_the_windows_heap_address_tag_is_stripped_too(self):
+        """Windows prints the same tag without the "0x": "[in#0 @ 000002375...]".
+
+        Requiring the prefix matched nothing here, so the address was passed
+        through to the operator on Windows while this suite stayed green — the
+        fixtures were all Unix-shaped.
+        """
+        summary = summarise_ffmpeg_error(self.REAL_WINDOWS)
+        assert "000002375ec46e00" not in summary, "the bare-hex address must go too"
+        assert "[in#0" not in summary
+        assert "Error opening input: I/O error" in summary
+
+    def test_the_windows_banner_is_dropped(self):
+        summary = summarise_ffmpeg_error(self.REAL_WINDOWS)
+        assert "ffmpeg version" not in summary
+        assert "gcc" not in summary
+        assert "libavutil" not in summary
 
     def test_progress_lines_are_not_the_error(self):
         """A session's worth of `size=` lines must not push the reason out."""
@@ -464,6 +499,41 @@ class TestFfmpegErrorSummary:
 
     def test_the_summary_is_bounded(self):
         assert len(summarise_ffmpeg_error(["x" * 5000])) <= 300
+
+
+class TestExitCodeIsReadableOnEveryPlatform:
+    """Windows reports a process's full 32-bit exit code; Unix truncates to 8 bits.
+
+    So one ffmpeg failure — exit(-5) — reads "exit code 251" on Linux and macOS
+    and "exit code 4294967291" on Windows. Ten digits match nothing an operator
+    can search for and read like a corrupted number, which is the opposite of
+    what an error message is for.
+    """
+
+    def test_a_windows_wrapped_code_reads_as_the_negative_it_is(self):
+        assert normalise_exit_code(4294967291) == -5
+
+    def test_the_unix_form_of_the_same_failure_is_left_alone(self):
+        # 251 is already what the platform means; it is not a wrapped value.
+        assert normalise_exit_code(251) == 251
+
+    def test_ordinary_codes_are_untouched(self):
+        assert normalise_exit_code(0) == 0
+        assert normalise_exit_code(1) == 1
+        assert normalise_exit_code(-5) == -5
+
+    def test_no_code_stays_absent(self):
+        assert normalise_exit_code(None) is None
+
+    def test_the_boundary_is_the_sign_bit(self):
+        assert normalise_exit_code(0x7FFFFFFF) == 0x7FFFFFFF  # largest positive
+        assert normalise_exit_code(0x80000000) == -2147483648  # first wrapped
+        assert normalise_exit_code(0xFFFFFFFF) == -1
+
+    def test_the_message_an_operator_reads_carries_the_folded_code(self):
+        message = _open_failure_message(4294967291, "Error opening input: I/O error")
+        assert "exit code -5" in message
+        assert "4294967291" not in message
 
 
 class TestSignalOpenFailure:

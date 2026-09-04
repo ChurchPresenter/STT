@@ -107,11 +107,16 @@ def is_ffmpeg_noise(line):
 #: ffmpeg tags most lines with the component and a heap address, e.g.
 #: "[in#0 @ 0x8b6c10000] Error opening input: ...". The address changes every run
 #: and means nothing to a reader, so it is stripped before the line is shown.
-_FFMPEG_TAG = re.compile(r"^\[[^\]]*@\s*0x[0-9a-f]+\]\s*", re.IGNORECASE)
+#:
+#: The "0x" is optional because only Unix builds print it: on Windows the same
+#: tag reads "[in#0 @ 000002375ec46e00]", bare hex. Requiring the prefix left the
+#: address in the operator's message on the one platform this filtering was
+#: written for, and the tests could not see it — every fixture was Unix-shaped.
+_FFMPEG_TAG = re.compile(r"^\[[^\]]*@\s*(?:0x)?[0-9a-f]+\]\s*", re.IGNORECASE)
 
 
 def strip_ffmpeg_tag(line):
-    """Drop ffmpeg's "[component @ 0xADDR] " prefix from one line."""
+    """Drop ffmpeg's "[component @ ADDR] " prefix from one line."""
     return _FFMPEG_TAG.sub("", line.strip())
 
 
@@ -139,6 +144,24 @@ def summarise_ffmpeg_error(lines, max_lines=3, max_chars=300):
     return "; ".join(meaningful[-max_lines:])[:max_chars]
 
 
+def normalise_exit_code(returncode):
+    """The exit code as a reader would recognise it, on any platform.
+
+    Windows reports a process's full 32-bit exit code, so ffmpeg failing with -5
+    arrives as 4294967291; Unix truncates the same exit to 251. Ten digits match
+    nothing an operator can search for and read like a corrupted number, so a
+    value in the negative half of the 32-bit range is folded back to the signed
+    form it was before Windows widened it.
+
+    Left alone otherwise: a plain 1 or 251 is already what the platform means.
+    """
+    if returncode is None:
+        return None
+    if isinstance(returncode, int) and 0x80000000 <= returncode <= 0xFFFFFFFF:
+        return returncode - 0x100000000
+    return returncode
+
+
 def _open_failure_message(returncode, detail):
     """One sentence for a device that never produced audio.
 
@@ -147,6 +170,7 @@ def _open_failure_message(returncode, detail):
     message read like two stacked errors.
     """
     text = "ffmpeg exited before producing any audio"
+    returncode = normalise_exit_code(returncode)
     if returncode is not None:
         text += f" (exit code {returncode})"
     return f"{text}: {detail}" if detail else (
@@ -664,8 +688,6 @@ class FFmpegAudioCapture:
             # Backstop: whatever else happened, start() must not block its full
             # timeout on a thread that has already ended without ever reporting
             # in (e.g. an exception before the first Popen attempt).
-            # Backstop: whatever else happened, start() must not block its full
-            # timeout on a thread that ended without ever reporting in.
             self._signal_open_failure(None, fallback="audio capture thread exited before producing data")
 
     def start(self, callback: Optional[Callable] = None):
