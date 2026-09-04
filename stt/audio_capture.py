@@ -968,13 +968,26 @@ class FFmpegAudioCapture:
                             # dshow has no separate short id the way ALSA's card_id
                             # is; the quoted name is the only stable identifier, so
                             # it doubles as card_id for resolve_device_by_name.
+                            #
+                            # is_default is False for every device, deliberately.
+                            # dshow enumerates in driver order and reports nothing
+                            # about which input Windows actually defaults to —
+                            # that lives behind Core Audio's
+                            # IMMDeviceEnumerator::GetDefaultAudioEndpoint, which
+                            # we have no way to call. Flagging the first device
+                            # instead put "(Default)" beside a name picked at
+                            # random, on the first-run screen where an operator is
+                            # deciding which microphone to trust. Selecting
+                            # nothing is the same behaviour minus the false claim:
+                            # a <select> already shows its first option, and the
+                            # saved device overrides this anyway.
                             devices.append({
                                 'name': name,
                                 'index': len(devices),
                                 'display_name': name,
                                 'card_id': name,
                                 'alt_name': None,
-                                'is_default': len(devices) == 0,
+                                'is_default': False,
                             })
                             last_audio_idx = len(devices) - 1
                             continue
