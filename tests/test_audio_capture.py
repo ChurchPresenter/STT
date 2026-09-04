@@ -6,6 +6,8 @@ import os
 import sys
 import threading
 
+import pytest
+
 from stt.audio_capture import (
     FFmpegAudioCapture,
     create_compatible_audio_source,
@@ -75,6 +77,19 @@ class TestResolveDeviceByName:
         assert resolve_audio_device_by_name("   ", DEVICES) is None
         assert resolve_audio_device_by_name(None, DEVICES) is None
 
+    def test_a_device_with_no_card_id_does_not_match_everything(self):
+        # STT#12: Windows (and macOS) enumeration never sets card_id, so it's
+        # '' on every device. The old third arm was `card_id in needle`, which
+        # for an empty card_id is `'' in needle` — true of every non-empty
+        # string, so devices[0] matched unconditionally regardless of the
+        # saved name. A saved name that matches nothing must still miss.
+        no_card_id_devices = [
+            {"name": "dshow:0", "card_id": "", "display_name": "Conexant HD Audio"},
+            {"name": "dshow:1", "card_id": "", "display_name": "Line In (Realtek)"},
+        ]
+        assert resolve_audio_device_by_name("UR22mkII", no_card_id_devices) is None
+        assert resolve_audio_device_by_name("Line In (Realtek)", no_card_id_devices)["name"] == "dshow:1"
+
 
 class TestInit:
     def test_chunk_size_and_sample_width(self):
@@ -106,6 +121,21 @@ class TestInit:
         cap = FFmpegAudioCapture(ts_enabled=False)
         assert isinstance(cap.playback_finished, threading.Event)
         assert not cap.playback_finished.is_set()
+
+    def test_open_signal_starts_unset_and_unfailed(self):
+        cap = FFmpegAudioCapture(ts_enabled=False)
+        assert isinstance(cap._open_event, threading.Event)
+        assert not cap._open_event.is_set()
+        assert cap._open_error is None
+
+    def test_open_timeout_defaults_and_is_overridable(self):
+        assert FFmpegAudioCapture(ts_enabled=False).open_timeout == 5.0
+        assert FFmpegAudioCapture(ts_enabled=False, open_timeout=1.5).open_timeout == 1.5
+
+    def test_stall_tracking_starts_clear(self):
+        cap = FFmpegAudioCapture(ts_enabled=False)
+        assert cap.last_data_at is None
+        assert cap.is_stalled is False
 
     def test_signal_eof_sets_event_only_for_a_file_source(self, tmp_path):
         # A real file path -> EOF means the file ended -> event set.
@@ -211,6 +241,54 @@ class _FakeProcess:
 
     def poll(self):
         return None
+
+
+class TestWaitForOpenOrRaise:
+    """The actual fix for STT#12's device-open-failure bug.
+
+    start() used to return the instant the capture thread was spawned; Popen,
+    _get_ffmpeg_command() and every open error lived entirely inside that
+    background thread, so the caller's fallback loop always saw success. The
+    thread now signals `_open_event`/`_open_error` and start() waits briefly
+    on them via `_wait_for_open_or_raise()`. Exercised directly (no real
+    subprocess/thread) so the decision is covered without the flakiness of
+    threaded timing -- the capture loop's own thread wiring is out of scope
+    here, same as the rest of this file.
+    """
+
+    def test_raises_when_the_thread_reported_a_failure(self):
+        cap = FFmpegAudioCapture(ts_enabled=False)
+        cap.running = True
+        cap._open_error = RuntimeError("device busy")
+        cap._open_event.set()
+        with pytest.raises(RuntimeError, match="Failed to open audio device"):
+            cap._wait_for_open_or_raise()
+        assert cap.running is False, "a failed open must not leave running=True"
+
+    def test_the_original_error_is_chained(self):
+        cap = FFmpegAudioCapture(ts_enabled=False)
+        cap.running = True
+        original = FileNotFoundError("ffmpeg")
+        cap._open_error = original
+        cap._open_event.set()
+        with pytest.raises(RuntimeError) as excinfo:
+            cap._wait_for_open_or_raise()
+        assert excinfo.value.__cause__ is original
+
+    def test_does_not_raise_when_the_thread_reported_success(self):
+        cap = FFmpegAudioCapture(ts_enabled=False)
+        cap.running = True
+        cap._open_event.set()  # success: no error attached
+        cap._wait_for_open_or_raise()  # must not raise
+        assert cap.running is True
+
+    def test_a_device_still_pending_after_the_timeout_is_not_treated_as_failed(self):
+        # Only a DEMONSTRATED failure raises; a device that's merely slow to
+        # produce its first chunk must not be penalized.
+        cap = FFmpegAudioCapture(ts_enabled=False, open_timeout=0.05)
+        cap.running = True
+        cap._wait_for_open_or_raise()  # event never set -> times out -> no raise
+        assert cap.running is True
 
 
 class TestStopIsInterlockedWithRespawn:

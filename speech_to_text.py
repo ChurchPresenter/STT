@@ -3638,6 +3638,7 @@ if mp_manager is not None:
             "session_id": None,  # Stable per-session id (.db filename stem); cross-process
             "audio_level": 0,  # Audio level for histogram (0-100)
             "audio_db": -60,  # Audio level in decibels
+            "audio_stalled": False,  # True when ffmpeg has produced no audio for 10s+ (mic muted/unplugged) — mirrors FFmpegAudioCapture.is_stalled
             "audio_energy": 0,  # Raw audio energy (RMS)
             "start_time": 0,  # epoch seconds when transcription became active; 0 = not running
             "live_text": "",  # Live preview text (not yet saved to DB)
@@ -8026,6 +8027,7 @@ def get_health():
             "model_load_ms": ts.get("model_load_ms"),
             "audio_level": ts.get("audio_level", 0) if running else 0,
             "audio_db": ts.get("audio_db"),
+            "audio_stalled": ts.get("audio_stalled", False) if running else False,
             "audio_type": ts.get("audio_type") if running else None,
             "detection_mode": ts.get("detection_mode") if running else None,
             "audio_tag": ts.get("audio_tag") if running else None,      # PANNs top CNN14 class
@@ -21825,6 +21827,14 @@ def thread1_function(ts, cq, cfq, cal_state, cal_data, cal_step1, asq):
                             # Check again after processing control queue
                             if not is_running:
                                 break
+
+                            # Surface a silent-but-open device (mic muted, cable
+                            # unplugged, source stuck behind an app that grabbed
+                            # exclusive access) so it's visible outside the log —
+                            # ffmpeg's own 10s-no-data restart otherwise loops
+                            # invisibly to anyone watching the UI.
+                            if source is not None:
+                                transcription_state["audio_stalled"] = getattr(source, "is_stalled", False)
 
                             # End of a played audio file: finalize the last phrase
                             # via the existing phrase-timeout path, then stop just

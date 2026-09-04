@@ -43,11 +43,12 @@ class _Result:
 
 @pytest.fixture
 def ffmpeg(monkeypatch):
-    """Stubs subprocess.run and records the commands it was given."""
-    state = {"cmds": [], "result": _Result()}
+    """Stubs subprocess.run and records the commands/kwargs it was given."""
+    state = {"cmds": [], "kwargs": [], "result": _Result()}
 
     def fake_run(cmd, **kw):
         state["cmds"].append(list(cmd))
+        state["kwargs"].append(kw)
         if isinstance(state["result"], Exception):
             raise state["result"]
         return state["result"]
@@ -145,6 +146,49 @@ class TestWindows:
         ffmpeg["result"] = _Result(stderr='[dshow @ 1] DirectShow audio devices\n'
                                           '[dshow @ 1]  "Some Mic"\n')
         assert list_devices() == []
+
+    def test_display_name_and_card_id_are_populated(self, ffmpeg):
+        """STT#12: dshow has no separate short id the way ALSA's card_id is, but
+        resolve_device_by_name needs a non-empty card_id/display_name to have
+        anything real to match against -- an empty one used to make the first
+        device match every saved name unconditionally."""
+        devices = list_devices()
+        assert devices[0]["display_name"] == "Microphone (Realtek(R) Audio)"
+        assert devices[0]["card_id"] == "Microphone (Realtek(R) Audio)"
+
+    def test_the_first_device_is_the_default(self, ffmpeg):
+        devices = list_devices()
+        assert devices[0]["is_default"] is True
+        assert devices[1]["is_default"] is False
+
+    def test_alternative_name_attaches_to_the_audio_device_it_follows(self, ffmpeg):
+        """dshow disambiguates two devices sharing a display name with an
+        "Alternative name" line. It must attach to the audio device it follows,
+        not leak onto the video device printed earlier in the same output."""
+        ffmpeg["result"] = _Result(stderr=(
+            '[dshow @ 1] DirectShow audio devices\n'
+            '[dshow @ 1]  "Line In (Scarlett 2i2 USB)" (audio)\n'
+            + r'[dshow @ 1]     Alternative name "@device_cm_{33D9A762-90C8-11D0-BD43}\wave_{GUID}"' + '\n'
+        ))
+        devices = list_devices()
+        assert devices[0]["alt_name"] == r"@device_cm_{33D9A762-90C8-11D0-BD43}\wave_{GUID}"
+
+    def test_a_device_with_no_alternative_name_line_leaves_it_none(self, ffmpeg):
+        assert [d["alt_name"] for d in list_devices()] == [None, None]
+
+    def test_the_video_sections_alternative_name_does_not_leak_onto_audio(self, ffmpeg):
+        # WINDOWS_STDERR's "Integrated Webcam" (video) is followed by its own
+        # Alternative name line, before any audio device has been seen.
+        devices = list_devices()
+        assert devices[0]["alt_name"] is None
+
+    def test_stderr_is_decoded_as_utf8_not_the_console_codepage(self, ffmpeg):
+        """A non-ASCII device name decoded with the Windows ANSI codepage comes
+        back mojibake and can never match on the way back in; errors=replace
+        keeps a bad byte from raising instead of just yielding an empty list."""
+        list_devices()
+        assert ffmpeg["kwargs"][0].get("encoding") == "utf-8"
+        assert ffmpeg["kwargs"][0].get("errors") == "replace"
 
 
 class TestLinux:

@@ -81,7 +81,7 @@ def parse_asound_cards(content, deprioritize_markers=None):
 class FFmpegAudioCapture:
     """Audio capture using ffmpeg - reliable cross-platform audio backend"""
 
-    def __init__(self, sample_rate=16000, chunk_duration=1.0, device_name=None, backup_dir=None, filename_format=None, filename_prefix=None, ts_enabled=True):
+    def __init__(self, sample_rate=16000, chunk_duration=1.0, device_name=None, backup_dir=None, filename_format=None, filename_prefix=None, ts_enabled=True, open_timeout=5.0):
         self.sample_rate = sample_rate
         self.chunk_duration = chunk_duration
         self.chunk_size = int(sample_rate * chunk_duration)
@@ -89,6 +89,28 @@ class FFmpegAudioCapture:
         self.process = None
         self.thread = None
         self.running = False
+        # How long start() waits for ffmpeg to prove it opened the device (first
+        # chunk of data) before giving up on treating a later failure as an open
+        # failure. Overridable so tests don't have to sleep multiple seconds.
+        self.open_timeout = open_timeout
+        # Signaled once the capture thread has EITHER produced its first chunk of
+        # real audio OR demonstrated the device could not be opened (Popen raised,
+        # or ffmpeg exited before sending any data). start() waits briefly on this
+        # so an open failure reaches the caller's fallback loop instead of the
+        # unconditional "[OK] Audio initialized successfully" it used to log —
+        # Popen/_get_ffmpeg_command()/every open error used to live entirely
+        # inside the background thread with no way back to the caller.
+        self._open_event = threading.Event()
+        self._open_error = None
+        # Wall-clock (time.monotonic()) of the last chunk pulled from ffmpeg's
+        # stdout; None until the first chunk arrives. Lets a caller tell "silent
+        # but still recording" (muted/unplugged mic) from "recording normally"
+        # without threading a callback through the whole transcription pipeline.
+        self.last_data_at = None
+        # True while the existing 10s-no-data auto-restart (below) is active;
+        # cleared as soon as data resumes. The caller-visible half of a retry
+        # that was previously invisible outside the log file.
+        self.is_stalled = False
         # Serialises every change of self.process between the capture thread and
         # stop(). Without it a stalled-stream respawn landing during teardown wrote
         # its handle into self.process just as stop() nulled it — leaving an ffmpeg
@@ -298,13 +320,19 @@ class FFmpegAudioCapture:
             print(f"[FFMPEG] Starting audio capture: {' '.join(cmd)}")
 
             # Start ffmpeg process
-            self.process = subprocess.Popen(
-                cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                bufsize=self.chunk_size * 2,  # 16-bit samples
-                creationflags=_CREATE_NO_WINDOW,
-            )
+            try:
+                self.process = subprocess.Popen(
+                    cmd,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    bufsize=self.chunk_size * 2,  # 16-bit samples
+                    creationflags=_CREATE_NO_WINDOW,
+                )
+            except OSError as e:
+                print(f"[FFMPEG] Failed to start ffmpeg: {e}", flush=True)
+                self._open_error = e
+                self._open_event.set()
+                return
 
             print(f"[DEBUG-TS-START] FFmpeg started, PID: {self.process.pid}", flush=True)
             print(f"[DEBUG-TS-START] Backup file target: {self.backup_file}", flush=True)
@@ -427,7 +455,13 @@ class FFmpegAudioCapture:
                         data = None
                         has_data = False
                     if not has_data and pipe_eof.is_set() and pipe_queue.empty():
-                        print(f"[DEBUG-TS-DIED] FFmpeg pipe closed, exit code: {self.process.poll()}", flush=True)
+                        rc = self.process.poll()
+                        print(f"[DEBUG-TS-DIED] FFmpeg pipe closed, exit code: {rc}", flush=True)
+                        if not self._open_event.is_set():
+                            self._open_error = RuntimeError(
+                                f"ffmpeg exited before producing audio (exit code {rc}); "
+                                f"device may not exist or be in use")
+                            self._open_event.set()
                         break
                 else:
                     # Unix: use select to wait for data with timeout
@@ -449,9 +483,15 @@ class FFmpegAudioCapture:
                             print(f"[DEBUG-TS-DIED] Backup file size at death: {os.path.getsize(self.backup_file)} bytes", flush=True)
                         else:
                             print(f"[DEBUG-TS-DIED] WARNING: Backup file does not exist: {self.backup_file}", flush=True)
+                        if not self._open_event.is_set():
+                            self._open_error = RuntimeError(
+                                f"ffmpeg exited before producing audio (exit code {self.process.returncode}); "
+                                f"device may not exist or be in use")
+                            self._open_event.set()
                         break
                     if timeout_count >= 5:  # 10 seconds of no data
                         print(f"[DEBUG-TS-RESTART] Restarting FFmpeg after {timeout_count * 2}s timeout", flush=True)
+                        self.is_stalled = True
                         buffer = _restart_ffmpeg()
                         timeout_count = 0
                     continue
@@ -471,6 +511,10 @@ class FFmpegAudioCapture:
                             print("[FFMPEG] No more audio data (EOF)", flush=True)
                             self._signal_eof_if_file()
                             break
+                    if not self._open_event.is_set():
+                        self._open_event.set()  # first real data => device opened successfully
+                    self.last_data_at = time.monotonic()
+                    self.is_stalled = False
                     buffer += data
                     bytes_received_total += len(data)
 
@@ -523,6 +567,9 @@ class FFmpegAudioCapture:
             print(f"[FFMPEG] Error in capture loop: {e}", flush=True)
             import traceback
             traceback.print_exc()
+            if not self._open_event.is_set():
+                self._open_error = e
+                self._open_event.set()
         finally:
             if self.process:
                 self.process.terminate()
@@ -530,6 +577,13 @@ class FFmpegAudioCapture:
                     self.process.wait(timeout=2)
                 except subprocess.TimeoutExpired:
                     self.process.kill()
+            # Backstop: whatever else happened, start() must not block its full
+            # timeout on a thread that has already ended without ever reporting
+            # in (e.g. an exception before the first Popen attempt).
+            if not self._open_event.is_set():
+                self._open_error = self._open_error or RuntimeError(
+                    "audio capture thread exited before producing data")
+                self._open_event.set()
 
     def start(self, callback: Optional[Callable] = None):
         """Start capturing audio
@@ -543,6 +597,10 @@ class FFmpegAudioCapture:
         # Reset file count for new session
         self._ts_file_count = 0
         self.playback_finished.clear()
+        self._open_event.clear()
+        self._open_error = None
+        self.last_data_at = None
+        self.is_stalled = False
 
         if self.running:
             raise RuntimeError("Already capturing")
@@ -566,9 +624,26 @@ class FFmpegAudioCapture:
 
         print("[DEBUG-TS-START] Capture thread started", flush=True)
 
+        self._wait_for_open_or_raise()
+
         # Log the backup file location
         if self.backup_file:
             print(f"[AUDIO BACKUP] Recording to: {self.backup_file}")
+
+    def _wait_for_open_or_raise(self):
+        """Block until the capture thread reports open success/failure, or give up.
+
+        Split out from start() so the decision (raise / don't raise / how long to
+        wait) is testable without a real ffmpeg subprocess or capture thread —
+        those stay out of unit-test scope, but this contract is the actual fix
+        for a bad device silently reporting "[OK]".
+        """
+        opened = self._open_event.wait(timeout=self.open_timeout)
+        if opened and self._open_error is not None:
+            self.running = False
+            err = self._open_error
+            self._open_error = None
+            raise RuntimeError(f"Failed to open audio device {self.device_name!r}: {err}") from err
 
     def stop(self):
         """Stop capturing audio"""
@@ -740,19 +815,49 @@ class FFmpegAudioCapture:
                 return devices
 
             elif sys.platform.startswith('win'):
-                # List Windows devices
+                # List Windows devices. encoding/errors are explicit: text=True alone
+                # decodes with the console's ANSI codepage, which mangles non-ASCII
+                # device names into mojibake that can never match on the way back in.
                 cmd = ['ffmpeg', '-list_devices', 'true', '-f', 'dshow', '-i', 'dummy']
-                result = subprocess.run(cmd, capture_output=True, text=True, timeout=5, check=False,
+                result = subprocess.run(cmd, capture_output=True, text=True, encoding='utf-8',
+                                errors='replace', timeout=5, check=False,
                                 creationflags=_CREATE_NO_WINDOW)
                 devices: list = []
+                # Index into `devices` of the audio device the last line belonged
+                # to, so a following "Alternative name" line (dshow's disambiguator
+                # for two devices sharing a display name) attaches to it. Reset to
+                # None on every other line so a video device's alternative name
+                # (also emitted by dshow) can never attach to the wrong entry.
+                last_audio_idx = None
                 for line in result.stderr.split('\n'):
+                    if 'Alternative name' in line:
+                        if last_audio_idx is not None:
+                            start = line.find('"')
+                            end = line.find('"', start + 1)
+                            if start != -1 and end != -1:
+                                devices[last_audio_idx]['alt_name'] = line[start+1:end]
+                        last_audio_idx = None
+                        continue
                     if '"' in line and 'audio' in line.lower():
                         # Extract device name from quotes
                         start = line.find('"')
                         end = line.find('"', start + 1)
                         if start != -1 and end != -1:
                             name = line[start+1:end]
-                            devices.append({'name': name, 'index': len(devices)})
+                            # dshow has no separate short id the way ALSA's card_id
+                            # is; the quoted name is the only stable identifier, so
+                            # it doubles as card_id for resolve_device_by_name.
+                            devices.append({
+                                'name': name,
+                                'index': len(devices),
+                                'display_name': name,
+                                'card_id': name,
+                                'alt_name': None,
+                                'is_default': len(devices) == 0,
+                            })
+                            last_audio_idx = len(devices) - 1
+                            continue
+                    last_audio_idx = None
                 return devices
 
         except Exception as e:
@@ -772,7 +877,12 @@ class FFmpegAudioCapture:
         for dev in devices:
             card_id = (dev.get('card_id') or '').lower()
             disp = (dev.get('display_name') or '').lower()
-            if needle in card_id or needle in disp or card_id in needle:
+            # card_id in needle only means something when card_id is non-empty —
+            # otherwise it's '' in needle, which is true of every string and would
+            # match the first device in the list unconditionally. Windows (and
+            # macOS) enumeration leaves card_id unset, so this used to make every
+            # saved device name resolve to devices[0].
+            if needle in card_id or needle in disp or (card_id and card_id in needle):
                 return dev
         return None
 
