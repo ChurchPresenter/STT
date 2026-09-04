@@ -76,6 +76,7 @@ The server is mostly a monolith — most changes land in `speech_to_text.py`.
 | `stt/file_mover.py` | SMB/NAS remote file delivery |
 | `templates/` | Jinja2 pages: index, live-settings, model-manager, server-settings, translation, corrections, file-manager, word-highlighting, url-builder |
 | `static/` | Vendored JS/CSS — no build step, no npm |
+| `stt/model_catalog.py` | The shipped faster-whisper catalogue as a floor under the on-disk cache |
 | `stt/model_files.py` | Download manifests, file verification, per-family "is this model loadable" |
 | `stt/start_watch.py` | Judges a start that is dead or wedged, so STARTING always resolves |
 | `stt/demo_*.py` | The shippable demo: playback engine, fake backends, egress guards, redaction, synthetic service generator |
@@ -105,6 +106,16 @@ The server is mostly a monolith — most changes land in `speech_to_text.py`.
   `files_needing_download`), and a completed download writes a `.stt-download.json` manifest
   that is what later tells a truncated file from a whole one. A *missing* manifest never means
   "not downloaded" — every install predating it has none.
+- **The shipped model catalogue is a floor, not a fallback.** `FASTER_WHISPER_MODELS` and
+  `config/faster_whisper_models.default.json` are two copies of one catalogue and a test asserts
+  they stay identical — regenerate the seed from the dict, never edit it by hand. The cached
+  `config/faster_whisper_models.json` has no expiry, so a machine that has written one would
+  otherwise never read the shipped dict again; `stt/model_catalog.merge_catalog` puts the
+  shipped entries back on top of whatever the cache or a Refresh discovered. Refresh may add
+  models, never remove a shipped one. This is why a withdrawn repo could be offered
+  indefinitely with no code change able to correct it. **`large-v3-turbo` is deliberately not a
+  Systran repo** — Systran withdrew theirs; it points at whatever
+  `faster_whisper.utils._MODELS` resolves the name to.
 - **A loader checks its files before it opens them.** `faster_whisper_status` requires
   `tokenizer.json`, not just a weight file: without it faster-whisper falls back to
   `tokenizers.Tokenizer.from_pretrained(...)`, a Rust builtin with its own HTTP client that

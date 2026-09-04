@@ -84,6 +84,7 @@ from stt import worker_crash as _worker_crash
 from stt import diagnostics as _diagnostics
 from stt.http_params import merge_request_params, parse_json_body as _parse_json_body
 from stt.model_disk import dir_has_weights, dir_is_writable, has_weight_file, is_weight_file, model_presence  # noqa: F401
+from stt import model_catalog as _model_catalog
 from stt import model_files as _model_files
 from stt import start_watch as _start_watch
 
@@ -14189,20 +14190,31 @@ WHISPER_MODEL_SIZES = {
 }
 
 # Faster-Whisper models (CTranslate2 format, 4-10x faster)
+#: The catalogue this release ships, and the floor under whatever a machine has
+#: cached or discovered (see stt/model_catalog.py). Sizes are the repos' actual
+#: totals, measured rather than estimated.
+#:
+#: large-v3-turbo is NOT a Systran repo. Systran withdrew
+#: "faster-whisper-large-v3-turbo" and it now answers 401, so this points at the
+#: same conversion faster_whisper.utils._MODELS itself resolves the name to —
+#: i.e. the repo the library would fetch if we passed it the bare name.
 FASTER_WHISPER_MODELS = {
     "tiny": {"repo": "Systran/faster-whisper-tiny", "size": "~75MB", "params": "39M", "lang": "Multilingual"},
-    "tiny.en": {"repo": "Systran/faster-whisper-tiny.en", "size": "~75MB", "params": "39M", "lang": "English-only"},
-    "base": {"repo": "Systran/faster-whisper-base", "size": "~145MB", "params": "74M", "lang": "Multilingual"},
-    "base.en": {"repo": "Systran/faster-whisper-base.en", "size": "~145MB", "params": "74M", "lang": "English-only"},
-    "small": {"repo": "Systran/faster-whisper-small", "size": "~465MB", "params": "244M", "lang": "Multilingual"},
-    "small.en": {"repo": "Systran/faster-whisper-small.en", "size": "~465MB", "params": "244M", "lang": "English-only"},
-    "medium": {"repo": "Systran/faster-whisper-medium", "size": "~1.5GB", "params": "769M", "lang": "Multilingual"},
-    "medium.en": {"repo": "Systran/faster-whisper-medium.en", "size": "~1.5GB", "params": "769M", "lang": "English-only"},
-    "large-v1": {"repo": "Systran/faster-whisper-large-v1", "size": "~3GB", "params": "1550M", "lang": "Multilingual"},
-    "large-v2": {"repo": "Systran/faster-whisper-large-v2", "size": "~3GB", "params": "1550M", "lang": "Multilingual"},
-    "large-v3": {"repo": "Systran/faster-whisper-large-v3", "size": "~3GB", "params": "1550M", "lang": "Multilingual"},
-    "large-v3-turbo": {"repo": "Systran/faster-whisper-large-v3-turbo", "size": "~1.6GB", "params": "809M", "lang": "Multilingual"},
-    "distil-large-v3": {"repo": "Systran/faster-distil-whisper-large-v3", "size": "~1.5GB", "params": "756M", "lang": "Multilingual"},
+    "tiny.en": {"repo": "Systran/faster-whisper-tiny.en", "size": "~74MB", "params": "39M", "lang": "English-only"},
+    "base": {"repo": "Systran/faster-whisper-base", "size": "~141MB", "params": "74M", "lang": "Multilingual"},
+    "base.en": {"repo": "Systran/faster-whisper-base.en", "size": "~141MB", "params": "74M", "lang": "English-only"},
+    "small": {"repo": "Systran/faster-whisper-small", "size": "~464MB", "params": "244M", "lang": "Multilingual"},
+    "small.en": {"repo": "Systran/faster-whisper-small.en", "size": "~464MB", "params": "244M", "lang": "English-only"},
+    "medium": {"repo": "Systran/faster-whisper-medium", "size": "~1.4GB", "params": "769M", "lang": "Multilingual"},
+    "medium.en": {"repo": "Systran/faster-whisper-medium.en", "size": "~1.4GB", "params": "769M", "lang": "English-only"},
+    "large-v1": {"repo": "Systran/faster-whisper-large-v1", "size": "~2.9GB", "params": "1550M", "lang": "Multilingual"},
+    "large-v2": {"repo": "Systran/faster-whisper-large-v2", "size": "~2.9GB", "params": "1550M", "lang": "Multilingual"},
+    "large-v3": {"repo": "Systran/faster-whisper-large-v3", "size": "~2.9GB", "params": "1550M", "lang": "Multilingual"},
+    "large-v3-turbo": {"repo": "mobiuslabsgmbh/faster-whisper-large-v3-turbo", "size": "~1.5GB", "params": "809M", "lang": "Multilingual"},
+    "distil-large-v2": {"repo": "Systran/faster-distil-whisper-large-v2", "size": "~1.4GB", "params": "756M", "lang": "English-only"},
+    "distil-large-v3": {"repo": "Systran/faster-distil-whisper-large-v3", "size": "~1.4GB", "params": "756M", "lang": "English-only"},
+    "distil-medium.en": {"repo": "Systran/faster-distil-whisper-medium.en", "size": "~755MB", "params": "394M", "lang": "English-only"},
+    "distil-small.en": {"repo": "Systran/faster-distil-whisper-small.en", "size": "~320MB", "params": "166M", "lang": "English-only"},
 }
 
 # Restore download state from the previous run.
@@ -15316,13 +15328,21 @@ def get_faster_whisper_models_list():
         if (time.time() - _faster_whisper_models_cache_time) < WHISPER_CACHE_DURATION:
             return _faster_whisper_models_cache
 
-    # Try to load from file
+    # Try to load from file. Merged under the shipped catalogue rather than
+    # returned as-is: the cache has no expiry, so once a machine wrote one the
+    # dict above was never read again — and when Systran withdrew its
+    # large-v3-turbo repo, every install that had pressed Refresh kept offering a
+    # model that answered 401, with no code change able to correct it.
     file_models, file_timestamp = load_faster_whisper_models_from_file()
     if file_models and file_timestamp:
-        _faster_whisper_models_cache = file_models
+        merged = _model_catalog.merge_catalog(FASTER_WHISPER_MODELS, file_models)
+        _faster_whisper_models_cache = merged
         _faster_whisper_models_cache_time = file_timestamp
-        print(f"[OK] Loaded {len(file_models)} Faster-Whisper models from {FASTER_WHISPER_MODELS_FILE}")
-        return file_models
+        print(f"[OK] Loaded {len(file_models)} Faster-Whisper models from {FASTER_WHISPER_MODELS_FILE}"
+              f" ({len(merged)} after merging the shipped catalogue)")
+        if merged != file_models:
+            save_faster_whisper_models_to_file(merged)
+        return merged
 
     # Use hardcoded defaults as fallback
     _faster_whisper_models_cache = FASTER_WHISPER_MODELS
@@ -15403,17 +15423,24 @@ def refresh_faster_whisper_models():
         added = new_names - old_names
         removed = old_names - new_names
 
+        # Discovery searches Systran only, so it can add models this release did
+        # not know about but must not drop the ones it ships — large-v3-turbo is
+        # no longer a Systran repo at all, and a refresh would otherwise delete
+        # it from the list every time.
+        merged = _model_catalog.merge_catalog(FASTER_WHISPER_MODELS, discovered_models)
+        removed -= set(FASTER_WHISPER_MODELS)
+
         # Update cache
-        _faster_whisper_models_cache = discovered_models
+        _faster_whisper_models_cache = merged
         _faster_whisper_models_cache_time = time.time()
 
         # Save to file
-        save_faster_whisper_models_to_file(discovered_models)
+        save_faster_whisper_models_to_file(merged)
 
         return jsonify({
             "success": True,
-            "message": f"Found {len(discovered_models)} Faster-Whisper models",
-            "count": len(discovered_models),
+            "message": f"Found {len(merged)} Faster-Whisper models",
+            "count": len(merged),
             "new_models": list(added),
             "removed_models": list(removed),
         })
