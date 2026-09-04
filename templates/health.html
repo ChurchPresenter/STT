@@ -365,10 +365,22 @@
             ? "—" : num(t.infer_ms_ema, 0) + " <small>ms</small>";
         $("m-spm").textContent = dash(t.segments_per_min);
         $("m-segtotal").textContent = (t.segments_total || 0) + " total this session";
-        $("m-audio").innerHTML = num(t.audio_level, 0) + " <small>/ 100</small>";
-        $("m-audio-bar").style.width = Math.max(0, Math.min(100, t.audio_level || 0)) + "%";
-        $("m-audiotype").textContent = t.audio_type
-            ? (t.audio_type + (t.detection_mode ? ` · ${t.detection_mode}` : "")) : "";
+        // A dead microphone reads 0/100, which is indistinguishable from a quiet
+        // room. audio_stalled is the worker saying ffmpeg has produced nothing
+        // for 10s+ and is restarting itself — say that instead of showing a
+        // number that looks like silence.
+        if (t.audio_stalled) {
+            $("m-audio").textContent = "No signal";
+            $("m-audio-bar").style.width = "0%";
+            setStatus("c-audio", "error");
+        } else {
+            $("m-audio").innerHTML = num(t.audio_level, 0) + " <small>/ 100</small>";
+            $("m-audio-bar").style.width = Math.max(0, Math.min(100, t.audio_level || 0)) + "%";
+            setStatus("c-audio", null);
+        }
+        $("m-audiotype").textContent = t.audio_stalled
+            ? "no audio from the microphone"
+            : (t.audio_type ? (t.audio_type + (t.detection_mode ? ` · ${t.detection_mode}` : "")) : "");
         $("m-queue").textContent = dash(t.queue_depth);
 
         // Audio detectors (PANNs music/speech + Silero VAD)

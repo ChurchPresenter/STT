@@ -897,6 +897,10 @@
             <div class="status-dot" id="translation-status-dot"></div>
             <span id="translation-status-text">Translation</span>
           </div>
+          <div id="audio-status-container" style="align-items: center; gap: 6px; display: none;">
+            <div class="status-dot" id="audio-status-dot"></div>
+            <span id="audio-status-text">Audio</span>
+          </div>
           <div id="disk-status-container" style="align-items: center; gap: 6px; display: none;">
             <div class="status-dot" id="disk-status-dot"></div>
             <span id="disk-status-text">Disk Space</span>
@@ -1809,11 +1813,41 @@
             // _disk_usage_percent) so non-whitelisted viewers get it without
             // hitting the IP-gated /api/disk-space endpoint.
             updateDiskBanner(data.disk_percent);
+            updateAudioBanner(data.state);
           })
           .catch(error => {
             console.error('Error checking transcription status:', error);
             updateTranscriptionStatus(false);
           });
+      }
+
+      // Surface a microphone that has gone quiet. ffmpeg restarts itself after
+      // 10s with no data — muted mic, unplugged cable, another application
+      // holding the device — and until now that loop was visible only in the log,
+      // so the page looked normally idle while nothing was being recorded at all.
+      //
+      // Deliberately lagging: the worker only sets audio_stalled once that 10s
+      // threshold has passed, so a brief dropout never flashes a warning. The
+      // wording says so rather than implying "this instant".
+      function updateAudioBanner(state) {
+        const container = document.getElementById('audio-status-container');
+        if (!container) return;
+        const dot = document.getElementById('audio-status-dot');
+        const text = document.getElementById('audio-status-text');
+
+        // Only meaningful mid-run: a stopped session has no microphone to be
+        // quiet, and the flag is stale until the next start.
+        const stalled = !!(state && state.running && state.audio_stalled);
+        if (!stalled) {
+          container.style.display = 'none';
+          return;
+        }
+        container.style.display = 'flex';
+        dot.classList.remove('warning', 'inactive', 'active', 'starting');
+        dot.classList.add('error');
+        text.textContent = 'No audio for 10s+';
+        text.title = 'The microphone has sent no audio for over 10 seconds. '
+          + 'Check that it is connected, unmuted, and not in use by another application.';
       }
 
       // Update the disk-full warning from a usage percent (delivered on the

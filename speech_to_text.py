@@ -13421,6 +13421,7 @@ def force_reset_transcription():
         transcription_state["status"] = "stopped"
         transcription_state["message"] = "Transcription forcefully reset"
         transcription_state["loaded_model"] = ""
+        transcription_state["audio_stalled"] = False
         transcription_state["is_file_playback"] = False
         transcription_state["playback_source"] = None
         transcription_state["playback_duration"] = None
@@ -23188,6 +23189,11 @@ def thread1_function(ts, cq, cfq, cal_state, cal_data, cal_step1, asq):
                     transcription_state["status"] = "stopped"
                     transcription_state["message"] = "Transcription stopped"
                     transcription_state["error"] = None
+                    # A stopped session has no microphone left to be quiet, and
+                    # the flag would otherwise stay true until the next run's
+                    # first loop iteration — long enough for the live page to
+                    # keep warning about a mic nobody is using.
+                    transcription_state["audio_stalled"] = False
                     # Drop file-playback markers so the live-settings trackbar
                     # doesn't linger after an end-of-file (or any) stop.
                     transcription_state["is_file_playback"] = False
