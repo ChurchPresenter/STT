@@ -1,16 +1,28 @@
 """Testable slices of stt/audio_capture.py: device parsing/resolution and
-ffmpeg command construction. The capture loop itself (subprocess/mic) is out
-of unit-test scope."""
+ffmpeg command construction.
+
+A live microphone is out of scope, but the capture loop is not entirely: the
+open-failure path is exercised against a real ffmpeg at the bottom of this file
+(skipped when ffmpeg is absent). It has to be. The bug it pins was that on Unix
+none of the loop's three open-failure branches ever ran — select() reports a
+closed pipe as readable, so a failed device reaches the EOF branch, which
+reported nothing — and no amount of testing the decision in isolation could
+show that the signal never arrived."""
 
 import os
+import queue
+import shutil
+import subprocess
 import sys
 import threading
+import time
 
 import pytest
 
 from stt.audio_capture import (
     FFmpegAudioCapture,
     create_compatible_audio_source,
+    summarise_ffmpeg_error,
     parse_asound_cards,
     resolve_audio_device_by_name,
 )
@@ -352,3 +364,227 @@ class TestStopIsInterlockedWithRespawn:
         cap.process = _Recorder()
         cap.stop()
         assert order == [("terminate", False)]
+
+
+class TestResolvesExactBeforeSubstring:
+    """Two mics sharing a prefix — the case Windows produces routinely.
+
+    Substring matching alone cannot separate them: the saved "#2" name contains
+    the shorter device's name, and the shorter saved name is contained in "#2".
+    Whichever the operator picked, the answer depended on enumeration order and
+    was wrong half the time.
+    """
+
+    PAIR = ["Microphone (USB Audio Device)", "Microphone (USB Audio Device) #2"]
+
+    @staticmethod
+    def _devices(names):
+        return [{"name": n, "index": i, "display_name": n, "card_id": n, "alt_name": None}
+                for i, n in enumerate(names)]
+
+    @pytest.mark.parametrize("order", [PAIR, list(reversed(PAIR))])
+    @pytest.mark.parametrize("saved", PAIR)
+    def test_a_prefix_sharing_pair_resolves_to_the_saved_one(self, order, saved):
+        got = resolve_audio_device_by_name(saved, self._devices(order))
+        assert got["name"] == saved
+
+    def test_an_alt_name_separates_two_identically_named_devices(self):
+        """When even the display names are equal, dshow's alternative name is
+        the only thing left to tell them apart."""
+        devices = [
+            {"name": "Microphone", "display_name": "Microphone", "card_id": "Microphone",
+             "alt_name": r"@device_cm_{A}\wave_{1}", "index": 0},
+            {"name": "Microphone", "display_name": "Microphone", "card_id": "Microphone",
+             "alt_name": r"@device_cm_{A}\wave_{2}", "index": 1},
+        ]
+        assert resolve_audio_device_by_name(r"@device_cm_{A}\wave_{2}", devices)["index"] == 1
+
+    def test_substring_matching_still_works_for_an_alsa_card_id(self):
+        """The fallback earns its place: an ALSA card_id genuinely is a fragment
+        of the fuller description a name is saved from, and vice versa."""
+        devices = [
+            {"name": "plughw:1,0", "card_id": "UR22mkII",
+             "display_name": "Steinberg UR22mkII at usb-0000:00:14.0-1"},
+            {"name": "plughw:0,0", "card_id": "PCH", "display_name": "HDA Intel PCH"},
+        ]
+        assert resolve_audio_device_by_name("UR22mkII", devices)["name"] == "plughw:1,0"
+        assert resolve_audio_device_by_name(
+            "Steinberg UR22mkII at usb-0000:00:14.0-1", devices)["name"] == "plughw:1,0"
+        assert resolve_audio_device_by_name("Nonexistent", devices) is None
+
+    def test_an_exact_match_later_in_the_list_beats_an_earlier_substring_one(self):
+        devices = self._devices(["Microphone (USB Audio Device) extended", "Microphone (USB Audio Device)"])
+        got = resolve_audio_device_by_name("Microphone (USB Audio Device)", devices)
+        assert got["name"] == "Microphone (USB Audio Device)"
+
+
+class TestFfmpegErrorSummary:
+    """What an operator is told when a device will not open.
+
+    ffmpeg states the reason plainly; it used to reach [DEBUG-TS-STDERR] in the
+    log and nowhere else, so the caller got a generic "no data".
+    """
+
+    REAL = [
+        "ffmpeg version 8.1 Copyright (c) 2000-2026 the FFmpeg developers",
+        "  built with Apple clang version 17.0.0",
+        "  configuration: --prefix=/opt/homebrew --enable-shared",
+        "  libavutil      60.  8.100 / 60.  8.100",
+        "[in#0 @ 0x8b6c10000] Error opening input: Input/output error",
+        "Error opening input file ::99.",
+        "Error opening input files: Input/output error",
+    ]
+
+    def test_the_banner_is_dropped(self):
+        summary = summarise_ffmpeg_error(self.REAL)
+        assert "ffmpeg version" not in summary
+        assert "clang" not in summary
+        assert "libavutil" not in summary
+
+    def test_the_reason_survives(self):
+        assert "Input/output error" in summarise_ffmpeg_error(self.REAL)
+
+    def test_the_heap_address_tag_is_stripped(self):
+        """It changes every run and means nothing to a reader."""
+        assert "0x8b6c10000" not in summarise_ffmpeg_error(self.REAL)
+        assert "Error opening input: Input/output error" in summarise_ffmpeg_error(self.REAL)
+
+    def test_progress_lines_are_not_the_error(self):
+        """A session's worth of `size=` lines must not push the reason out."""
+        lines = ["Device or resource busy"] + [f"size=     {n}kB time=00:00:0{n%10}" for n in range(50)]
+        assert summarise_ffmpeg_error(lines) == "Device or resource busy"
+
+    def test_a_fault_reported_three_times_reads_as_one(self):
+        repeated = ["Device or resource busy"] * 3
+        assert summarise_ffmpeg_error(repeated) == "Device or resource busy"
+
+    def test_nothing_meaningful_yields_an_empty_summary(self):
+        assert summarise_ffmpeg_error([]) == ""
+        assert summarise_ffmpeg_error(["", "   ", "ffmpeg version 8.1"]) == ""
+
+    def test_the_summary_is_bounded(self):
+        assert len(summarise_ffmpeg_error(["x" * 5000])) <= 300
+
+
+class TestSignalOpenFailure:
+    """Every path that ends the capture loop without data reports the same way.
+
+    Previously each branch invented its own: the Windows one had a message with
+    the exit code, the Unix EOF branch — the one that actually fires, because
+    select() reports a closed pipe as readable — set nothing at all, and the
+    caller fell through to a generic backstop.
+    """
+
+    class _Exited:
+        """An ffmpeg that has already gone; poll() answering is the whole point."""
+
+        def __init__(self, returncode):
+            self.returncode = returncode
+
+        def poll(self):
+            return self.returncode
+
+        def wait(self, timeout=None):
+            return self.returncode
+
+    def _cap(self, returncode=1, stderr_lines=()):
+        cap = FFmpegAudioCapture(ts_enabled=False, device_name="mic")
+        cap.process = self._Exited(returncode)
+        cap._stderr_tail.extend(stderr_lines)
+        return cap
+
+    def test_the_exit_code_and_reason_reach_the_error(self):
+        cap = self._cap(returncode=251, stderr_lines=["Error opening input: Input/output error"])
+        cap._signal_open_failure(251)
+        assert cap._open_event.is_set()
+        assert "exit code 251" in str(cap._open_error)
+        assert "Input/output error" in str(cap._open_error)
+
+    def test_no_stderr_still_gives_an_actionable_sentence(self):
+        cap = self._cap(returncode=1)
+        cap._signal_open_failure(1)
+        assert "may be in use by another application" in str(cap._open_error)
+
+    def test_the_exit_code_is_derived_when_the_caller_has_none(self):
+        cap = self._cap(returncode=99)
+        cap._signal_open_failure(None)
+        assert "exit code 99" in str(cap._open_error)
+
+    def test_it_is_a_no_op_once_the_device_has_proven_itself(self):
+        """After the first chunk of real audio this is a mid-session ffmpeg
+        death, which the restart path owns — not an open failure."""
+        cap = self._cap()
+        cap._open_event.set()  # first data already arrived
+        cap._signal_open_failure(1)
+        assert cap._open_error is None
+
+    def test_the_first_cause_is_kept(self):
+        cap = self._cap(returncode=251, stderr_lines=["Error opening input: Input/output error"])
+        cap._signal_open_failure(251)
+        first = cap._open_error
+        cap._signal_open_failure(2)
+        assert cap._open_error is first
+
+    def test_a_thread_that_died_with_no_process_uses_the_fallback(self):
+        cap = FFmpegAudioCapture(ts_enabled=False, device_name="mic")
+        cap.process = None
+        cap._signal_open_failure(None, fallback="capture thread exited before producing data")
+        assert "capture thread exited before producing data" in str(cap._open_error)
+
+
+@pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="ffmpeg not installed")
+class TestOpenFailureReachesTheCaller:
+    """End to end against a real ffmpeg, because the unit tests above could not
+    have caught what was wrong here.
+
+    The capture loop had three places that reported an open failure and a
+    backstop. On Unix none of the three fired: select() reports a closed pipe as
+    *readable*, so a device that fails to open reaches the EOF branch — which
+    reported nothing — long before any select timeout. The failure still
+    surfaced, via the backstop, but stripped of the exit code and of ffmpeg's own
+    account of what went wrong. Only running a real ffmpeg shows that.
+    """
+
+    def _capture(self, device, tmp_path):
+        cap = FFmpegAudioCapture(device_name=device, backup_dir=str(tmp_path),
+                                 ts_enabled=False, open_timeout=10.0)
+        cap.data_queue = queue.Queue()
+        return cap
+
+    def test_a_device_that_cannot_be_opened_raises_out_of_start(self, tmp_path):
+        cap = self._capture("/nonexistent/device.wav", tmp_path)
+        try:
+            with pytest.raises(RuntimeError, match="Failed to open audio device"):
+                cap.start()
+            assert cap.running is False, "a failed open must not leave running=True"
+        finally:
+            cap.stop()
+
+    def test_the_failure_carries_the_exit_code_and_ffmpegs_reason(self, tmp_path):
+        cap = self._capture("/nonexistent/device.wav", tmp_path)
+        try:
+            with pytest.raises(RuntimeError) as excinfo:
+                cap.start()
+        finally:
+            cap.stop()
+        message = str(excinfo.value)
+        assert "exit code" in message, message
+        assert "Error opening input" in message, message
+        assert "ffmpeg version" not in message, "the build banner is not a diagnosis"
+
+    def test_a_source_that_opens_does_not_raise(self, tmp_path):
+        """The other half: a working device must not be penalised, and must not
+        wait out the open timeout either."""
+        wav = tmp_path / "tone.wav"
+        subprocess.run(
+            ["ffmpeg", "-y", "-f", "lavfi", "-i", "sine=frequency=440:duration=3",
+             "-ar", "16000", "-ac", "1", str(wav)],
+            capture_output=True, check=True)
+        cap = self._capture(str(wav), tmp_path)
+        started = time.monotonic()
+        try:
+            cap.start()
+            assert time.monotonic() - started < cap.open_timeout
+            assert cap.running is True
+        finally:
+            cap.stop()

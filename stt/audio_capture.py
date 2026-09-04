@@ -3,6 +3,8 @@ Audio capture module using ffmpeg backend only.
 PyAudio/ALSA dependencies have been removed - ffmpeg handles everything.
 """
 
+import collections
+import re
 import subprocess
 import threading
 import time
@@ -78,6 +80,79 @@ def parse_asound_cards(content, deprioritize_markers=None):
     return devices
 
 
+#: Lines ffmpeg always prints at startup. Skipped when quoting stderr back to
+#: the operator: the reason a device would not open is the last thing said, and
+#: the build banner is 2 KB of noise in front of it.
+#: ("--" catches the configure flags that continue the "configuration:" line;
+#: "lib" the per-library version lines.)
+_FFMPEG_BANNER_PREFIXES = (
+    "ffmpeg version", "built with", "configuration:", "--", "lib",
+)
+
+
+def is_ffmpeg_noise(line):
+    """True for a startup line that says nothing about why a device failed.
+
+    ffmpeg opens with ~2 KB of build banner and then repeats a `size=... time=...`
+    progress line for the rest of the session. Neither belongs in an operator's
+    error message; the reason a device would not open is the last real thing said
+    before it exited.
+    """
+    stripped = line.strip()
+    if not stripped:
+        return True
+    return stripped.startswith(_FFMPEG_BANNER_PREFIXES) or stripped.startswith("size=")
+
+
+#: ffmpeg tags most lines with the component and a heap address, e.g.
+#: "[in#0 @ 0x8b6c10000] Error opening input: ...". The address changes every run
+#: and means nothing to a reader, so it is stripped before the line is shown.
+_FFMPEG_TAG = re.compile(r"^\[[^\]]*@\s*0x[0-9a-f]+\]\s*", re.IGNORECASE)
+
+
+def strip_ffmpeg_tag(line):
+    """Drop ffmpeg's "[component @ 0xADDR] " prefix from one line."""
+    return _FFMPEG_TAG.sub("", line.strip())
+
+
+def summarise_ffmpeg_error(lines, max_lines=3, max_chars=300):
+    """The last few meaningful lines ffmpeg wrote, as one sentence.
+
+    ffmpeg says exactly why a device would not open — "Error opening input:
+    Input/output error", "Device or resource busy" — and that text was going
+    only to the log as [DEBUG-TS-STDERR], never to the operator, who got a
+    generic "no data" instead. Pure so the filtering is testable without a
+    subprocess.
+
+    Repeats are collapsed: ffmpeg routinely reports one fault two or three times
+    as it unwinds, and three copies of the same sentence reads like three faults.
+    """
+    seen = set()
+    meaningful = []
+    for line in lines:
+        if is_ffmpeg_noise(line):
+            continue
+        text = strip_ffmpeg_tag(line)
+        if text and text not in seen:
+            seen.add(text)
+            meaningful.append(text)
+    return "; ".join(meaningful[-max_lines:])[:max_chars]
+
+
+def _open_failure_message(returncode, detail):
+    """One sentence for a device that never produced audio.
+
+    The device name is deliberately absent: the only caller wraps this in
+    "Failed to open audio device <name>: ...", and naming it twice made the
+    message read like two stacked errors.
+    """
+    text = "ffmpeg exited before producing any audio"
+    if returncode is not None:
+        text += f" (exit code {returncode})"
+    return f"{text}: {detail}" if detail else (
+        f"{text}; the device may not exist, or may be in use by another application")
+
+
 class FFmpegAudioCapture:
     """Audio capture using ffmpeg - reliable cross-platform audio backend"""
 
@@ -102,6 +177,12 @@ class FFmpegAudioCapture:
         # inside the background thread with no way back to the caller.
         self._open_event = threading.Event()
         self._open_error = None
+        # Last lines ffmpeg wrote to stderr, kept by the logging thread below so
+        # an open failure can quote the reason rather than only "no data". Bounded
+        # because a session's worth of progress lines must not accumulate; a deque
+        # is used for the same reason it is thread-safe here — append and iteration
+        # from two threads without a lock.
+        self._stderr_tail: collections.deque = collections.deque(maxlen=40)
         # Wall-clock (time.monotonic()) of the last chunk pulled from ffmpeg's
         # stdout; None until the first chunk arrives. Lets a caller tell "silent
         # but still recording" (muted/unplugged mic) from "recording normally"
@@ -337,12 +418,17 @@ class FFmpegAudioCapture:
             print(f"[DEBUG-TS-START] FFmpeg started, PID: {self.process.pid}", flush=True)
             print(f"[DEBUG-TS-START] Backup file target: {self.backup_file}", flush=True)
 
-            # Start thread to capture stderr for debugging
+            # Start thread to capture stderr for debugging. It also keeps the last
+            # few lines, because ffmpeg states the reason a device would not open
+            # ("Error opening input: Input/output error", "Device or resource
+            # busy") and that text used to reach the log only — an operator whose
+            # device failed got a generic "no data" and no way to tell why.
             def log_stderr():
                 try:
                     for line in self.process.stderr:
-                        decoded = line.decode().strip()
+                        decoded = line.decode(errors="replace").strip()
                         if decoded:
+                            self._stderr_tail.append(decoded)
                             print(f"[DEBUG-TS-STDERR] {decoded}", flush=True)
                 except Exception as e:
                     print(f"[DEBUG-TS-STDERR] Error reading stderr: {e}", flush=True)
@@ -457,11 +543,7 @@ class FFmpegAudioCapture:
                     if not has_data and pipe_eof.is_set() and pipe_queue.empty():
                         rc = self.process.poll()
                         print(f"[DEBUG-TS-DIED] FFmpeg pipe closed, exit code: {rc}", flush=True)
-                        if not self._open_event.is_set():
-                            self._open_error = RuntimeError(
-                                f"ffmpeg exited before producing audio (exit code {rc}); "
-                                f"device may not exist or be in use")
-                            self._open_event.set()
+                        self._signal_open_failure(rc)
                         break
                 else:
                     # Unix: use select to wait for data with timeout
@@ -483,11 +565,7 @@ class FFmpegAudioCapture:
                             print(f"[DEBUG-TS-DIED] Backup file size at death: {os.path.getsize(self.backup_file)} bytes", flush=True)
                         else:
                             print(f"[DEBUG-TS-DIED] WARNING: Backup file does not exist: {self.backup_file}", flush=True)
-                        if not self._open_event.is_set():
-                            self._open_error = RuntimeError(
-                                f"ffmpeg exited before producing audio (exit code {self.process.returncode}); "
-                                f"device may not exist or be in use")
-                            self._open_event.set()
+                        self._signal_open_failure(self.process.returncode)
                         break
                     if timeout_count >= 5:  # 10 seconds of no data
                         print(f"[DEBUG-TS-RESTART] Restarting FFmpeg after {timeout_count * 2}s timeout", flush=True)
@@ -504,12 +582,18 @@ class FFmpegAudioCapture:
                         if not data:
                             print("[FFMPEG] No more audio data (EOF)", flush=True)
                             self._signal_eof_if_file()
+                            self._signal_open_failure(self.process.poll())
                             break
                     else:
                         data = os.read(self.process.stdout.fileno(), bytes_per_chunk)
                         if not data:
+                            # This — not the poll() branch above — is where a
+                            # device that failed to open actually lands on Unix:
+                            # select() reports a closed pipe as *readable*, so the
+                            # read returns b'' long before any select timeout.
                             print("[FFMPEG] No more audio data (EOF)", flush=True)
                             self._signal_eof_if_file()
+                            self._signal_open_failure(self.process.poll())
                             break
                     if not self._open_event.is_set():
                         self._open_event.set()  # first real data => device opened successfully
@@ -580,10 +664,9 @@ class FFmpegAudioCapture:
             # Backstop: whatever else happened, start() must not block its full
             # timeout on a thread that has already ended without ever reporting
             # in (e.g. an exception before the first Popen attempt).
-            if not self._open_event.is_set():
-                self._open_error = self._open_error or RuntimeError(
-                    "audio capture thread exited before producing data")
-                self._open_event.set()
+            # Backstop: whatever else happened, start() must not block its full
+            # timeout on a thread that ended without ever reporting in.
+            self._signal_open_failure(None, fallback="audio capture thread exited before producing data")
 
     def start(self, callback: Optional[Callable] = None):
         """Start capturing audio
@@ -599,6 +682,7 @@ class FFmpegAudioCapture:
         self.playback_finished.clear()
         self._open_event.clear()
         self._open_error = None
+        self._stderr_tail.clear()
         self.last_data_at = None
         self.is_stalled = False
 
@@ -629,6 +713,43 @@ class FFmpegAudioCapture:
         # Log the backup file location
         if self.backup_file:
             print(f"[AUDIO BACKUP] Recording to: {self.backup_file}")
+
+    def _signal_open_failure(self, returncode, fallback=None):
+        """Record that the device never produced audio, and release start().
+
+        No-op once the open has been decided: after the first chunk of real audio
+        this is a mid-session ffmpeg death (handled by the restart path), not an
+        open failure, and after an earlier failure the first cause is the useful
+        one.
+
+        Called from every path that ends the capture loop without data, so the
+        message an operator sees is the same wherever the failure was noticed —
+        it used to depend on which branch happened to catch it, and the branch
+        that catches it on Unix set nothing at all.
+        """
+        if self._open_event.is_set():
+            return
+        process = self.process
+        # ffmpeg can close stdout a moment before it exits; waiting briefly gets a
+        # real exit code, and gives the stderr thread time to see ffmpeg's last
+        # word. Bounded, and only ever reached on this path.
+        try:
+            if process is not None and process.poll() is None:
+                process.wait(timeout=0.5)
+        except Exception:
+            pass
+        try:
+            rc = process.poll() if process is not None else returncode
+        except Exception:
+            rc = returncode
+        if rc is None:
+            rc = returncode
+        detail = summarise_ffmpeg_error(list(self._stderr_tail))
+        if detail or rc is not None or not fallback:
+            self._open_error = RuntimeError(_open_failure_message(rc, detail))
+        else:
+            self._open_error = self._open_error or RuntimeError(fallback)
+        self._open_event.set()
 
     def _wait_for_open_or_raise(self):
         """Block until the capture thread reports open success/failure, or give up.
@@ -866,7 +987,22 @@ class FFmpegAudioCapture:
 
     @staticmethod
     def resolve_device_by_name(saved_name, devices=None):
-        """Find the device whose card_id/display_name contains saved_name (case-insensitive)."""
+        """Find the device matching saved_name (case-insensitive).
+
+        Two passes, and the order is the point. An exact match wins outright,
+        because substring matching cannot tell apart two devices that share a
+        prefix — and Windows hands out names like that routinely:
+
+            "Microphone (USB Audio Device)"
+            "Microphone (USB Audio Device) #2"
+
+        Searching by substring alone, the saved "#2" matches the shorter name
+        (its own name contains the other's), and the saved shorter name matches
+        "#2" (it is a substring of it) — so whichever the operator picked, the
+        answer depended on enumeration order and was wrong half the time. The
+        substring pass is kept as a fallback because an ALSA card_id genuinely is
+        a fragment of the fuller description it is saved from.
+        """
         if not saved_name:
             return None
         if devices is None:
@@ -874,14 +1010,27 @@ class FFmpegAudioCapture:
         needle = saved_name.strip().lower()
         if not needle:
             return None
+
+        def fields(dev):
+            # alt_name is dshow's own disambiguator ("@device_cm_{GUID}\wave_{GUID}"),
+            # which is what tells two identically-named mics apart when even the
+            # display names are equal. Only exact matching is meaningful for it.
+            return (
+                (dev.get('card_id') or '').lower(),
+                (dev.get('display_name') or '').lower(),
+                (dev.get('alt_name') or '').lower(),
+            )
+
         for dev in devices:
-            card_id = (dev.get('card_id') or '').lower()
-            disp = (dev.get('display_name') or '').lower()
-            # card_id in needle only means something when card_id is non-empty —
-            # otherwise it's '' in needle, which is true of every string and would
-            # match the first device in the list unconditionally. Windows (and
-            # macOS) enumeration leaves card_id unset, so this used to make every
-            # saved device name resolve to devices[0].
+            if needle in (f for f in fields(dev) if f):
+                return dev
+
+        for dev in devices:
+            card_id, disp, _alt = fields(dev)
+            # `card_id in needle` only means something when card_id is non-empty —
+            # otherwise it's `'' in needle`, true of every string, which made every
+            # saved device name resolve to devices[0] on the platforms that leave
+            # card_id unset (Windows, until it was populated; macOS still).
             if needle in card_id or needle in disp or (card_id and card_id in needle):
                 return dev
         return None
