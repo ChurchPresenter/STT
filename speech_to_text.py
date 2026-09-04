@@ -77,6 +77,9 @@ from stt import paths as _paths
 from stt.paths import safe_model_path  # noqa: F401
 from stt.coercion import coerce_bool, coerce_float, coerce_int
 from stt import pair_tokens as _pair_tokens_mod
+# How a dying worker process reports itself, and why excepthooks are chained
+# rather than replaced.
+from stt import worker_crash as _worker_crash
 from stt.http_params import merge_request_params, parse_json_body as _parse_json_body
 from stt.model_disk import dir_has_weights, dir_is_writable, has_weight_file, is_weight_file, model_presence  # noqa: F401
 
@@ -609,7 +612,14 @@ def _init_sentry():
     """Sentry error reporting, logs, tracing, and profiling — on by default,
     disabled via crash_reporting.sentry_enabled = false. Runs in the web
     process and again in the transcription worker (which re-imports this
-    module), so both report. Never blocks boot.
+    module). Never blocks boot.
+
+    The worker needs one extra thing to actually report: sentry_sdk hooks
+    uncaught exceptions through sys.excepthook, and multiprocessing never calls
+    it in a child. _report_worker_crash captures and flushes by hand, and
+    install_crash_diagnostics chains sys.excepthook rather than replacing it so
+    this init is not silently undone. Both fixed together — see
+    stt/worker_crash.py.
 
     Deliberately configured to carry no user content: no request bodies, no
     frame locals, no PII (IP addresses/headers). Scrubbing, and the dropping of
@@ -20093,7 +20103,10 @@ def install_crash_diagnostics(role="main"):
         except Exception:
             pass
 
-    sys.excepthook = _excepthook
+    # Chained, not replaced: sentry_sdk.init reports uncaught exceptions through
+    # sys.excepthook, so assigning over it here used to switch Sentry reporting
+    # off in every process that called this. See stt/worker_crash.py.
+    sys.excepthook = _worker_crash.chain_excepthook(_excepthook, sys.excepthook)
 
     try:
         def _thread_hook(args):
@@ -20105,7 +20118,8 @@ def install_crash_diagnostics(role="main"):
                 sys.stderr.flush()
             except Exception:
                 pass
-        threading.excepthook = _thread_hook
+        threading.excepthook = _worker_crash.chain_excepthook(
+            _thread_hook, threading.excepthook)
     except Exception:
         pass
 
@@ -20343,17 +20357,53 @@ def _kill_stray_ffmpeg(source, pid=None):
         print(f"[STOP] kill fallback failed: {e}")
 
 
+def _report_worker_crash(exc, role="worker"):
+    """Announce a fatal worker exception to the log, to Sentry and to the UI.
+
+    Nothing else will. The worker is a multiprocessing.Process, and CPython's
+    BaseProcess._bootstrap catches whatever escapes run() with a bare except and
+    prints it to stderr -- it never calls sys.excepthook, which is how sentry_sdk
+    reports uncaught exceptions. So worker crashes reached no dashboard, and left
+    transcription_state exactly as /api/transcription/start wrote it, meaning the
+    page reported STARTING for ever.
+
+    The flush is the point of doing this by hand: the process is about to exit and
+    Sentry's background transport would otherwise be torn down with the event
+    still sitting in its queue.
+
+    Ordering, guards and the "a stop is not a crash" rule live in
+    stt/worker_crash.py, with tests.
+    """
+    def _set_state(message):
+        with _transcription_state_lock:
+            transcription_state["running"] = False
+            transcription_state["status"] = "error"
+            transcription_state["error"] = message
+            transcription_state["message"] = "Transcription stopped unexpectedly"
+
+    capture = None
+    flush = None
+    try:
+        import sentry_sdk
+
+        capture = sentry_sdk.capture_exception
+
+        def flush():
+            # Bounded: a wedged network must not hold the dying worker open.
+            sentry_sdk.flush(timeout=5)
+    except ImportError:
+        pass  # reporting switched off, or the SDK was never installed
+
+    def _log(line):
+        print(line, flush=True)
+
+    return _worker_crash.report_worker_crash(
+        exc, role=role, capture=capture, flush=flush,
+        set_state=_set_state, log=_log)
+
+
 def thread1_function(ts, cq, cfq, cal_state, cal_data, cal_step1, asq):
     """Main transcription process with start/stop support"""
-    # numpy and SpeechRecognition are imported defensively at module scope so the
-    # demo build can omit them. Everything below needs both, so say so here rather
-    # than failing with a NameError somewhere inside the audio loop.
-    _missing = [name for name, mod in (("numpy", np), ("SpeechRecognition", sr)) if mod is None]
-    if _missing:
-        raise RuntimeError(
-            f"Transcription requires {' and '.join(_missing)}, which is not installed. "
-            "Reinstall the dependencies with install.sh (or 'uv pip install -r requirements.txt')."
-        )
     install_crash_diagnostics("worker")
     try:
         import sentry_sdk
@@ -20364,6 +20414,12 @@ def thread1_function(ts, cq, cfq, cal_state, cal_data, cal_step1, asq):
     # child re-imports this module and cannot recreate them. Assign to module globals so
     # all existing code in this function works unchanged. On Linux (fork), the globals are
     # already set via fork, and these reassignments are a no-op.
+    #
+    # Done before anything that can fail: the spawned child re-imported this module
+    # and so owns a *private* transcription_state until these run. A crash reported
+    # before this point would write its error into that private copy, where no web
+    # request can ever read it -- which is how a missing dependency used to leave the
+    # UI on STARTING for ever.
     global transcription_state, control_queue, config_queue, audio_stream_queue
     global calibration_state, calibration_data_shared, calibration_step1_data
     transcription_state = ts
@@ -20373,6 +20429,16 @@ def thread1_function(ts, cq, cfq, cal_state, cal_data, cal_step1, asq):
     calibration_data_shared = cal_data
     calibration_step1_data = cal_step1
     audio_stream_queue = asq
+
+    # numpy and SpeechRecognition are imported defensively at module scope so the
+    # demo build can omit them. Everything below needs both, so say so here rather
+    # than failing with a NameError somewhere inside the audio loop. Reported rather
+    # than raised: multiprocessing would swallow the raise into stderr, and this is
+    # the one failure with a genuinely actionable fix.
+    _missing = [name for name, mod in (("numpy", np), ("SpeechRecognition", sr)) if mod is None]
+    if _missing:
+        _report_worker_crash(RuntimeError(_worker_crash.missing_dependency_message(_missing)))
+        return
 
     # Make every file/dir this subprocess creates readable by all users (a+r files,
     # a+rx dirs): the session DB, its WAL/SHM sidecars, SRT/HTML exports, audio
@@ -22767,6 +22833,11 @@ def thread1_function(ts, cq, cfq, cal_state, cal_data, cal_step1, asq):
     except KeyboardInterrupt:
         print("Thread 1 received KeyboardInterrupt")
         os._exit(0)
+    except Exception as _fatal:
+        # Every other way this process can die. Without this the exception went to
+        # multiprocessing's bare except, which reports it to nobody: see
+        # _report_worker_crash above.
+        _report_worker_crash(_fatal)
 
 
 # How long the startup sweep waits before its one retry. Longer than the
