@@ -76,6 +76,7 @@ The server is mostly a monolith — most changes land in `speech_to_text.py`.
 | `stt/file_mover.py` | SMB/NAS remote file delivery |
 | `templates/` | Jinja2 pages: index, live-settings, model-manager, server-settings, translation, corrections, file-manager, word-highlighting, url-builder |
 | `static/` | Vendored JS/CSS — no build step, no npm |
+| `stt/model_files.py` | Download manifests, file verification, per-family "is this model loadable" |
 | `stt/demo_*.py` | The shippable demo: playback engine, fake backends, egress guards, redaction, synthetic service generator |
 | `scripts/` | Dev-only tools: fixture recorder, demo session builder |
 | `tests/` | Pytest suite: download state, path safety, staging, text utils, watchdog update |
@@ -93,6 +94,22 @@ The server is mostly a monolith — most changes land in `speech_to_text.py`.
 - **Tests**: no fixed-time sleeps (wait on events/poll with deadline), deterministic, `tmp_path` for filesystem/sqlite, assert behavior rather than incidental values. Coverage target is 85% per logic module; the `stt/` package total deliberately includes untested IO-heavy code and understates the logic layer — don't add coverage omits.
 - **Service recordings never enter the repository.** A caption is verbatim congregation speech, often naming people present. Code is public — `stt/translation_replay.py` and its tests are in the repo and run everywhere. The material is not: session databases (`tests/fixtures/sessions/`), replay runs (`*.replay.json`), and the caption fixture (`tests/fixtures/real_captions.json`) are gitignored, and the cases needing them `pytest.skip` when absent so CI stays green. When a rule was found by a real caption, put a **constructed** caption of the same shape in the test and describe the real one in prose — the shape is what the test needs, and prose cannot be grepped back to a person.
 - **Captions never leave the machine in a support report.** The operator-facing diagnostic report (`/api/diagnostics/report`, built by `stt/diagnostics.py`) is **allowlist-only** in both directions: `LOG_TAGS` names the log tags it may quote and `CONFIG_FIELDS` the settings it may show. `logs/stt.log` is the worker's raw stdout and many tags print verbatim congregation speech, so **a new `print("[TAG] ...")` is invisible to the report until someone adds its tag deliberately** — that is the intended failure mode, the same deny-by-default rule as `stt/demo_guard.py`. Never convert either list to a denylist. The report is never uploaded; it downloads for the operator to read and share themselves.
+- **A download is staged, verified, and repairable.** Every transfer goes through
+  `stt/downloads.py:download_url_to_file`, which writes `<name>.part` and only `os.replace()`s
+  it into position once it matches the size (and, for LFS weights, the sha256) the Hub
+  reported. Writing straight to the final name is what made an interrupted download
+  indistinguishable from a complete one — it listed as downloaded, a re-download skipped it as
+  "already exists", and the loader either threw in a native reader or hung fetching what was
+  missing. So: **"already exists" must mean "exists and verifies"** (`stt/model_files.py`
+  `files_needing_download`), and a completed download writes a `.stt-download.json` manifest
+  that is what later tells a truncated file from a whole one. A *missing* manifest never means
+  "not downloaded" — every install predating it has none.
+- **A loader checks its files before it opens them.** `faster_whisper_status` requires
+  `tokenizer.json`, not just a weight file: without it faster-whisper falls back to
+  `tokenizers.Tokenizer.from_pretrained(...)`, a Rust builtin with its own HTTP client that
+  honours neither `HF_HUB_OFFLINE` nor any timeout, so a stalled connection blocks for ever.
+  `local_files_only=True` does not help — faster-whisper only forwards it to `download_model()`,
+  which a local directory skips. Refusing to call the loader is the only fix.
 - **Worker failures must report themselves.** The transcription worker is a `multiprocessing.Process`, and `BaseProcess._bootstrap` swallows its exceptions to stderr without ever calling `sys.excepthook` — so Sentry does not see them. Anything that can kill the worker belongs inside the `except Exception` in `thread1_function`, which routes through `_report_worker_crash` / `stt/worker_crash.py`. Never assign to `sys.excepthook` or `threading.excepthook` directly either; chain, or Sentry's hook is silently displaced.
 - **Commits**: conventional-commit style with a scope, e.g. `fix(translation): …`, `feat(server): …`. **No AI attribution at all** — no `Co-authored-by` line in the message, and no `git notes` attribution either. Commits carry the work, not who typed it.
 - **UI work**: follow the design tokens in `DESIGN.md` (colors, typography, spacing, component styles).

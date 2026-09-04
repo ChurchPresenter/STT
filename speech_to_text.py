@@ -84,6 +84,7 @@ from stt import worker_crash as _worker_crash
 from stt import diagnostics as _diagnostics
 from stt.http_params import merge_request_params, parse_json_body as _parse_json_body
 from stt.model_disk import dir_has_weights, dir_is_writable, has_weight_file, is_weight_file, model_presence  # noqa: F401
+from stt import model_files as _model_files
 
 
 def safe_managed_path(path, base_dir=None):
@@ -1266,6 +1267,23 @@ def load_translation_model(use_gpu=True, model_id=None, use_fp16=False, use_ct2=
     if os.path.exists(local_model_path):
         model_path = local_model_path
         print(f"[INFO] Loading translation model from local: {model_path}")
+        # Refuse a directory whose files no longer match what was downloaded.
+        # An interrupted transfer used to leave a truncated pytorch_model.bin
+        # under its real name; the failure surfaced minutes or days later as
+        # "PytorchStreamReader failed reading zip archive: failed finding central
+        # directory" from torch.load, on whichever thread happened to touch
+        # translation next — a message with nothing in it about downloads.
+        # Reported from the settings-save thread in the wild, which is why the
+        # check belongs here rather than in any start-up precondition.
+        _incomplete = _model_files.manifest_mismatches(model_path)
+        if _incomplete:
+            raise RuntimeError(
+                f"The translation model '{model_id}' is incomplete on disk — "
+                f"{_model_files.describe_missing(_incomplete)} "
+                f"{'are' if len(_incomplete) > 1 else 'is'} missing or truncated. "
+                f"Download it again in the Model Manager (Settings -> Model Manager); "
+                f"the download now repairs what is already there."
+            )
     else:
         model_path = model_id
         print(f"[INFO] Loading translation model from HuggingFace: {model_path}")
@@ -2783,14 +2801,32 @@ class ModelFactory:
         models_dir = MODELS_DIR
         local_model_path = os.path.join(models_dir, f"faster-whisper-{model_name}")
 
-        if os.path.exists(local_model_path):
-            model_path = local_model_path
-            print(f"Using faster-whisper model from: {local_model_path}")
-        else:
+        # Directory existence is not enough. A partial download (or a partial
+        # delete) leaves a directory that passes os.path.exists and then fails
+        # deep inside the loader — or worse, does not fail at all: with
+        # tokenizer.json absent, faster-whisper falls back to
+        # tokenizers.Tokenizer.from_pretrained("openai/whisper-tiny"), a Rust
+        # builtin with its own HTTP client that honours neither HF_HUB_OFFLINE nor
+        # any timeout we can pass. On a connection that stalls rather than
+        # refusing, that blocks for ever, and because the worker only reports
+        # "running" once the load returns, the UI sits on STARTING with no error.
+        # (local_files_only=True does not help: faster-whisper only forwards it to
+        # download_model(), which is skipped entirely for a local directory.)
+        status = _model_files.faster_whisper_status(local_model_path)
+        if status.state == "absent":
             raise FileNotFoundError(
                 f"Faster-whisper model '{model_name}' is not downloaded. "
                 f"Please download it first from the Model Manager (Settings → Model Manager)."
             )
+        if not status.complete:
+            raise FileNotFoundError(
+                f"Faster-whisper model '{model_name}' is incomplete — "
+                f"{_model_files.describe_missing(status.missing)} "
+                f"{'are' if len(status.missing) > 1 else 'is'} missing or truncated. "
+                f"Open the Model Manager and press Repair on this model."
+            )
+        model_path = local_model_path
+        print(f"Using faster-whisper model from: {local_model_path}")
 
         print(f"Device: {device}, Compute type: {compute_type}")
 
@@ -7775,7 +7811,12 @@ def _selected_model_downloaded(cfg):
             return False  # nothing selected yet — a fresh install ships no model
         backend = model_cfg.get("backend", "whisper")
         if backend == "faster-whisper":
-            return os.path.isdir(os.path.join(MODELS_DIR, f"faster-whisper-{name}"))
+            # The same predicate the list endpoint and the loader use. A bare
+            # isdir() here let the Start checklist pass for a directory the
+            # dropdown would not even offer, and that the worker would then hang
+            # trying to load.
+            return _model_files.faster_whisper_status(
+                os.path.join(MODELS_DIR, f"faster-whisper-{name}")).complete
         # OpenAI whisper: new ./models location or legacy ~/.cache/whisper/{name}.pt
         if os.path.isdir(os.path.join(MODELS_DIR, f"whisper-{name}")):
             return True
@@ -9809,12 +9850,18 @@ def download_tts_model():
             start_download_monitor(download_key, model_dir, total=total_size)
 
             print(f"[TTS] Downloading piper model: {model_name}")
-            for url, filename in ((onnx_url, f"{model_name}.onnx"),
-                                  (json_url, f"{model_name}.onnx.json")):
+            # total_size is the onnx weights' Content-Length, already fetched
+            # above for the progress bar. Passing it here is what stops a dropped
+            # TLS connection — seen in the wild twice — from leaving a truncated
+            # .onnx behind: this path's error branch does no cleanup, only its
+            # cancel branch does.
+            for url, filename, want_size in ((onnx_url, f"{model_name}.onnx", total_size),
+                                             (json_url, f"{model_name}.onnx.json", None)):
                 print(f"[TTS]   {url}")
                 outcome = download_url_to_file(
                     url, os.path.join(model_dir, filename),
                     cancel_check=lambda: download_key in cancelled_downloads,
+                    expected_size=want_size,
                 )
                 if outcome == "cancelled":
                     print(f"[TTS] Download cancelled: {model_name}")
@@ -14107,13 +14154,56 @@ save_download_progress()
 cleanup_stale_downloads()
 
 
+def hf_file_expectations(repo_id, log=print):
+    """What each file in ``repo_id`` should weigh, keyed by filename.
+
+    The Hub reports a size for every file and a sha256 for the LFS ones. The app
+    already fetched exactly this for the progress bar's denominator and then threw
+    it away — which is why an interrupted transfer could not be told from a
+    finished one. Here it becomes the thing that decides whether a file is done.
+
+    Best-effort by design: a Hub that will not answer must not block a download
+    that would otherwise work. Returning ``{}`` degrades to the old behaviour
+    (any non-empty file counts) rather than failing.
+    """
+    try:
+        from huggingface_hub import HfApi
+
+        info = call_with_retry(
+            lambda: HfApi().model_info(repo_id, files_metadata=True),
+            description=f"File sizes for {repo_id}", log=log,
+        )
+    except Exception as e:
+        log(f"[DOWNLOAD] No file sizes available for {repo_id} ({e}); "
+            f"falling back to presence checks")
+        return {}
+
+    expectations = {}
+    for sibling in getattr(info, "siblings", None) or []:
+        name = getattr(sibling, "rfilename", None)
+        if not name:
+            continue
+        lfs = getattr(sibling, "lfs", None)
+        expectations[name] = _model_files.FileExpectation(
+            size=getattr(sibling, "size", None),
+            sha256=getattr(lfs, "sha256", None) if lfs else None,
+        )
+    return expectations
+
+
 def download_hf_repo_files(repo_id, local_dir, download_key, log=print, include=None):
-    """Download a HuggingFace repo's files with resume + cancellation.
+    """Download a HuggingFace repo's files with resume, verification and cancellation.
 
     ``include`` restricts the download to matching filenames (fnmatch patterns, or
     exact names). Needed for GGUF repos, which publish a dozen quantisations of the
     same model in one repo — downloading them all would pull 40+ GB to obtain the one
     file the user picked.
+
+    Every file is checked against the size the Hub reports for it, both before
+    (should we fetch this?) and after (did we get all of it?). The old rule was
+    ``os.path.getsize(dest) > 0``, which meant a truncated file counted as
+    "already exists" — so re-downloading could never repair one, and the only cure
+    was deleting the folder by hand.
 
     Returns "ok" or "cancelled"; raises on failure after retries."""
     from huggingface_hub import list_repo_files, hf_hub_url
@@ -14132,6 +14222,10 @@ def download_hf_repo_files(repo_id, local_dir, download_key, log=print, include=
         files = selected
     log(f"[DOWNLOAD] Found {len(files)} files to download for {repo_id}")
 
+    all_expectations = hf_file_expectations(repo_id, log=log)
+    expectations = {name: all_expectations.get(name, _model_files.FileExpectation(None, None))
+                    for name in files}
+
     for idx, filename in enumerate(files):
         if download_key in cancelled_downloads:
             return "cancelled"
@@ -14141,10 +14235,14 @@ def download_hf_repo_files(repo_id, local_dir, download_key, log=print, include=
             raise ValueError(f"Unsafe filename in repo {repo_id}: {filename}")
         os.makedirs(os.path.dirname(dest_path), exist_ok=True)
 
-        # Skip if already downloaded and has content
-        if os.path.exists(dest_path) and os.path.getsize(dest_path) > 0:
+        want = expectations[filename]
+        # "Already exists" now means "exists and is the right size", so a repeat
+        # download repairs a truncated file instead of skipping past it.
+        if _model_files.verify_file(dest_path, want.size):
             log(f"[DOWNLOAD] Already exists: {filename}")
             continue
+        if os.path.exists(dest_path):
+            log(f"[DOWNLOAD] Incomplete on disk, re-fetching: {filename}")
 
         log(f"[DOWNLOAD] Downloading file {idx + 1}/{len(files)}: {filename}")
 
@@ -14162,11 +14260,15 @@ def download_hf_repo_files(repo_id, local_dir, download_key, log=print, include=
             url, dest_path,
             cancel_check=lambda: download_key in cancelled_downloads,
             log=log,
+            expected_size=want.size,
+            expected_sha256=want.sha256,
         )
         if outcome == "cancelled":
             return "cancelled"
         log(f"[OK] Downloaded: {filename}")
 
+    # Written last, so the sidecar's presence is itself the claim "this finished".
+    _model_files.write_manifest(local_dir, repo_id, expectations)
     return "ok"
 
 # Start periodic cleanup thread
@@ -15514,8 +15616,14 @@ def list_faster_whisper_models():
 
         for model_name, details in available_models.items():
             model_path = os.path.join(models_dir, f"faster-whisper-{model_name}")
-            # Check directory exists AND contains model weight files
-            downloaded = dir_has_weights(model_path)
+            # Three states, not two. A directory that exists but is missing a
+            # required file used to be hidden here — while the loader still
+            # picked it up and hung on it, and the UI disabled Remove because it
+            # keyed off this same flag. So the operator saw a model they could
+            # not select, could not delete, and could not stop the worker from
+            # loading.
+            status = _model_files.faster_whisper_status(model_path)
+            downloaded = status.complete
 
             models_list.append({
                 "name": model_name,
@@ -15524,7 +15632,10 @@ def list_faster_whisper_models():
                 "params": details["params"],
                 "lang": details["lang"],
                 "downloaded": downloaded,
-                "path": model_path if downloaded else None,
+                "state": status.state,
+                "missing": status.missing,
+                "missing_text": _model_files.describe_missing(status.missing),
+                "path": model_path if status.state != "absent" else None,
             })
 
         # Reverse order to match Whisper models (smallest first)
@@ -15644,6 +15755,17 @@ def remove_faster_whisper_model():
                 "error": f"Model not found: faster-whisper-{model_name}",
             }), 404
 
+        # Deleting a directory the worker holds open fails on Windows with an
+        # opaque permissions error and a 500 — which is exactly the state someone
+        # is in when they are removing a model *because* the worker hung loading
+        # it. Say what to do instead of surfacing the errno.
+        if _ts_get("status") not in (None, "", "stopped", "error"):
+            return jsonify({
+                "success": False,
+                "error": ("Stop transcription before removing a model — the worker "
+                          "may still have its files open."),
+            }), 409
+
         import shutil
         shutil.rmtree(model_path)
         print(f"[OK] Removed faster-whisper model: {model_path}")
@@ -15728,13 +15850,14 @@ def list_models():
                     if item.startswith(".") or item in ("tts", "piper"):
                         continue
 
-                    # Only count directories that still hold a weight file: a
-                    # partial delete (or an interrupted download) leaves the
-                    # directory with just config/tokenizer files, and listing
-                    # that as downloaded is exactly what mismatched nllb-status
-                    # / faster-whisper/list (which both require a weight file).
-                    if not dir_has_weights(os.path.join(models_dir, item)):
-                        continue
+                    # A directory with no weight file is a partial delete or an
+                    # interrupted download. It used to be skipped outright — but
+                    # hiding a folder that still occupies disk, and that the
+                    # loader still picks up, is the worst of both: it could not be
+                    # removed from here either. List it as incomplete instead, so
+                    # Remove has something to act on.
+                    _item_path = os.path.join(models_dir, item)
+                    _item_state = "complete" if dir_has_weights(_item_path) else "incomplete"
 
                     # Detect if it's a HuggingFace model (contains --)
                     if "--" in item:
@@ -15744,8 +15867,9 @@ def list_models():
                             {
                                 "name": model_id,
                                 "type": "huggingface",
-                                "path": os.path.join(models_dir, item),
+                                "path": _item_path,
                                 "directory": item,
+                                "state": _item_state,
                             }
                         )
                     else:
@@ -15754,8 +15878,9 @@ def list_models():
                             {
                                 "name": item,
                                 "type": "local",
-                                "path": os.path.join(models_dir, item),
+                                "path": _item_path,
                                 "directory": item,
+                                "state": _item_state,
                             }
                         )
 
@@ -16343,15 +16468,29 @@ def download_translation_model():
                                             log=dl_logger.warning)
                     dl_logger.info(f"Found {len(files)} files to download: {files}")
 
+                    # What the Hub says each file should weigh. A dropped
+                    # connection here used to leave a truncated pytorch_model.bin
+                    # under its real name, which loaded much later as
+                    # "PytorchStreamReader failed reading zip archive" from
+                    # whatever thread happened to touch translation next.
+                    _sizes = hf_file_expectations(model_id, log=dl_logger.warning)
+                    _expectations = {n: _sizes.get(n, _model_files.FileExpectation(None, None))
+                                     for n in files}
+
                     # Download each file using wget
                     for idx, filename in enumerate(files):
                         dest_path = os.path.join(model_path, filename)
                         os.makedirs(os.path.dirname(dest_path) if os.path.dirname(dest_path) else model_path, exist_ok=True)
 
-                        # Skip if already downloaded and has content
-                        if os.path.exists(dest_path) and os.path.getsize(dest_path) > 0:
+                        _want = _expectations[filename]
+                        # "Already exists" means "exists and is the right size":
+                        # a truncated file must be repaired by a re-download, not
+                        # skipped past for ever.
+                        if _model_files.verify_file(dest_path, _want.size):
                             dl_logger.info(f"Already exists: {filename}")
                             continue
+                        if os.path.exists(dest_path):
+                            dl_logger.info(f"Incomplete on disk, re-fetching: {filename}")
 
                         dl_logger.info(f"Downloading file {idx+1}/{len(files)}: {filename}")
                         nllb_download_progress = {
@@ -16369,6 +16508,8 @@ def download_translation_model():
                             url, dest_path,
                             cancel_check=lambda: model_id in cancelled_downloads,
                             log=dl_logger.info,
+                            expected_size=_want.size,
+                            expected_sha256=_want.sha256,
                         )
                         if outcome == "cancelled":
                             dl_logger.info(f"Download cancelled for {model_id}")
@@ -16379,6 +16520,10 @@ def download_translation_model():
                         dl_logger.info(f"Successfully downloaded: {filename}")
 
                     dl_logger.info("All files downloaded successfully")
+                    # Written last: the sidecar's presence is the claim that this
+                    # directory finished, and is what load_translation_model
+                    # checks before handing a .bin to torch.load.
+                    _model_files.write_manifest(model_path, model_id, _expectations)
                 finally:
                     stop_monitor.set()
                     dl_logger.info("Stopped progress monitor")

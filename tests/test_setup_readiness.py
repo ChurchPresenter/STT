@@ -14,12 +14,27 @@ import os
 import pytest
 
 from conftest import extract_definitions
+from stt import model_files as _model_files
 
 
 def _ns(models_dir):
     return extract_definitions(
         "speech_to_text.py", ["_selected_model_downloaded", "_setup_status"],
-        {"MODELS_DIR": str(models_dir), "config": {}})
+        {"MODELS_DIR": str(models_dir), "config": {}, "_model_files": _model_files})
+
+
+def _faster_whisper_model(models_dir, name):
+    """A faster-whisper directory a loader would actually accept.
+
+    A bare mkdir is not one, and used to be treated as one here: the checklist
+    passed on a directory the dropdown would not offer and the worker could only
+    hang on. See TestIncompleteIsNotReady.
+    """
+    d = models_dir / f"faster-whisper-{name}"
+    d.mkdir()
+    for filename in ("model.bin", "config.json", "tokenizer.json", "vocabulary.txt"):
+        (d / filename).write_bytes(b"x" * 16)
+    return d
 
 
 def _cfg(**model):
@@ -51,14 +66,14 @@ class TestNothingSelected:
 
 class TestSelectedAndPresent:
     def test_a_downloaded_faster_whisper_model_is_ready(self, tmp_path):
-        (tmp_path / "faster-whisper-small").mkdir()
+        _faster_whisper_model(tmp_path, "small")
         ns = _ns(tmp_path)
         cfg = _cfg(type="whisper", backend="faster-whisper", whisper={"model": "small"})
         assert ns["_selected_model_downloaded"](cfg) is True
 
     def test_a_different_downloaded_model_does_not_count(self, tmp_path):
         # "downloaded AND selected": the worker loads exactly what is configured.
-        (tmp_path / "faster-whisper-small").mkdir()
+        _faster_whisper_model(tmp_path, "small")
         ns = _ns(tmp_path)
         cfg = _cfg(type="whisper", backend="faster-whisper", whisper={"model": "medium"})
         assert ns["_selected_model_downloaded"](cfg) is False
@@ -79,6 +94,30 @@ class TestSelectedAndPresent:
                                                      custom={"model_path": ""})) is False
 
 
+class TestIncompleteIsNotReady:
+    """A directory is not a model.
+
+    This check used to be a bare os.path.isdir, so a half-downloaded or
+    half-deleted folder passed the Start checklist while the list endpoint — which
+    looks at the files — reported it as not downloaded. Pressing Start then handed
+    it to the loader, which threw deep in a native reader or, with tokenizer.json
+    missing, blocked on an HTTP fetch that never timed out.
+    """
+
+    def test_an_empty_directory_is_not_ready(self, tmp_path):
+        (tmp_path / "faster-whisper-small").mkdir()
+        ns = _ns(tmp_path)
+        cfg = _cfg(type="whisper", backend="faster-whisper", whisper={"model": "small"})
+        assert ns["_selected_model_downloaded"](cfg) is False
+
+    def test_a_model_missing_its_tokenizer_is_not_ready(self, tmp_path):
+        d = _faster_whisper_model(tmp_path, "small")
+        os.remove(d / "tokenizer.json")
+        ns = _ns(tmp_path)
+        cfg = _cfg(type="whisper", backend="faster-whisper", whisper={"model": "small"})
+        assert ns["_selected_model_downloaded"](cfg) is False
+
+
 class TestSetupStatus:
     """What a new operator sees on first run."""
 
@@ -95,7 +134,7 @@ class TestSetupStatus:
         assert "microphone" in status["mic_hint"].lower()
 
     def test_a_fully_set_up_install_reports_ready_with_no_hints(self, tmp_path):
-        (tmp_path / "faster-whisper-small").mkdir()
+        _faster_whisper_model(tmp_path, "small")
         ns = _ns(tmp_path)
         ns["config"] = {"model": {"type": "whisper", "backend": "faster-whisper",
                                   "whisper": {"model": "small"}}}

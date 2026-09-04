@@ -400,13 +400,32 @@ def call_with_retry(
     raise AssertionError("unreachable")  # pragma: no cover
 
 
-def download_url_to_file(url: str, dest_path: str, cancel_check: Optional[Callable[[], bool]] = None, max_attempts: int = 5, log: Callable[[str], Any] = print) -> str:
+def download_url_to_file(url: str, dest_path: str, cancel_check: Optional[Callable[[], bool]] = None, max_attempts: int = 5, log: Callable[[str], Any] = print,
+                         expected_size: Optional[int] = None, expected_sha256: Optional[str] = None) -> str:
     """Download a URL to a file with resume + retry, preferring wget/curl.
 
     Falls back to a pure-Python streaming download when neither tool exists
     (e.g. minimal Windows installs). `cancel_check` is polled during the
     download; returning True aborts it. Returns "ok" or "cancelled"; raises
-    after all attempts fail."""
+    after all attempts fail.
+
+    **The transfer lands on `<dest_path>.part` and is renamed into place only
+    once it verifies.** Writing straight to the final name is what made an
+    interrupted download indistinguishable from a complete one: a truncated file
+    sat there under the real name, listed as downloaded, skipped by the next
+    re-download as "already exists", and finally handed to a loader that either
+    threw deep in a C++ reader or blocked fetching what was missing. Nothing
+    short of deleting the folder by hand could repair it.
+
+    Staging also *improves* resume. `wget -c` / `curl -C -` could only ever
+    continue within one call's own retry loop, because a later call saw a
+    complete-looking file and skipped it; pointed at the `.part` they now resume
+    across calls and across server restarts.
+
+    `expected_size` (and `expected_sha256`, when the source publishes a content
+    hash) are checked before the rename, so a transfer that ends early is a
+    failed attempt that retries rather than a file that is quietly wrong.
+    """
     # Every download in the application funnels through here, so this is the one
     # place that has to know a demo fetches nothing. Checked by env rather than by
     # a parameter because the alternative is threading a flag through a dozen
@@ -421,13 +440,34 @@ def download_url_to_file(url: str, dest_path: str, cancel_check: Optional[Callab
     import time as _time
     import urllib.request
 
+    from stt import model_files
+
+    part = model_files.part_path(dest_path)
+
+    def _verified() -> bool:
+        return model_files.verify_file(part, expected_size, expected_sha256)
+
+    def _promote() -> str:
+        # os.replace is atomic within a filesystem, and `part` is a sibling of
+        # `dest_path` precisely so it stays on one.
+        os.replace(part, dest_path)
+        return "ok"
+
+    def _discard_part() -> None:
+        # A part that failed verification must not be resumed: wget/curl would
+        # append to bytes we already know are wrong.
+        try:
+            os.remove(part)
+        except OSError:
+            pass
+
     if shutil.which("wget"):
         dl_cmd = ['wget', '-c', '-t', '3', '-T', '120', '--retry-connrefused',
-                  '--waitretry', '5', '-O', dest_path, url]
+                  '--waitretry', '5', '-O', part, url]
     elif shutil.which("curl"):
         dl_cmd = ['curl', '-L', '-C', '-', '--retry', '3', '--retry-delay', '5',
                   '--retry-connrefused', '--connect-timeout', '30',
-                  '--max-time', '600', '-o', dest_path, url]
+                  '--max-time', '600', '-o', part, url]
     else:
         dl_cmd = None  # pure-Python fallback below
 
@@ -448,24 +488,39 @@ def download_url_to_file(url: str, dest_path: str, cancel_check: Optional[Callab
                             proc.wait(timeout=10)
                         except subprocess.TimeoutExpired:
                             proc.kill()
+                        # The part file is left behind on purpose: a cancel that
+                        # the operator reverses should resume, not restart. The
+                        # UI's Cancel removes the whole model directory anyway.
                         return "cancelled"
                     _time.sleep(0.5)
                 if proc.returncode == 0:
-                    return "ok"
-                outf.seek(0)
-                last_error = outf.read()[-500:]
+                    if _verified():
+                        return _promote()
+                    last_error = _size_mismatch_text(part, expected_size)
+                    _discard_part()
+                else:
+                    outf.seek(0)
+                    last_error = outf.read()[-500:]
             returncode = proc.returncode
         else:
             try:
-                with urllib.request.urlopen(url, timeout=120) as src, open(dest_path, "wb") as out:
+                with urllib.request.urlopen(url, timeout=120) as src, open(part, "wb") as out:
+                    cancelled = False
                     while True:
                         if cancel_check and cancel_check():
-                            return "cancelled"
+                            cancelled = True
+                            break
                         chunk = src.read(65536)
                         if not chunk:
                             break
                         out.write(chunk)
-                return "ok"
+                if cancelled:
+                    return "cancelled"
+                if _verified():
+                    return _promote()
+                last_error = _size_mismatch_text(part, expected_size)
+                _discard_part()
+                returncode = 1
             except Exception as e:
                 last_error = str(e)
                 returncode = 1
@@ -473,11 +528,26 @@ def download_url_to_file(url: str, dest_path: str, cancel_check: Optional[Callab
         log(f"[WARNING] Download attempt {attempt}/{max_attempts} failed for "
             f"{os.path.basename(dest_path)} (exit code {returncode})")
         if attempt < max_attempts:
-            if os.path.exists(dest_path):
-                partial_size = os.path.getsize(dest_path)
+            if os.path.exists(part):
+                partial_size = os.path.getsize(part)
                 log(f"[INFO] Partial file exists ({partial_size / (1024*1024):.1f} MB), will resume")
             _time.sleep(5 * attempt)
 
     raise Exception(
         f"Failed to download {os.path.basename(dest_path)} after {max_attempts} attempts: {last_error[:300]}"
     )
+
+
+def _size_mismatch_text(part: str, expected_size: Optional[int]) -> str:
+    """Why a transfer that 'succeeded' was rejected before the rename.
+
+    Worth its own sentence in the log: an exit code of 0 followed by a retry is
+    otherwise baffling, and this is the case the whole staging exists to catch.
+    """
+    try:
+        actual: Any = os.path.getsize(part)
+    except OSError:
+        actual = "missing"
+    if expected_size is None:
+        return f"transfer produced {actual} bytes, which did not verify"
+    return f"incomplete transfer: got {actual} bytes, expected {expected_size}"

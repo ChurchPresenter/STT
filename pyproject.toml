@@ -44,6 +44,7 @@ module = [
     "stt.paths",
     "stt.self_update",
     "stt.model_disk",
+    "stt.model_files",
     "stt.nllb_catalog",
     "stt.tts_catalog",
     "stt.calibration",

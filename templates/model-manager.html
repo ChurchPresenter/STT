@@ -1178,10 +1178,20 @@
 
                     data.models.forEach(model => {
                         const isDownloaded = model.downloaded;
+                        // Three states. "incomplete" is a directory that exists
+                        // but is missing (or has a truncated) required file. It
+                        // used to report as simply not downloaded, which hid it
+                        // from the dropdown and disabled Remove — on the one
+                        // folder most in need of removing, since the loader
+                        // picked it up regardless and hung on it.
+                        const isIncomplete = model.state === 'incomplete';
+                        const onDisk = model.state !== 'absent';
                         const modelNameCap = model.name.charAt(0).toUpperCase() + model.name.slice(1);
 
                         const statusBadge = isDownloaded
                             ? '<span style="background: var(--success); color: var(--text-primary); padding: 2px 8px; border-radius: 12px; font-size: 0.75em; margin-left: 8px;">✓ Downloaded</span>'
+                            : isIncomplete
+                            ? `<span style="background: var(--warning-bg); color: var(--warning); padding: 2px 8px; border-radius: 12px; font-size: 0.75em; margin-left: 8px;">Incomplete${model.missing_text ? ' — missing ' + escapeHtml(model.missing_text) : ''}</span>`
                             : '<span style="background: var(--bg-elevated); color: var(--text-secondary); padding: 2px 8px; border-radius: 12px; font-size: 0.75em; margin-left: 8px;">Available</span>';
 
                         listEl.innerHTML += `
@@ -1195,11 +1205,11 @@
                                     <button class="model-btn download"
                                             onclick="downloadFasterWhisperModel('${model.name}')"
                                             ${isDownloaded ? 'disabled' : ''}>
-                                        ${isDownloaded ? 'Downloaded' : 'Download'}
+                                        ${isDownloaded ? 'Downloaded' : isIncomplete ? 'Repair' : 'Download'}
                                     </button>
                                     <button class="model-btn remove"
                                             onclick="removeFasterWhisperModel('${model.name}')"
-                                            ${!isDownloaded ? 'disabled' : ''}>
+                                            ${!onDisk ? 'disabled' : ''}>
                                         Remove
                                     </button>
                                 </div>
@@ -2868,11 +2878,18 @@
                             } else {
                                 displayType = 'Local'; typeIcon = '💾'; statusClass = 'model-item--accent';
                             }
+                            // A directory with no weight file used to be omitted
+                            // from this list entirely, so the one folder that was
+                            // wasting disk and breaking the loader was also the
+                            // one that could not be removed from here.
+                            const incompleteBadge = model.state === 'incomplete'
+                                ? '<span style="background: var(--warning-bg); color: var(--warning); padding: 1px 6px; border-radius: var(--radius-sm); font-size: 0.75em; margin-left: 6px;">Incomplete</span>'
+                                : '';
                             html += `
                                 <div class="model-item ${statusClass}">
                                     <div class="model-info">
                                         <div class="model-name">${typeIcon} ${model.name}</div>
-                                        <div class="model-details"><span style="background: var(--bg-elevated); padding: 1px 6px; border-radius: var(--radius-sm); font-size: 0.75em;">${displayType}</span></div>
+                                        <div class="model-details"><span style="background: var(--bg-elevated); padding: 1px 6px; border-radius: var(--radius-sm); font-size: 0.75em;">${displayType}</span>${incompleteBadge}</div>
                                     </div>
                                     <div class="model-actions">
                                         <button class="model-btn remove" onclick="removeModel('${model.type === 'piper' || model.type === 'supertonic' ? dir : model.name}', '${model.type}')">Remove</button>
