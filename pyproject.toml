@@ -80,6 +80,7 @@ module = [
     "stt.demo_scrub",
     "stt.demo_guard",
     "stt.worker_crash",
+    "stt.diagnostics",
 ]
 disallow_untyped_defs = true
 

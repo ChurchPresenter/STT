@@ -99,6 +99,11 @@ BLOCKED_PREFIXES: Tuple[Tuple[str, str], ...] = (
      "Copying recordings to a network share is not available in the demo."),
     ("/api/remote-translation/",
      "Pairing with a second machine is not available in the demo."),
+    # Risk here is subprocess, not egress: the report enumerates audio devices by
+    # running ffmpeg. It also has nothing to describe — a demo has no models and
+    # no real install — so it is refused rather than faked.
+    ("/api/diagnostics/",
+     "The diagnostic report is not available in the demo."),
 )
 
 # POST paths that begin a download, mapped to the catalogue key they install.

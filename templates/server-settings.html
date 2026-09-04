@@ -488,6 +488,29 @@
                     </div>
                 </div>
 
+                <div class="settings-card" style="border-color: var(--info);">
+                    <h4>🩺 Diagnostic Report</h4>
+                    <div class="description" style="margin-bottom: 12px;">
+                        Collects everything a support thread normally has to ask for: app version,
+                        OS, RAM and GPU, the models on disk <em>and whether their files are actually
+                        complete</em>, the audio devices this machine can see, and the operational
+                        lines from the end of the log.
+                    </div>
+                    <div class="info-box" style="margin-bottom: 12px;">
+                        🔒 <strong>Nothing is uploaded.</strong> The report downloads to this
+                        computer for you to read first. Transcript text and passwords are never
+                        included &mdash; only settings and log lines from a vetted list can appear.
+                    </div>
+                    <button type="button" onclick="downloadDiagnosticReport()" class="btn-save"
+                            style="background: var(--accent); width: 100%;">📋 Download Diagnostic Report</button>
+                    <div id="diagnostic-status" style="margin-top: 8px; font-size: 0.85em; color: var(--text-secondary);" aria-live="polite"></div>
+                    <div class="info-box" style="margin-top: 12px;">
+                        💡 <strong>Tip:</strong> If transcription will not start, attach this to your
+                        issue at <code>github.com/ChurchPresenter/STT/issues</code> &mdash; it usually
+                        answers the question straight away.
+                    </div>
+                </div>
+
                 <!-- Masonry grid for info cards -->
                 <div class="masonry-grid">
                     <!-- Network Access Card -->
@@ -1487,6 +1510,37 @@
         }
 
         // Restart server
+        async function downloadDiagnosticReport() {
+            // Fetched rather than linked so an auth failure surfaces as a message
+            // instead of a browser download containing an error page.
+            const status = document.getElementById('diagnostic-status');
+            status.textContent = 'Collecting…';
+            try {
+                const response = await fetch('/api/diagnostics/report?format=text');
+                if (!response.ok) {
+                    status.textContent = response.status === 403
+                        ? 'Access denied — log in or use a whitelisted IP.'
+                        : 'Could not build the report (HTTP ' + response.status + ').';
+                    return;
+                }
+                const text = await response.text();
+                const match = (response.headers.get('Content-Disposition') || '')
+                    .match(/filename="([^"]+)"/);
+                const blob = new Blob([text], {type: 'text/plain'});
+                const url = URL.createObjectURL(blob);
+                const link = document.createElement('a');
+                link.href = url;
+                link.download = match ? match[1] : 'stt-diagnostic.txt';
+                document.body.appendChild(link);
+                link.click();
+                document.body.removeChild(link);
+                URL.revokeObjectURL(url);
+                status.textContent = 'Downloaded. Please read it before sharing it.';
+            } catch (e) {
+                status.textContent = 'Could not build the report: ' + e.message;
+            }
+        }
+
         async function restartServer() {
             if (!confirm('Are you sure you want to restart the server? This will temporarily disconnect all users.')) {
                 return;

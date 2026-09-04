@@ -80,6 +80,8 @@ from stt import pair_tokens as _pair_tokens_mod
 # How a dying worker process reports itself, and why excepthooks are chained
 # rather than replaced.
 from stt import worker_crash as _worker_crash
+# What may appear in an operator's support report, by allowlist.
+from stt import diagnostics as _diagnostics
 from stt.http_params import merge_request_params, parse_json_body as _parse_json_body
 from stt.model_disk import dir_has_weights, dir_is_writable, has_weight_file, is_weight_file, model_presence  # noqa: F401
 
@@ -13065,6 +13067,124 @@ def stop_transcription():
         )
     except Exception as e:
         return jsonify({"success": False, "error": str(e)}), 500
+
+
+def _diagnostic_model_health():
+    """Judge every model directory on disk. Never raises: a report that dies
+    because one folder is unreadable is worse than one with a gap in it."""
+    healths = []
+    try:
+        names = sorted(os.listdir(MODELS_DIR))
+    except OSError:
+        return healths
+    for name in names:
+        path = os.path.join(MODELS_DIR, name)
+        if not os.path.isdir(path):
+            continue
+        entries = []
+        try:
+            for entry in os.listdir(path):
+                full = os.path.join(path, entry)
+                if os.path.isfile(full):
+                    entries.append((entry, os.path.getsize(full)))
+        except OSError:
+            continue
+        # None means "not a model directory" (a cache, or a per-backend parent
+        # whose children are the real models) — skipped rather than condemned.
+        family = _diagnostics.infer_family(name, [e for e, _ in entries])
+        if family is None:
+            continue
+        healths.append(_diagnostics.check_model_dir(name, entries, family=family))
+    return healths
+
+
+def _diagnostic_log_tail(max_bytes=400_000):
+    """The end of stt.log, filtered to operational lines.
+
+    Only the tail is read: the file rotates at 10 MB and the interesting part is
+    always the most recent start attempt.
+    """
+    path = os.path.join(APP_DIR, "logs", "stt.log")
+    try:
+        size = os.path.getsize(path)
+        with open(path, "r", encoding="utf-8", errors="replace") as handle:
+            if size > max_bytes:
+                handle.seek(size - max_bytes)
+                handle.readline()  # discard the partial line the seek landed in
+            raw = handle.readlines()
+    except OSError:
+        return []
+    return _diagnostics.filter_log_lines(raw)
+
+
+def _diagnostic_audio_devices():
+    """Device names as the UI sees them, or a note saying why we have none."""
+    try:
+        from stt.audio_capture import list_audio_devices
+
+        markers = (config.get("audio", {}) or {}).get("deprioritize_markers") or None
+        return [d.get("name", "?") for d in list_audio_devices(deprioritize_markers=markers)]
+    except Exception as e:
+        return [f"(device enumeration failed: {e})"]
+
+
+@app.route("/api/diagnostics/report", methods=["GET"])
+def get_diagnostic_report():
+    """A support report the operator can read, then attach to an issue.
+
+    Exists because issue #8 cost a multi-day round trip collecting facts a
+    machine already knew: which model is selected, whether its files are
+    actually complete, how much RAM the box has, and where startup stopped.
+
+    Nothing here is uploaded. The report is built on request and handed back;
+    what happens to it is the operator's decision. What it may contain is
+    decided by allowlist in stt/diagnostics.py — captions and secrets cannot
+    reach it even as the monolith grows new log tags and settings.
+
+    Example: curl http://localhost:8080/api/diagnostics/report?format=text
+    """
+    if not check_ip_whitelist():
+        return jsonify({"success": False, "error": "Access Denied"}), 403
+
+    hw = _probe_hardware()
+    ram_bytes = hw.get("ram_bytes") or 0
+    vram_bytes = hw.get("vram_bytes") or 0
+    report = _diagnostics.build_report(
+        versions={
+            "app": SERVER_DISPLAY_VERSION,
+            "commit": SERVER_COMMIT or "(installer build)",
+            "python": sys.version.split()[0],
+        },
+        platform={
+            "os": sys.platform,
+            "os_version": SERVER_OS_VERSION,
+            "arch": SERVER_ARCH,
+        },
+        hardware={
+            "ram_gb": round(ram_bytes / (1024 ** 3), 1) if ram_bytes else "unknown",
+            "cpu_cores": hw.get("cpu_cores") or "unknown",
+            "gpu": hw.get("gpu_name") or "none detected",
+            "vram_gb": round(vram_bytes / (1024 ** 3), 1) if vram_bytes else 0,
+            "has_cuda": bool(hw.get("has_cuda")),
+        },
+        config=load_config(),
+        models=_diagnostic_model_health(),
+        audio_devices=_diagnostic_audio_devices(),
+        transcription_state=_ts_snapshot(),
+        log_lines=_diagnostic_log_tail(),
+    )
+
+    if (request.args.get("format") or "").lower() == "json":
+        return jsonify({"success": True, "report": report})
+
+    text = _diagnostics.format_report_text(report)
+    filename = _diagnostics.report_filename(
+        datetime.now(configured_timezone).strftime("%Y-%m-%d-%H%M%S"))
+    return Response(
+        text,
+        mimetype="text/plain; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 @app.route("/api/transcription/status", methods=["GET"])

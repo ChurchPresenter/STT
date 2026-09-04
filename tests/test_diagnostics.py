@@ -1,0 +1,305 @@
+"""The diagnostic report: what it must contain, and what it must never leak.
+
+The redaction rules carry the risk here. A caption is verbatim congregation
+speech, so the log filter is deny-by-default and these tests exist to keep it
+that way when someone adds a new print to the monolith.
+"""
+
+from __future__ import annotations
+
+import pytest
+
+from stt import diagnostics
+
+
+# --- log filtering: deny by default ---------------------------------------
+
+
+def test_an_unvetted_tag_is_dropped_rather_than_guessed_at():
+    lines = ["[NEW-FEATURE] he said unto them, whatsoever"]
+    assert diagnostics.filter_log_lines(lines) == []
+
+
+@pytest.mark.parametrize("tag", [
+    "LIVE-TRANSLATION", "TRANS-DBG", "SRT", "SRT-TRANSLATION", "SERMON",
+    "LLM-TRANSLATE", "LLM-LOCAL", "TRANSLATION", "REMOTE_TRANSLATE", "HTML",
+    "TTS", "SESSION-META",
+])
+def test_every_tag_on_the_text_path_stays_out(tag):
+    """These print what somebody actually said."""
+    assert tag not in diagnostics.LOG_TAGS
+    assert diagnostics.filter_log_lines([f"[{tag}] and he spoke to the congregation"]) == []
+
+
+def test_operational_lines_are_kept():
+    lines = [
+        "[INIT] Step 3/5: Loading model (whisper, backend=faster-whisper)...",
+        "[OK] Model loaded successfully: whisper",
+        "[ERROR] Model loading failed: unable to open file",
+    ]
+    assert diagnostics.filter_log_lines(lines) == lines
+
+
+def test_timestamped_lines_are_matched_on_their_tag():
+    line = "[2026-09-04 06:12:01.123] [INIT] Step 2/5: Trying audio device: mic"
+    assert diagnostics.filter_log_lines([line]) == [line]
+
+
+def test_a_worker_traceback_survives_even_though_it_has_no_tag():
+    lines = [
+        "Process Process-3:",
+        "Traceback (most recent call last):",
+        '  File "speech_to_text.py", line 20855, in main',
+        "RuntimeError: unable to open model file",
+    ]
+    assert diagnostics.filter_log_lines(lines) == lines
+
+
+def test_an_untagged_caption_line_is_dropped():
+    assert diagnostics.filter_log_lines(["and the peace of God be with you all"]) == []
+
+
+def test_home_directories_are_redacted_out_of_kept_lines():
+    line = r"[OK] Database initialized: C:\Users\Oluwatobi Owolabi\.stt\session.db"
+    out = diagnostics.filter_log_lines([line])[0]
+    assert "Oluwatobi" not in out
+    assert ".stt" in out, "the useful part of the path survives"
+
+
+def test_an_absurdly_long_line_is_truncated_rather_than_trusted():
+    out = diagnostics.filter_log_lines(["[INFO] " + "x" * 5000])[0]
+    assert len(out) < 500
+    assert out.endswith("…[truncated]")
+
+
+def test_only_the_tail_is_kept_because_a_report_is_read_backwards():
+    lines = [f"[INFO] line {i}" for i in range(50)]
+    out = diagnostics.filter_log_lines(lines, limit=5)
+    assert out == [f"[INFO] line {i}" for i in range(45, 50)]
+
+
+def test_blank_lines_are_dropped():
+    assert diagnostics.filter_log_lines(["", "   ", "[OK] fine"]) == ["[OK] fine"]
+
+
+# --- config: allowlist ----------------------------------------------------
+
+
+def test_secrets_never_reach_the_report():
+    config = {
+        "transcription": {"model": "large-v3"},
+        "pairing": {"token": "super-secret-token"},
+        "translation": {"api_key": "sk-live-abcdef", "enabled": True},
+        "file_mover": {"smb_password": "hunter2", "smb_user": "ada"},
+        "analytics": {"install_id": "752c46ee-9261"},
+    }
+    summary = diagnostics.summarise_config(config)
+    blob = repr(summary)
+
+    assert "super-secret-token" not in blob
+    assert "sk-live-abcdef" not in blob
+    assert "hunter2" not in blob
+    assert "752c46ee" not in blob
+    assert summary["translation.enabled"] is True
+
+
+def test_a_new_setting_beside_a_secret_is_not_reported_by_accident():
+    summary = diagnostics.summarise_config({"pairing": {"token": "x", "new_knob": 7}})
+    assert summary == {}
+
+
+def test_absent_settings_are_skipped_not_reported_as_null():
+    summary = diagnostics.summarise_config({"audio": {"energy_threshold": 100}})
+    assert summary == {"audio.energy_threshold": 100}
+
+
+def test_a_model_path_containing_a_username_is_redacted():
+    summary = diagnostics.summarise_config(
+        {"translation": {"model": "/Users/ada/models/nllb"}}
+    )
+    assert "ada" not in summary["translation.model"]
+
+
+def test_lookup_survives_a_non_mapping_midway():
+    assert diagnostics.summarise_config({"audio": "not-a-dict"}) == {}
+
+
+# --- model health: the question issue #8 needed answered -------------------
+
+
+def test_a_complete_model_is_reported_ok():
+    health = diagnostics.check_model_dir("faster-whisper-large-v3", [
+        ("model.bin", 3_090_000_000),
+        ("config.json", 2_000),
+        ("tokenizer.json", 2_400_000),
+        ("vocabulary.json", 1_000_000),
+    ])
+    assert health.ok is True
+    assert health.missing == ()
+    assert "Looks complete." in health.notes
+
+
+def test_a_truncated_download_is_caught():
+    """The exact shape that leaves the UI on STARTING for ever."""
+    health = diagnostics.check_model_dir("faster-whisper-large-v3", [
+        ("model.bin", 400_000_000),  # died part-way through a 3 GB transfer
+        ("config.json", 2_000),
+        ("tokenizer.json", 2_400_000),
+        ("vocabulary.json", 1_000_000),
+    ])
+    assert health.truncated is True
+    assert health.ok is False
+    assert any("download it again" in note for note in health.notes)
+
+
+def test_a_missing_tokenizer_is_named_as_the_thing_that_hangs_the_start():
+    health = diagnostics.check_model_dir("faster-whisper-large-v3", [
+        ("model.bin", 3_090_000_000),
+        ("config.json", 2_000),
+    ])
+    assert health.ok is False
+    assert "tokenizer.json" in health.missing
+    assert any("hang" in note for note in health.notes)
+
+
+def test_a_directory_with_no_weights_is_not_a_downloaded_model():
+    health = diagnostics.check_model_dir("faster-whisper-small", [("config.json", 2_000)])
+    assert health.ok is False
+    assert health.weight_bytes == 0
+    assert any("not really downloaded" in note for note in health.notes)
+
+
+def test_an_unknown_model_name_is_not_guessed_as_truncated():
+    health = diagnostics.check_model_dir("faster-whisper-custom-thing", [
+        ("model.bin", 1_000),
+        ("config.json", 1), ("tokenizer.json", 1), ("vocabulary.json", 1),
+    ])
+    assert health.truncated is False, "no size hint means no opinion"
+    assert health.ok is True
+
+
+def test_safetensors_layouts_are_recognised_as_weights():
+    health = diagnostics.check_model_dir("nllb-200-distilled-600M", [
+        ("model.safetensors", 2_400_000_000),
+        ("config.json", 2_000),
+        ("tokenizer.json", 1_000),
+    ], family="nllb")
+    assert health.ok is True
+
+
+# --- assembly -------------------------------------------------------------
+
+
+def _report(**overrides):
+    base = dict(
+        versions={"app": "26.3.16"},
+        platform={"os": "windows"},
+        hardware={"ram_gb": 8},
+        config={"audio": {"energy_threshold": 100}},
+        models=[diagnostics.check_model_dir("faster-whisper-base", [
+            ("model.bin", 145_000_000), ("config.json", 1),
+            ("tokenizer.json", 1), ("vocabulary.json", 1)])],
+        audio_devices=["Microphone (Conexant ISST Audio)"],
+        transcription_state={"status": "starting", "running": False, "error": None},
+        log_lines=["[INIT] Step 3/5: Loading model"],
+    )
+    base.update(overrides)
+    return diagnostics.build_report(**base)
+
+
+def test_the_current_caption_is_not_copied_out_of_the_shared_state():
+    report = _report(transcription_state={
+        "status": "running",
+        "current_text": "and he said unto them",
+        "last_transcription": "peace be with you",
+    })
+    blob = repr(report["transcription_state"])
+    assert "said unto them" not in blob
+    assert "peace be with you" not in blob
+    assert report["transcription_state"]["status"] == "running"
+
+
+def test_the_report_says_it_is_not_sent_anywhere():
+    assert "not sent anywhere" in _report()["generated"]
+
+
+def test_text_rendering_includes_every_section():
+    text = diagnostics.format_report_text(_report())
+    for heading in ("Versions", "Platform", "Hardware", "Settings",
+                    "Models on disk", "Audio devices", "Transcription state", "Log"):
+        assert heading in text
+
+
+def test_a_bad_model_is_visibly_marked_in_the_text():
+    report = _report(models=[diagnostics.check_model_dir(
+        "faster-whisper-large-v3", [("model.bin", 1_000)])])
+    text = diagnostics.format_report_text(report)
+    assert "[BAD ]" in text
+
+
+def test_rendering_an_empty_report_does_not_explode():
+    text = diagnostics.format_report_text({})
+    assert "STT diagnostic report" in text
+
+
+def test_the_log_section_states_the_privacy_rule():
+    assert "captions are never included" in diagnostics.format_report_text(_report())
+
+
+# --- filename -------------------------------------------------------------
+
+
+def test_filename_is_safe_on_windows():
+    name = diagnostics.report_filename("2026-09-04 06:12:01")
+    assert ":" not in name and " " not in name
+    assert name.startswith("stt-diagnostic-") and name.endswith(".txt")
+
+
+# --- which directories are models at all ----------------------------------
+
+
+@pytest.mark.parametrize("dir_name,files", [
+    (".hf_cache", ["version.txt", "some.lock"]),
+    ("tts", []),
+    ("panns_data", ["readme.md"]),
+])
+def test_a_cache_or_parent_directory_is_not_judged_as_a_model(dir_name, files):
+    """Reporting a healthy install's cache folder as corrupt invites damage."""
+    assert diagnostics.infer_family(dir_name, files) is None
+
+
+def test_a_gguf_directory_is_recognised_and_needs_no_companions():
+    family = diagnostics.infer_family(
+        "unsloth--gemma-4-12B-it-GGUF", ["gemma-4-12b-it-Q4_K_M.gguf"])
+    assert family == "gguf"
+
+    health = diagnostics.check_model_dir(
+        "unsloth--gemma-4-12B-it-GGUF",
+        [("gemma-4-12b-it-Q4_K_M.gguf", 7_300_000_000)],
+        family=family,
+    )
+    assert health.ok is True
+    assert health.missing == ()
+
+
+def test_a_faster_whisper_directory_is_recognised_by_name():
+    assert diagnostics.infer_family("faster-whisper-large-v3", ["model.bin"]) == "faster-whisper"
+
+
+def test_an_openai_whisper_checkpoint_is_recognised():
+    assert diagnostics.infer_family("whisper-medium", ["medium.pt"]) == "whisper"
+
+
+def test_a_transformers_directory_is_recognised():
+    assert diagnostics.infer_family(
+        "facebook--nllb-200", ["model.safetensors", "config.json"]) == "nllb"
+
+
+def test_the_largest_shard_is_the_one_whose_size_is_judged():
+    health = diagnostics.check_model_dir("facebook--nllb-200", [
+        ("model-00001-of-00002.safetensors", 2_000_000_000),
+        ("model-00002-of-00002.safetensors", 900_000_000),
+        ("config.json", 1_000), ("tokenizer.json", 1_000),
+    ], family="nllb")
+    assert health.weight_bytes == 2_000_000_000
+    assert health.ok is True
