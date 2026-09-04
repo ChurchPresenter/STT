@@ -1946,7 +1946,14 @@ class AutoUpdater:
 
         Used to defer updates until idle. Fails open: if the server is
         unreachable (down means nothing is transcribing) we return False so
-        updates are never blocked forever."""
+        updates are never blocked forever.
+
+        Reads the *status* string, not the boolean `running`. `running` only goes
+        true once the worker has finished loading its model, so a start still in
+        progress read as idle here — and an auto-update would then restart STT
+        part-way through a model load, on the machine least able to afford it. A
+        start that is genuinely wedged is not held open by this: the server's own
+        stalled-start check moves it to "error" first."""
         try:
             cfg = load_config()
             port = cfg.get("web_server", {}).get("port", 8080)
@@ -1954,7 +1961,10 @@ class AutoUpdater:
                 f"http://127.0.0.1:{port}/api/transcription/status", timeout=2
             ) as r:
                 data = json.loads(r.read())
-            return bool(data.get("state", {}).get("running", False))
+            state = data.get("state", {})
+            if state.get("status") in ("starting", "running", "stopping"):
+                return True
+            return bool(state.get("running", False))
         except Exception:
             return False
 
@@ -2814,15 +2824,20 @@ class GuiWindow:
                     f"http://127.0.0.1:{port}/api/transcription/status", timeout=1
                 ) as r:
                     data = _json.loads(r.read())
-                running = data.get("state", {}).get("running", False)
+                tstate = data.get("state", {})
+                running = tstate.get("running", False)
+                # "Starting" is its own thing here: during a model load `running`
+                # is still false, and labelling that "Stopped" invited an operator
+                # to press Start again on a worker already busy coming up.
+                starting = tstate.get("status") == "starting"
                 self._transcription_lbl.config(
-                    text="● Active" if running else "● Stopped",
-                    fg="green" if running else "red",
+                    text="● Starting" if starting else ("● Active" if running else "● Stopped"),
+                    fg="orange" if starting else ("green" if running else "red"),
                 )
                 self._transcription_btn.config(
-                    text="Stop" if running else "Start"
+                    text="Stop" if (running or starting) else "Start"
                 )
-                self._transcription_running = running
+                self._transcription_running = running or starting
             except Exception:
                 self._transcription_lbl.config(text="● Unknown", fg="gray")
         else:

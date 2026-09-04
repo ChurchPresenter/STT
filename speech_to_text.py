@@ -85,6 +85,7 @@ from stt import diagnostics as _diagnostics
 from stt.http_params import merge_request_params, parse_json_body as _parse_json_body
 from stt.model_disk import dir_has_weights, dir_is_writable, has_weight_file, is_weight_file, model_presence  # noqa: F401
 from stt import model_files as _model_files
+from stt import start_watch as _start_watch
 
 
 def safe_managed_path(path, base_dir=None):
@@ -3654,6 +3655,10 @@ if mp_manager is not None:
             "segments_per_min": None,  # Throughput over the session window
             "rows_saved": 0,  # Finalized transcript lines saved to the session DB
             "queue_depth": None,  # audio_stream_queue depth, when readable
+            # Which init step the worker is on, and when it got there. Only
+            # meaningful while status == "starting"; see stt/start_watch.py.
+            "init_stage": "",
+            "init_stage_at": None,
         }
     )
 
@@ -12897,6 +12902,23 @@ def start_transcription():
                 # Worker is alive, just reuse it (it's waiting in idle loop)
                 print(f"[START] Reusing existing worker process PID={transcription_process.pid}")
 
+        # State first, queue second. Written the other way round, a worker that
+        # failed fast enough could have its status="error" overwritten by this
+        # route's "starting" and its error cleared — the window is narrow, but it
+        # turns the one case that reported itself correctly into another spinner.
+        # The stage stamp starts the stalled-start clock here rather than in the
+        # worker, so the gap before the worker picks the command up is covered
+        # too, and because the worker survives Stop/Start it has to be re-stamped
+        # on every start, not only when a process is spawned.
+        with _transcription_state_lock:
+            transcription_state["status"] = "starting"
+            transcription_state["message"] = (
+                "Initializing audio interface and loading model..."
+            )
+            transcription_state["error"] = None  # Clear any previous errors
+            transcription_state[_start_watch.STAGE_KEY] = _start_watch.STAGE_REQUESTED
+            transcription_state[_start_watch.STAGE_AT_KEY] = time.time()
+
         # Send start command through queue
         control_queue.put({"command": "start"})
 
@@ -12906,12 +12928,8 @@ def start_transcription():
         # take as evidence about this kind of service rather than any other.
         _service_phase_choose_profile()
 
-        # Update state - don't set running=True yet, worker will do that after initialization
-        transcription_state["status"] = "starting"
-        transcription_state["message"] = (
-            "Initializing audio interface and loading model..."
-        )
-        transcription_state["error"] = None  # Clear any previous errors
+        # (running=True is deliberately not set here: the worker writes it once
+        # initialization has actually finished.)
 
         # Anonymous live-map ping so ChurchPresenter can see where STT is used.
         # Location is derived (and fuzzed) server-side from the connection; we send
@@ -13234,13 +13252,63 @@ def get_diagnostic_report():
     )
 
 
+def _start_stall_seconds():
+    """How long a single init step may make no progress before it is called dead.
+
+    Per-step, not per-start: a cold load of large-v3 on a slow disk legitimately
+    takes minutes, so a total budget either kills that or never fires. Ten
+    minutes of a *step* not advancing is well past any real load and well short
+    of the "for ever" this replaces. Zero switches the check off.
+    """
+    try:
+        return float(config.get("transcription", {}).get("start_stall_seconds", 600))
+    except (TypeError, ValueError):
+        return 600.0
+
+
+def _reap_stuck_start(state):
+    """Turn a start that will never finish into one that failed.
+
+    Called from the status poll because that is the one thing that runs on a
+    timer while a start is in progress — nothing else ever looked at
+    ``transcription_process.is_alive()`` except the next explicit Start, Stop or
+    Force Reset, which is why a dead or wedged worker could report STARTING
+    indefinitely.
+
+    The correction is *written*, not merely returned: a reaper that only decorated
+    the response would let Stop and Start keep seeing the phantom "starting" and
+    refuse on it. Returns the state to report.
+    """
+    verdict = _start_watch.evaluate_start(
+        state,
+        worker_alive=bool(transcription_process is not None and transcription_process.is_alive()),
+        now=time.time(),
+        stall_seconds=_start_stall_seconds(),
+    )
+    if verdict is None:
+        return state
+    print(f"[START] {verdict.error} {verdict.message}", flush=True)
+    try:
+        with _transcription_state_lock:
+            transcription_state["running"] = False
+            transcription_state["status"] = "error"
+            transcription_state["error"] = verdict.error
+            transcription_state["message"] = verdict.message
+            transcription_state[_start_watch.STAGE_KEY] = ""
+            transcription_state[_start_watch.STAGE_AT_KEY] = None
+    except _TS_PROXY_ERRORS:
+        # Manager already torn down (shutdown/restart) — _ts_snapshot handles it.
+        _server_shutting_down.set()
+    return _ts_snapshot()
+
+
 @app.route("/api/transcription/status", methods=["GET"])
 def get_transcription_status():
     """API endpoint to get transcription status"""
     return jsonify(
         {
             "success": True,
-            "state": _ts_snapshot(),
+            "state": _reap_stuck_start(_ts_snapshot()),
             "setup": _setup_status(),
             "disk_percent": _disk_usage_percent(),
         }
@@ -20622,6 +20690,30 @@ def _kill_stray_ffmpeg(source, pid=None):
         print(f"[STOP] kill fallback failed: {e}")
 
 
+def _worker_stage(stage):
+    """Record which init step the worker is on, for the stalled-start reaper.
+
+    Between ``status="starting"`` (written by the start route) and
+    ``status="running"`` (written only once audio, model, VAD and database init
+    have all succeeded) there was no signal of any kind. A crash in that window
+    is now reported; a *hang* is not, and cannot be — it raises nothing. So the
+    worker leaves a breadcrumb at each step and the web process judges the gap.
+
+    The clock the reaper reads is per-stage, not total: a cold load of large-v3
+    legitimately takes minutes, and restarting the clock at every step is what
+    lets a slow start be slow while a wedged one still resolves.
+
+    Never allowed to raise. This runs on the path to reporting a failure, and a
+    dead Manager proxy here must not become the thing that kills the worker.
+    """
+    try:
+        with _transcription_state_lock:
+            transcription_state[_start_watch.STAGE_KEY] = stage
+            transcription_state[_start_watch.STAGE_AT_KEY] = time.time()
+    except Exception:
+        pass
+
+
 def _report_worker_crash(exc, role="worker"):
     """Announce a fatal worker exception to the log, to Sentry and to the UI.
 
@@ -20742,6 +20834,7 @@ def thread1_function(ts, cq, cfq, cal_state, cal_data, cal_step1, asq):
                 if command is not None:
                     if command["command"] == "start" and not is_running:
                         is_running = True
+                        _worker_stage("1/5 preparing the worker")
                         print("[WORKER] Starting transcription...", flush=True)
                     elif command["command"] == "start_calibration":
                         # Handle calibration start command - use local state
@@ -21045,6 +21138,7 @@ def thread1_function(ts, cq, cfq, cal_state, cal_data, cal_step1, asq):
                             continue
 
                         try:
+                            _worker_stage(f"2/5 opening audio device {device}")
                             print(f"[INIT] Step 2/5: Trying audio device: {device}")
                             # Get backup settings from config for MPEG-TS backup
                             backup_cfg = process_config.get("audio_backup", {})
@@ -21176,6 +21270,10 @@ def thread1_function(ts, cq, cfq, cal_state, cal_data, cal_step1, asq):
                         # Update whisper config with CLI args if provided
                         model_config["whisper"]["model"] = args.model
 
+                    # The longest step by far, and the one that hangs: a model
+                    # directory missing tokenizer.json used to send the loader
+                    # into an untimed HTTP fetch, and STARTING never resolved.
+                    _worker_stage(f"3/5 loading the {model_config.get('backend', model_config.get('type', 'whisper'))} model")
                     print(
                         f"[INIT] Step 3/5: Loading model ({model_config.get('type', 'whisper')}, backend={model_config.get('backend', 'whisper')})..."
                     )
@@ -21315,6 +21413,7 @@ def thread1_function(ts, cq, cfq, cal_state, cal_data, cal_step1, asq):
                     phrase_timeout = args.phrase_timeout
 
                     # Initialize database (lazy loading - only when transcription starts)
+                    _worker_stage("4/5 opening the session database")
                     print("[INIT] Step 4/5: Initializing database...")
 
                     try:
@@ -21578,6 +21677,7 @@ def thread1_function(ts, cq, cfq, cal_state, cal_data, cal_step1, asq):
                     print("Model loaded.\n")
 
                     # Update transcription state to running - ALL initialization complete
+                    _worker_stage("5/5 starting the transcription loop")
                     print("[INIT] Step 5/5: Starting transcription loop...")
                     with _transcription_state_lock:
                         transcription_state["running"] = True
@@ -21585,6 +21685,11 @@ def thread1_function(ts, cq, cfq, cal_state, cal_data, cal_step1, asq):
                         transcription_state["message"] = "Transcription is active and ready"
                         transcription_state["error"] = None
                         transcription_state["start_time"] = time.time()
+                        # Init is over: nothing is left for the stalled-start
+                        # reaper to time, and a stale stage would only confuse the
+                        # next start.
+                        transcription_state[_start_watch.STAGE_KEY] = ""
+                        transcription_state[_start_watch.STAGE_AT_KEY] = None
                         # Zero the health-perf counters for the new session
                         transcription_state["infer_ms_ema"] = None
                         transcription_state["rtf_ema"] = None

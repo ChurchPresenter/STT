@@ -1032,7 +1032,13 @@
             window.transcriptionIsRunning = true;
           } else if (statusValue === 'starting') {
             dot.classList.add('starting');
-            text.textContent = 'Transcription: Starting...';
+            // Naming the step turns a long start from "is this stuck?" into
+            // "it's loading the model". If it really is stuck, the server's own
+            // stalled-start check flips this to 'error' on a later poll.
+            const stage = (status.init_stage || '').trim();
+            text.textContent = stage
+              ? `Transcription: Starting… (${stage})`
+              : 'Transcription: Starting...';
             window.transcriptionIsRunning = true; // coming up — still "waiting" for content
           } else if (statusValue === 'stopping') {
             dot.classList.add('starting'); // Use yellow for stopping too

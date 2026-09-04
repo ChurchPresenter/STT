@@ -77,6 +77,7 @@ The server is mostly a monolith — most changes land in `speech_to_text.py`.
 | `templates/` | Jinja2 pages: index, live-settings, model-manager, server-settings, translation, corrections, file-manager, word-highlighting, url-builder |
 | `static/` | Vendored JS/CSS — no build step, no npm |
 | `stt/model_files.py` | Download manifests, file verification, per-family "is this model loadable" |
+| `stt/start_watch.py` | Judges a start that is dead or wedged, so STARTING always resolves |
 | `stt/demo_*.py` | The shippable demo: playback engine, fake backends, egress guards, redaction, synthetic service generator |
 | `scripts/` | Dev-only tools: fixture recorder, demo session builder |
 | `tests/` | Pytest suite: download state, path safety, staging, text utils, watchdog update |
@@ -110,6 +111,13 @@ The server is mostly a monolith — most changes land in `speech_to_text.py`.
   honours neither `HF_HUB_OFFLINE` nor any timeout, so a stalled connection blocks for ever.
   `local_files_only=True` does not help — faster-whisper only forwards it to `download_model()`,
   which a local directory skips. Refusing to call the loader is the only fix.
+- **A start always reaches a terminal state.** The worker stamps `init_stage`/`init_stage_at`
+  at each init step (`_worker_stage`); the status poll runs `stt/start_watch.evaluate_start`
+  and *writes* an error state when the worker is gone or a stage has not advanced for
+  `transcription.start_stall_seconds`. The clock is per-stage, so a slow model load is left
+  alone while a wedged one resolves. **A new init step needs a `_worker_stage` call**, or it
+  is a window the reaper times as one long stage. The correction has to be written, not just
+  returned, or Stop and Start keep seeing a phantom `starting`.
 - **Worker failures must report themselves.** The transcription worker is a `multiprocessing.Process`, and `BaseProcess._bootstrap` swallows its exceptions to stderr without ever calling `sys.excepthook` — so Sentry does not see them. Anything that can kill the worker belongs inside the `except Exception` in `thread1_function`, which routes through `_report_worker_crash` / `stt/worker_crash.py`. Never assign to `sys.excepthook` or `threading.excepthook` directly either; chain, or Sentry's hook is silently displaced.
 - **Commits**: conventional-commit style with a scope, e.g. `fix(translation): …`, `feat(server): …`. **No AI attribution at all** — no `Co-authored-by` line in the message, and no `git notes` attribution either. Commits carry the work, not who typed it.
 - **UI work**: follow the design tokens in `DESIGN.md` (colors, typography, spacing, component styles).

@@ -206,6 +206,10 @@
     "use_gpu": true,
     "_use_gpu_comment": "Automatically use GPU (CUDA) if available for faster transcription"
   },
+  "transcription": {
+    "start_stall_seconds": 600,
+    "_start_stall_seconds_comment": "How long a single startup step may make no progress before the start is reported as failed instead of showing STARTING for ever. Measured per step, not per start, so a slow model load is left alone as long as it keeps moving. 0 disables the check."
+  },
   "audio_backup": {
     "wav_enabled": true,
     "_wav_enabled_comment": "Save final session audio as .wav file (created when transcription stops)",
