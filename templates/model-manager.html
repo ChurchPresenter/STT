@@ -2399,10 +2399,20 @@
                     data.models.forEach(model => {
                         const isDownloaded = model.downloaded;
                         const statusText = isDownloaded ? '✅ Downloaded' : 'Not downloaded';
-                        const statusColor = isDownloaded ? 'var(--success)' : '#999';
-                        const btnText = isDownloaded ? 'Remove' : 'Download';
-                        const btnBg = isDownloaded ? 'var(--danger)' : 'var(--success)';
-                        const btnAction = isDownloaded
+                        // A model whose files no longer match its manifest. The
+                        // loader already refuses it and tells the operator to
+                        // download it again — but the buttons keyed off presence
+                        // alone, so it offered Remove and no way to comply.
+                        const isIncomplete = model.state === 'incomplete';
+                        const statusColor = isIncomplete ? 'var(--warning)'
+                            : isDownloaded ? 'var(--success)' : '#999';
+                        const btnText = isIncomplete ? 'Repair'
+                            : isDownloaded ? 'Remove' : 'Download';
+                        const btnBg = isIncomplete ? 'var(--warning)'
+                            : isDownloaded ? 'var(--danger)' : 'var(--success)';
+                        // Repair is a download: it resumes what is there rather
+                        // than starting over.
+                        const btnAction = (isDownloaded && !isIncomplete)
                             ? `removeTranslationModel('${model.model_id}')`
                             : `downloadTranslationModel('${model.model_id}')`;
 
@@ -2417,6 +2427,7 @@
                                         🌐 ${model.name}${recommendedBadge}
                                     </div>
                                     <div class="model-details">${model.description}</div>
+                                    ${isIncomplete ? `<div class="model-details" style="color: var(--warning);">Incomplete — ${model.missing_text} missing or truncated${model.on_disk_text ? `, ${model.on_disk_text} on disk` : ''}. Repair continues the download; Remove discards it.</div>` : ''}
                                     <div class="model-details" style="margin-top: 4px;">
                                         <span style="background: var(--bg-elevated); padding: 2px 8px; border-radius: var(--radius-sm); font-size: 0.8em;">${model.size}</span>
                                         <span style="background: var(--bg-elevated); padding: 2px 8px; border-radius: var(--radius-sm); font-size: 0.8em; margin-left: 5px;">GPU Recommended</span>
@@ -2426,6 +2437,7 @@
                                 <div class="model-actions">
                                     <span id="nllb_status_${model.name}" style="margin-right: 10px; font-size: 0.85em; color: ${statusColor};">${statusText}</span>
                                     <button class="model-btn" id="nllb_btn_${model.name}" onclick="${btnAction}" style="background: ${btnBg};">${btnText}</button>
+                                    ${isIncomplete ? `<button class="model-btn remove" onclick="removeTranslationModel('${model.model_id}')">Remove</button>` : ''}
                                 </div>
                             </div>
                         `;

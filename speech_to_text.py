@@ -84,7 +84,7 @@ from stt import worker_crash as _worker_crash
 from stt import diagnostics as _diagnostics
 from stt import model_disk as _model_disk
 from stt.http_params import merge_request_params, parse_json_body as _parse_json_body
-from stt.model_disk import dir_has_weights, dir_is_writable, has_weight_file, is_weight_file, model_presence  # noqa: F401
+from stt.model_disk import _CT2_MARKER, dir_has_weights, dir_is_writable, has_weight_file, is_weight_file, model_presence  # noqa: F401
 from stt import model_catalog as _model_catalog
 from stt import model_files as _model_files
 from stt import start_watch as _start_watch
@@ -16039,12 +16039,26 @@ def list_models():
                     # removed from here either. List it as incomplete instead, so
                     # Remove has something to act on.
                     _item_path = os.path.join(models_dir, item)
-                    _item_state = "complete" if dir_has_weights(_item_path) else "incomplete"
+                    # A converted model keeps its weights in a "-ct2-" sibling and
+                    # the original directory is often stripped afterwards to
+                    # reclaim the space — which model_presence has always counted
+                    # as downloaded. Judging on this directory's own weights alone
+                    # badged a working translation model orange "Incomplete".
+                    _item_state = ("complete"
+                                   if _model_disk.model_presence(models_dir, item).downloaded
+                                   else "incomplete")
 
                     # Detect if it's a HuggingFace model (contains --)
                     if "--" in item:
-                        # HuggingFace model - convert back to original ID
-                        model_id = item.replace("--", "/")
+                        # A conversion is not a repo. Mangling "--" back to "/"
+                        # turned google--madlad400-3b-mt-ct2-int8_float16 into a
+                        # model id that has never existed on the Hub, which is
+                        # then what the operator is invited to search for.
+                        if _CT2_MARKER in item:
+                            _parent, _, _compute = item.partition(_CT2_MARKER)
+                            model_id = f"{_parent.replace('--', '/')} (converted, {_compute})"
+                        else:
+                            model_id = item.replace("--", "/")
                         downloaded_models.append(
                             {
                                 "name": model_id,
@@ -16272,6 +16286,21 @@ def _annotate_download_state(model, models_dir):
     # Only meaningful when the HF weights are gone; the UI labels those so a
     # CT2-only entry is not mistaken for a full download.
     model["converted_only"] = presence.downloaded and not presence.has_weights
+
+    # Whether the bytes on disk still match what was downloaded. The loader
+    # already refuses a directory that contradicts its manifest and tells the
+    # operator to download it again — but the Model Manager keyed its buttons off
+    # presence alone, so a truncated model showed "Remove" and no way to do what
+    # the error had just asked for. There was no repair path for translation at
+    # all.
+    _dir = os.path.join(models_dir, model["model_id"].replace("/", "--"))
+    _mismatched = _model_files.manifest_mismatches(_dir) if presence.has_weights else []
+    model["state"] = ("incomplete" if _mismatched
+                      else "complete" if presence.downloaded else "absent")
+    model["missing"] = _mismatched
+    model["missing_text"] = _model_files.describe_missing(_mismatched)
+    model["on_disk_text"] = (_model_files.describe_bytes(_model_files.bytes_on_disk(_dir))
+                             if presence.downloaded or _mismatched else "")
     return model
 
 
