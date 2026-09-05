@@ -129,6 +129,20 @@ The server is mostly a monolith — most changes land in `speech_to_text.py`.
   alone while a wedged one resolves. **A new init step needs a `_worker_stage` call**, or it
   is a window the reaper times as one long stage. The correction has to be written, not just
   returned, or Stop and Start keep seeing a phantom `starting`.
+- **One place says what a family needs.** `stt/model_files.py` holds `REQUIRED_BY_FAMILY` and
+  answers through `dir_status(model_dir, family)`; `stt/diagnostics.py` **imports** that map and a
+  test asserts the two are the same object. A second copy is not a style problem — the copy
+  applied faster-whisper's `tokenizer.json` rule to every transformers directory and condemned a
+  working CTranslate2 model on a production machine. Families whose shape does not fit a file
+  list (piper's `.onnx` + `.onnx.json` pair, the PANNs size floor, supertonic's third-party
+  downloader) keep bespoke predicates, but each must still reject the zero-byte and short-file
+  cases, and any "already downloaded, skipping" branch must mean *already whole* or the repair
+  it skips can never happen.
+- **Anything generated into a directory is staged too.** The CTranslate2 conversion builds under
+  `<dir>.converting` and `os.replace()`s into place, for the reason downloads use `.part`: an
+  interrupted convert otherwise leaves a directory that exists, is not a model, and is then handed
+  to a C++ reader.
+
 - **Worker failures must report themselves.** The transcription worker is a `multiprocessing.Process`, and `BaseProcess._bootstrap` swallows its exceptions to stderr without ever calling `sys.excepthook` — so Sentry does not see them. Anything that can kill the worker belongs inside the `except Exception` in `thread1_function`, which routes through `_report_worker_crash` / `stt/worker_crash.py`. Never assign to `sys.excepthook` or `threading.excepthook` directly either; chain, or Sentry's hook is silently displaced.
 - **Commits**: conventional-commit style with a scope, e.g. `fix(translation): …`, `feat(server): …`. **No AI attribution at all** — no `Co-authored-by` line in the message, and no `git notes` attribution either. Commits carry the work, not who typed it.
 - **UI work**: follow the design tokens in `DESIGN.md` (colors, typography, spacing, component styles).

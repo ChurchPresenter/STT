@@ -1223,12 +1223,28 @@ def _load_ct2_translator(hf_model_path, model_id, use_gpu, ct2_compute_type):
             f"CTranslate2 backend needs '{model_id}' downloaded locally first "
             "(Model Manager). Cannot convert a hub-only model.")
     ct2_dir = _ct2_model_dir(hf_model_path, compute_type)
-    if not os.path.isdir(ct2_dir):
+    # A conversion that was interrupted — the process killed, the machine
+    # restarted, the disk filled — left a directory that exists and is not a
+    # model. The only test was that the path was there, so the remains were then
+    # handed to ctranslate2.Translator, which is a C++ reader: a crash rather
+    # than an exception, and nothing to repair it since the path existed.
+    if not _model_files.dir_status(ct2_dir, "ct2").complete:
+        if os.path.isdir(ct2_dir):
+            print(f"[CT2] Previous conversion at {ct2_dir} is incomplete; redoing it",
+                  flush=True)
+            shutil.rmtree(ct2_dir, ignore_errors=True)
         # One-time conversion from the official HF weights (transiently needs
         # ~model-size RAM). Cached beside the HF model, keyed by compute type.
+        #
+        # Built under a temporary name and moved into place, so an interruption
+        # leaves no directory rather than half a model — the same rule the file
+        # downloads follow with their .part staging.
         print(f"[CT2] Converting {model_id} -> {ct2_dir} ({compute_type})... one-time", flush=True)
         from ctranslate2.converters import TransformersConverter
-        TransformersConverter(hf_model_path).convert(ct2_dir, quantization=compute_type, force=False)
+        staging = f"{ct2_dir}.converting"
+        shutil.rmtree(staging, ignore_errors=True)
+        TransformersConverter(hf_model_path).convert(staging, quantization=compute_type, force=False)
+        os.replace(staging, ct2_dir)
     _lt = config.get("live_translation", {})
     intra = max(0, int(_lt.get("ct2_intra_threads", 4)))   # CPU compute threads (P-cores)
     inter = max(1, int(_lt.get("ct2_inter_threads", 1)))   # parallel batches
@@ -3805,6 +3821,17 @@ PANNS_LABELS_FILENAME = "class_labels_indices.csv"
 PANNS_LABELS_BUNDLED = os.path.join(APP_DIR, "panns_data", PANNS_LABELS_FILENAME)
 PANNS_LABELS_URL = "https://storage.googleapis.com/us_audioset/youtube_corpus/v1/csv/class_labels_indices.csv"
 _PANNS_LABELS_MIN_BYTES = 1024  # a valid 527-row CSV is ~14 KB; smaller == missing/poisoned
+
+#: Below this, the CNN14 checkpoint is a truncated download rather than a model.
+#: A floor rather than an exact size: PANNS_CKPT_SIZE is approximate and only ever
+#: drove a progress bar, so asserting it as an expectation would fail a good file.
+#: Same shape as the labels floor above, for the same reason — it separates
+#: "interrupted" from "fine" without claiming precision we do not have.
+#:
+#: Without it a dropped transfer left a short .pth that every check called
+#: present, the download endpoint refused to re-fetch because the path existed,
+#: and the detector met it much later.
+_PANNS_CKPT_MIN_BYTES = 250_000_000
 _panns_labels_ready = False  # only need to repair the on-disk CSV once per process
 _audio_tagger = None
 _audio_tagger_failed_key = None  # (device, ckpt) that hit a real load error — don't retry it
@@ -3818,6 +3845,15 @@ def panns_checkpoint_path(cfg=None):
     cfg = cfg if cfg is not None else config.get("speech_type_detection", {})
     custom = (cfg.get("checkpoint_path", "") or "").strip()
     return custom or PANNS_CHECKPOINT
+
+
+def panns_checkpoint_ok(path=None):
+    """True when the checkpoint is present and big enough to be real."""
+    ckpt = path or panns_checkpoint_path()
+    try:
+        return os.path.getsize(ckpt) >= _PANNS_CKPT_MIN_BYTES
+    except OSError:
+        return False
 
 
 def panns_labels_home_path():
@@ -3907,9 +3943,13 @@ def get_audio_tagger(cfg):
         return None
     # Missing checkpoint is *transient* (a download in the main process may produce
     # it later) — recheck cheaply each call instead of failing permanently.
-    if not os.path.exists(ckpt):
+    # A short file counts as missing: it is an interrupted download, and handing
+    # it to AudioTagging buys a confusing failure instead of the honest fallback.
+    if not panns_checkpoint_ok(ckpt):
         if not _panns_missing_logged:
-            print(f"[PANNS] Checkpoint not found at {ckpt}; music detection falls back to energy-based until it's downloaded")
+            _why = "incomplete" if os.path.exists(ckpt) else "not found"
+            print(f"[PANNS] Checkpoint {_why} at {ckpt}; music detection falls back "
+                  f"to energy-based until it's downloaded")
             _panns_missing_logged = True
         return None
     # Config changed (device/checkpoint) or first load: drop any stale model.
@@ -9764,11 +9804,31 @@ def _get_piper_model_dir(model_id):
 
 
 def _is_piper_model_downloaded(model_id):
-    """Check if a piper model is downloaded"""
+    """Whether a piper voice is present *and* loadable.
+
+    A voice is two files: the .onnx weights and its .onnx.json config, and
+    PiperVoice.load raises without the second. Requiring only the .onnx meant a
+    download that dropped between them reported the voice as ready, and the
+    failure arrived later from the TTS path with nothing in it about downloads.
+    Both must be non-empty: a zero-byte file is what an interrupted transfer
+    leaves, and it satisfies "exists".
+    """
     model_dir = _get_piper_model_dir(model_id)
-    if model_dir and os.path.isdir(model_dir):
-        return any(f.endswith(".onnx") for f in os.listdir(model_dir))
-    return False
+    if not (model_dir and os.path.isdir(model_dir)):
+        return False
+    try:
+        names = os.listdir(model_dir)
+    except OSError:
+        return False
+
+    def _has(name):
+        try:
+            return os.path.getsize(os.path.join(model_dir, name)) > 0
+        except OSError:
+            return False
+
+    onnx = [f for f in names if f.endswith(".onnx") and _has(f)]
+    return any(_has(f"{f}.json") for f in onnx)
 
 
 # ─── Supertonic TTS model management ────────────────────────────────────────
@@ -9792,10 +9852,35 @@ def _get_supertonic_dir():
     return os.path.join(_tts_cache_dir, "supertonic")
 
 
+def _supertonic_onnx_files(model_dir):
+    """Every .onnx under a supertonic model directory, recursively."""
+    found = []
+    for root, _dirs, files in os.walk(model_dir):
+        found.extend(os.path.join(root, f) for f in files if f.endswith(".onnx"))
+    return found
+
+
 def _is_supertonic_downloaded():
-    """Whether every ONNX module supertonic needs is present on disk."""
+    """Whether every ONNX module supertonic needs is present, and none is empty.
+
+    The download runs inside the third-party package, so it never gets our
+    staging or verification — a dropped transfer is entirely possible and there
+    is nothing to resume. The presence check the package offers cannot tell a
+    finished module from a file that was created and never written, so at least
+    refuse the zero-byte case: that is what an interrupted create leaves, and
+    calling it ready sends the operator to a failure at speech time instead of a
+    button that says Download.
+    """
     model_dir = _get_supertonic_dir()
     if not os.path.isdir(model_dir):
+        return False
+    onnx_files = _supertonic_onnx_files(model_dir)
+    if not onnx_files:
+        return False
+    try:
+        if any(os.path.getsize(f) == 0 for f in onnx_files):
+            return False
+    except OSError:
         return False
     try:
         from supertonic.loader import has_all_onnx_modules
@@ -9803,8 +9888,7 @@ def _is_supertonic_downloaded():
     except Exception:
         # Package missing or its layout changed - fall back to "are there onnx
         # files here at all", which is what the UI actually needs to know.
-        onnx_dir = os.path.join(model_dir, "onnx")
-        return os.path.isdir(onnx_dir) and any(f.endswith(".onnx") for f in os.listdir(onnx_dir))
+        return True
 
 
 @app.route("/api/models/tts-list", methods=["GET"])
@@ -9903,6 +9987,14 @@ def download_tts_model():
                     _tts_download_status = {"status": "failed", "model": model_name, "error": "Cancelled"}
                     finish_download(download_key, cancelled=True)
                     return
+
+            # Both files, or neither. The config carries no Content-Length we can
+            # check against, so confirm the pair landed rather than trusting that
+            # two transfers which each returned "ok" left a loadable voice.
+            if not _is_piper_model_downloaded(model_name):
+                raise RuntimeError(
+                    f"The voice '{model_name}' did not download completely — it needs "
+                    f"both {model_name}.onnx and {model_name}.onnx.json.")
 
             print(f"[TTS] Piper model downloaded: {model_name}")
             _tts_download_status = {"status": "completed", "model": model_name, "error": ""}
@@ -16451,7 +16543,8 @@ def panns_status():
 
     installed = panns_package_installed()
     ckpt = panns_checkpoint_path()
-    downloaded = os.path.exists(ckpt)
+    downloaded = panns_checkpoint_ok(ckpt)
+    truncated = os.path.exists(ckpt) and not downloaded
     # Self-heal the AudioSet label CSV so a missing/0-byte file doesn't silently
     # break detection; then report whether labels are present.
     ensure_panns_labels_csv()
@@ -16459,6 +16552,9 @@ def panns_status():
     labels_ok = os.path.exists(labels_csv) and os.path.getsize(labels_csv) >= _PANNS_LABELS_MIN_BYTES
     if not installed:
         msg = "panns-inference not installed. Install with: pip install panns-inference"
+    elif truncated:
+        msg = ("PANNs CNN14 checkpoint is incomplete — the download was "
+               "interrupted. Download it again to repair it.")
     elif not downloaded:
         msg = "PANNs CNN14 checkpoint not downloaded."
     elif not labels_ok:
@@ -16486,7 +16582,10 @@ def download_panns_model():
         return jsonify({"success": False, "error": "panns-inference is not installed. Install it first: pip install panns-inference"}), 400
 
     dest = panns_checkpoint_path()
-    if os.path.exists(dest):
+    # "Already downloaded" has to mean "already whole". Skipping on mere existence
+    # meant a truncated checkpoint could never be repaired from here: the button
+    # reported success and changed nothing, for the life of the file.
+    if panns_checkpoint_ok(dest):
         ensure_panns_labels_csv()  # checkpoint present but labels may still be missing
         return jsonify({"success": True, "message": "Checkpoint already downloaded"})
 
@@ -16501,6 +16600,11 @@ def download_panns_model():
             # it's in place too (the detector loads labels at import time).
             ensure_panns_labels_csv()
             start_download_monitor(key, dest, total=PANNS_CKPT_SIZE)
+            # A short file here used to be promoted and then believed for ever,
+            # because verify_file passes anything non-empty when given no size.
+            if os.path.exists(dest) and not panns_checkpoint_ok(dest):
+                print("[PANNS] Existing checkpoint is short; re-fetching")
+                os.remove(dest)
             result = download_url_to_file(
                 PANNS_CHECKPOINT_URL, dest,
                 cancel_check=lambda: key in cancelled_downloads,
@@ -16508,6 +16612,10 @@ def download_panns_model():
             if result == "cancelled":
                 finish_download(key, cancelled=True)
                 return
+            if not panns_checkpoint_ok(dest):
+                raise RuntimeError(
+                    "The downloaded checkpoint is too small to be the CNN14 model; "
+                    "the transfer was cut short.")
             finish_download(key)
             # No global reset needed: the detector runs in the worker process and
             # re-checks the checkpoint each tick, so it picks this up without a restart.
