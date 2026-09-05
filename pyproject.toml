@@ -84,6 +84,8 @@ module = [
     "stt.worker_crash",
     "stt.diagnostics",
     "stt.start_watch",
+    "stt.shutdown_channel",
+    "stt.win_job",
 ]
 disallow_untyped_defs = true
 

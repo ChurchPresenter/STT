@@ -80,6 +80,7 @@ from stt import pair_tokens as _pair_tokens_mod
 # How a dying worker process reports itself, and why excepthooks are chained
 # rather than replaced.
 from stt import worker_crash as _worker_crash
+from stt import shutdown_channel as _shutdown_channel
 # What may appear in an operator's support report, by allowlist.
 from stt import diagnostics as _diagnostics
 from stt import model_disk as _model_disk
@@ -23882,10 +23883,20 @@ if __name__ == "__main__":
     # teardown the signals trigger. EOF alone is deliberately ignored (a dead
     # watchdog must not stop the service; its replacement re-attaches).
     if _is_watchdog_managed():
+        # Read the pipe from a private duplicate and give fd 0 the null device, so
+        # the transcription worker does not inherit the watchdog's shutdown
+        # channel — see stt/shutdown_channel.py and issue #13, where a Windows
+        # worker wedges at interpreter startup with this handle in play. The
+        # channel itself is unchanged; only what children inherit differs.
+        _shutdown_detach = _shutdown_channel.detach_stdin()
+        if not _shutdown_detach.detached:
+            print(f"[SHUTDOWN] Could not detach the watchdog pipe from stdin "
+                  f"({_shutdown_detach.error}); reading it in place")
+
         def _stdin_shutdown_watcher():
             try:
-                for line in sys.stdin:
-                    if line.strip() == "shutdown":
+                for line in _shutdown_detach.stream:
+                    if _shutdown_channel.is_shutdown_request(line):
                         print("[SHUTDOWN] Graceful shutdown requested by watchdog")
                         signal_handler(signal.SIGTERM, None)  # exits the process
             except Exception:
