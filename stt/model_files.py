@@ -39,7 +39,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-from typing import (Dict, Iterable, List, Mapping, NamedTuple, Optional,
+from typing import (Any, Dict, Iterable, List, Mapping, NamedTuple, Optional,
                     Sequence, Tuple, Union)
 
 #: Sidecar written into a model directory once every file has been verified.
@@ -359,6 +359,29 @@ def describe_bytes(count: int) -> str:
             return f"{size:.0f} {unit}" if unit == "B" else f"{size:.1f} {unit}"
         size /= 1024
     return f"{size:.1f} GB"
+
+
+def pipeline_tag_from_config(config: Mapping[str, Any]) -> Optional[str]:
+    """The HuggingFace pipeline tag implied by a local ``config.json``.
+
+    Exists to keep a loader off the network. ``_load_huggingface`` called
+    ``model_info(model_id)`` on every load purely to read ``pipeline_tag`` — even
+    for a model already complete on disk — and ``HfApi.model_info`` defaults to
+    ``timeout=None``. On a connection that stalls rather than refusing, that call
+    never returns, inside the transcription worker, with the UI reporting STARTING:
+    the same shape as the tokenizer.json hang, and needing no corrupt file to
+    trigger it.
+
+    A downloaded model already says what it is. ``model_type`` and
+    ``architectures`` are both checked because older configs carry only the
+    latter. Returns ``None`` when the config says nothing recognisable, leaving
+    the caller to decide whether the question is worth a network round trip.
+    """
+    model_type = str(config.get("model_type") or "").lower()
+    architectures = " ".join(str(a) for a in (config.get("architectures") or [])).lower()
+    if "whisper" in model_type or "whisper" in architectures:
+        return "automatic-speech-recognition"
+    return None
 
 
 def describe_missing(missing: Iterable[str]) -> str:

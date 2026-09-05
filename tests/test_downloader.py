@@ -337,3 +337,37 @@ class TestCurlHasNoTotalTimeCap:
         """Guards the numbers themselves: this is the bug, restated as a test."""
         assert downloads.STALL_BYTES_PER_S <= 8 * 1024, "must tolerate a very slow link"
         assert downloads.STALL_SECONDS >= 60, "a brief pause is not a stall"
+
+
+class TestWhisperCheckpointIsStaged:
+    """The .pt download used to write straight to its final name.
+
+    A process killed mid-transfer left a truncated checkpoint under the real name.
+    whisper.load_model then notices the bad checksum and re-downloads it with
+    urllib.request.urlopen(url) and no timeout — inside the transcription worker.
+    Staging means the real name never holds bytes that failed their checksum.
+    """
+
+    def test_the_monolith_routes_it_through_the_staged_downloader(self):
+        source = pathlib.Path("speech_to_text.py").read_text(encoding="utf-8")
+        assert "_downloads.download_url_to_file(\n" in source
+        assert "expected_sha256=expected_sha256," in source, (
+            "the checkpoint's sha256 is in its URL; the staged path must verify it"
+        )
+
+    def test_a_wrong_checksum_never_reaches_the_final_name(self, http_server, tmp_path):
+        dest = tmp_path / "model.pt"
+        with pytest.raises(Exception, match="Failed to download"):
+            downloads.download_url_to_file(
+                f"{http_server}/fast", str(dest), max_attempts=1, log=lambda m: None,
+                expected_sha256="0" * 64,
+            )
+        assert not dest.exists(), "a checkpoint that failed its checksum must not be promoted"
+
+    def test_a_correct_checksum_is_promoted(self, http_server, tmp_path):
+        dest = tmp_path / "model.pt"
+        downloads.download_url_to_file(
+            f"{http_server}/fast", str(dest), max_attempts=1, log=lambda m: None,
+            expected_sha256=hashlib.sha256(CONTENT).hexdigest(),
+        )
+        assert dest.read_bytes() == CONTENT

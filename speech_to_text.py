@@ -2868,9 +2868,25 @@ class ModelFactory:
             )
 
         try:
-            # Determine model architecture from model card
-            info = model_info(model_id)
-            pipeline_tag = info.pipeline_tag
+            # Determine model architecture. Ask the directory we already have
+            # before asking the internet: model_info() defaults to timeout=None,
+            # and this ran on every load of a fully-local model — so a stalled
+            # connection hung the worker with nothing wrong on disk at all.
+            pipeline_tag = None
+            try:
+                with open(os.path.join(model_path, "config.json"), encoding="utf-8") as _cf:
+                    pipeline_tag = _model_files.pipeline_tag_from_config(json.load(_cf))
+            except (OSError, ValueError) as _cfg_err:
+                print(f"[WARN] Could not read local config.json ({_cfg_err}); "
+                      f"falling back to the model card")
+            if pipeline_tag is None:
+                # Only when the local files could not answer. Bounded, and failing
+                # open: an unreachable Hub must not stop a downloaded model loading.
+                try:
+                    pipeline_tag = model_info(model_id, timeout=15).pipeline_tag
+                except Exception as _info_err:
+                    print(f"[WARN] Could not reach the model card ({_info_err}); "
+                          f"inferring from the model id")
 
             # Load based on architecture
             if (
@@ -14534,41 +14550,27 @@ def download_model():
                     model_path = None
 
                 if model_path is None:
-                    # Download with streaming SHA256 computation
+                    # Staged, verified and resumable, like every other download.
+                    # This used to stream straight to download_target, so a process
+                    # killed mid-transfer left a truncated .pt under its real name.
+                    # That file then reached whisper.load_model, which notices the
+                    # bad checksum and quietly re-downloads it with
+                    # urllib.request.urlopen(url) and *no timeout* — inside the
+                    # transcription worker, on a connection that may stall rather
+                    # than refuse. The same shape as the tokenizer.json hang: a
+                    # loader reaching for the network with no deadline we can set.
+                    # Staging means a killed download leaves a .part and the real
+                    # name never holds bytes that failed their checksum.
                     print(f"[INFO] Downloading Whisper model to {download_target}")
-                    sha256_hash = hashlib.sha256()
-
-                    download_cancelled = False
-                    with urllib.request.urlopen(url, timeout=120) as source, open(download_target, "wb") as output:
-                        total_size = int(source.info().get("Content-Length", 0))
-                        with tqdm(total=total_size, ncols=80, unit="iB", unit_scale=True, unit_divisor=1024) as pbar:
-                            while True:
-                                if model_key in cancelled_downloads:
-                                    download_cancelled = True
-                                    break
-                                buffer = source.read(8192)
-                                if not buffer:
-                                    break
-                                output.write(buffer)
-                                sha256_hash.update(buffer)  # Compute SHA256 during download
-                                pbar.update(len(buffer))
-
-                    if download_cancelled:
+                    outcome = _downloads.download_url_to_file(
+                        url, download_target,
+                        cancel_check=lambda: model_key in cancelled_downloads,
+                        expected_sha256=expected_sha256,
+                    )
+                    if outcome == "cancelled":
                         print(f"[CANCELLED] Whisper download cancelled: {model_name}")
-                        try:
-                            os.remove(download_target)
-                        except OSError:
-                            pass
                         finish_download(model_key, cancelled=True)
                         return jsonify({"success": False, "message": "Download cancelled"})
-
-                    # Verify checksum computed during download
-                    computed_sha256 = sha256_hash.hexdigest()
-                    if computed_sha256 != expected_sha256:
-                        os.remove(download_target)
-                        raise RuntimeError(
-                            f"Model download failed: SHA256 mismatch. Expected {expected_sha256}, got {computed_sha256}"
-                        )
 
                     model_path = download_target
                     print("[OK] Download complete, checksum verified")

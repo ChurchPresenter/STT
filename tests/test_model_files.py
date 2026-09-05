@@ -264,3 +264,68 @@ class TestDescribeBytes:
 
     def test_a_multi_terabyte_figure_still_renders(self):
         assert mf.describe_bytes(5 * 1024 ** 4).endswith("GB")
+
+
+class TestPipelineTagFromConfig:
+    """Keeping a loader off the network.
+
+    _load_huggingface called model_info(model_id) on every load purely to read
+    pipeline_tag — even for a model already complete on disk — and
+    HfApi.model_info defaults to timeout=None. On a connection that stalls rather
+    than refusing, that never returns, inside the worker, with the UI on STARTING.
+    No corrupt file is needed to trigger it.
+    """
+
+    def test_a_whisper_config_answers_without_the_network(self):
+        assert mf.pipeline_tag_from_config(
+            {"model_type": "whisper"}) == "automatic-speech-recognition"
+
+    def test_an_older_config_carrying_only_architectures_still_answers(self):
+        assert mf.pipeline_tag_from_config(
+            {"architectures": ["WhisperForConditionalGeneration"]}
+        ) == "automatic-speech-recognition"
+
+    def test_an_unrecognised_config_defers_rather_than_guessing(self):
+        assert mf.pipeline_tag_from_config({"model_type": "bert"}) is None
+
+    def test_an_empty_or_odd_config_does_not_raise(self):
+        for config in ({}, {"architectures": None}, {"model_type": None},
+                       {"architectures": [123]}):
+            assert mf.pipeline_tag_from_config(config) is None
+
+
+class TestDirStatusByFamily:
+    def test_a_conversion_needs_no_tokenizer(self, tmp_path):
+        d = tmp_path / "x-ct2-int8"
+        d.mkdir()
+        (d / "model.bin").write_bytes(b"x" * 100)
+        (d / "config.json").write_bytes(b"x" * 10)
+        assert mf.dir_status(str(d), "ct2").complete
+
+    def test_a_transformers_directory_needs_only_a_config(self, tmp_path):
+        d = tmp_path / "facebook--nllb"
+        d.mkdir()
+        (d / "config.json").write_bytes(b"x" * 10)
+        assert mf.dir_status(str(d), "transformers").complete
+
+    def test_sibling_weights_excuse_a_missing_model_bin(self, tmp_path):
+        d = tmp_path / "x-ct2-int8"
+        d.mkdir()
+        (d / "config.json").write_bytes(b"x" * 10)
+
+        assert not mf.dir_status(str(d), "ct2").complete
+        assert mf.dir_status(str(d), "ct2", sibling_weights=True).complete
+
+    def test_an_unknown_family_requires_nothing(self, tmp_path):
+        d = tmp_path / "mystery"
+        d.mkdir()
+        assert mf.dir_status(str(d), "no-such-family").complete
+
+    def test_an_absent_directory_is_absent_whatever_the_family(self, tmp_path):
+        assert mf.dir_status(str(tmp_path / "nope"), "ct2").state == "absent"
+
+    def test_faster_whisper_status_is_the_generic_one(self, tmp_path):
+        d = tmp_path / "faster-whisper-base"
+        d.mkdir()
+        (d / "model.bin").write_bytes(b"x" * 10)
+        assert mf.faster_whisper_status(str(d)) == mf.dir_status(str(d), "faster-whisper")
