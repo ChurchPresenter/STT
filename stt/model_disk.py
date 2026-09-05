@@ -47,7 +47,12 @@ def is_weight_file(name: str) -> bool:
         return True
     if name.startswith("model-") and name.endswith(".safetensors"):
         return True
-    return name.endswith(".pt") or name.endswith(".gguf")
+    # .onnx is Piper and Supertonic; .pth is the PANNs checkpoint. Both were
+    # missing, so those directories classified as "not a model at all" and were
+    # invisible to every caller here — including the diagnostic report, which
+    # silently skipped the two families an operator is most likely to have
+    # half-downloaded over a bad link.
+    return name.endswith((".pt", ".pth", ".gguf", ".onnx"))
 
 
 def has_weight_file(filenames: Iterable[str]) -> bool:

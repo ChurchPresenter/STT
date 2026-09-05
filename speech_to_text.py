@@ -82,6 +82,7 @@ from stt import pair_tokens as _pair_tokens_mod
 from stt import worker_crash as _worker_crash
 # What may appear in an operator's support report, by allowlist.
 from stt import diagnostics as _diagnostics
+from stt import model_disk as _model_disk
 from stt.http_params import merge_request_params, parse_json_body as _parse_json_body
 from stt.model_disk import dir_has_weights, dir_is_writable, has_weight_file, is_weight_file, model_presence  # noqa: F401
 from stt import model_catalog as _model_catalog
@@ -13201,10 +13202,15 @@ def _diagnostic_model_health():
         # The disk-aware verdict, which reads the download manifest and so knows
         # the size each file was meant to be. Passing it in keeps this report and
         # the Model Manager from disagreeing about the same directory.
-        status = (_model_files.faster_whisper_status(path)
-                  if family == "faster-whisper" else None)
+        status = _model_files.dir_status(path, family)
+        # A converted model keeps its weights in a "-ct2-" sibling, and the
+        # original directory is often stripped afterwards to reclaim the space —
+        # a workflow the app endorses (see model_disk.ModelPresence). Without
+        # this the healthy pair reads as two broken models.
+        sibling = bool(_model_disk.ct2_variant_names(names, name))
         healths.append(_diagnostics.check_model_dir(
-            name, entries, family=family, status=status))
+            name, entries, family=family, status=status,
+            sibling_weights=sibling))
     return healths
 
 

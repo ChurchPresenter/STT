@@ -39,7 +39,8 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-from typing import Dict, Iterable, List, Mapping, NamedTuple, Optional, Sequence, Union
+from typing import (Dict, Iterable, List, Mapping, NamedTuple, Optional,
+                    Sequence, Tuple, Union)
 
 #: Sidecar written into a model directory once every file has been verified.
 #: Dot-prefixed so the model-manager listings, which already skip dotfiles, do
@@ -71,6 +72,33 @@ REQUIRED_FASTER_WHISPER = (
     "tokenizer.json",
     ("vocabulary.txt", "vocabulary.json"),
 )
+
+#: What each family needs before its loader may be called, in one place.
+#:
+#: Scattering this was how a faster-whisper rule ended up applied to a CTranslate2
+#: translation directory: ``tokenizer.json`` is mandatory *for faster-whisper*,
+#: for the specific reason above, and the diagnostic report had quietly copied it
+#: onto every transformers directory. A CT2 conversion has no tokenizer at all —
+#: ``ctranslate2.Translator`` is handed only the conversion, while the tokenizer
+#: is read from the parent HuggingFace directory — so demanding one condemned a
+#: model that works.
+#:
+#: Families deliberately absent (``piper``, ``supertonic``, ``panns``) fail
+#: cleanly or degrade rather than hanging, and keep their own presence checks
+#: until someone gives them the same treatment.
+REQUIRED_BY_FAMILY: Dict[str, Tuple[Union[str, Tuple[str, ...]], ...]] = {
+    "faster-whisper": REQUIRED_FASTER_WHISPER,
+    # A conversion: weights and its own config, and nothing else. Its vocabulary
+    # is named shared_vocabulary.json in newer CTranslate2 and vocabulary.json in
+    # older, and neither is worth demanding — the loader raises clearly without it.
+    "ct2": ("model.bin", "config.json"),
+    # A transformers directory. config.json is the honest floor: the weights are
+    # judged separately (they may legitimately live in a CT2 sibling), and the
+    # tokenizer requirement above belongs to faster-whisper alone.
+    "transformers": ("config.json",),
+    "gguf": (),
+    "whisper": (),
+}
 
 #: Read size for streaming hashes. Matches the OpenAI-Whisper ``.pt`` download
 #: path in the monolith, which has verified its checksum this way all along.
@@ -257,21 +285,43 @@ def missing_required(model_dir: str, required: Sequence[Union[str, Sequence[str]
     return missing
 
 
-def faster_whisper_status(model_dir: str) -> DirStatus:
-    """Whether ``model_dir`` can be handed to ``faster_whisper.WhisperModel``.
+def dir_status(model_dir: str, family: str = "faster-whisper",
+               *, sibling_weights: bool = False) -> DirStatus:
+    """Whether ``model_dir`` can be handed to its family's loader.
 
     ``absent`` means there is nothing there — a model that was never downloaded,
     which the UI already shows as "Available". ``incomplete`` means a directory
     exists but a required file does not, and is the state the app had no word
     for: it listed as downloaded (or, worse, was hidden entirely) while the
     loader still picked it up and hung or crashed on it.
+
+    ``sibling_weights`` says the weights live somewhere else and this directory is
+    not expected to hold them — the CTranslate2 arrangement, where converting a
+    model leaves the weights in a ``-ct2-`` sibling and the original HuggingFace
+    directory is often stripped afterwards to reclaim the space. That is a
+    supported workflow, so a caller who has established the sibling exists (see
+    ``model_disk.model_presence``) says so here, and the weights stop being
+    required. Without it a healthy pair reads as two broken models, which is
+    exactly what a production diagnostic report claimed.
+
+    An unknown family requires nothing: inventing preconditions for a family
+    nobody has studied is how the faster-whisper tokenizer rule escaped onto
+    directories that never needed it.
     """
     if not os.path.isdir(model_dir):
         return DirStatus("absent", [])
-    missing = missing_required(model_dir, REQUIRED_FASTER_WHISPER)
+    required = REQUIRED_BY_FAMILY.get(family, ())
+    if sibling_weights:
+        required = tuple(entry for entry in required if entry != "model.bin")
+    missing = missing_required(model_dir, required)
     if missing:
         return DirStatus("incomplete", missing)
     return DirStatus("complete", [])
+
+
+def faster_whisper_status(model_dir: str) -> DirStatus:
+    """Whether ``model_dir`` can be handed to ``faster_whisper.WhisperModel``."""
+    return dir_status(model_dir, "faster-whisper")
 
 
 def bytes_on_disk(model_dir: str) -> int:

@@ -38,8 +38,8 @@ from typing import (Any, Dict, Iterable, List, Mapping, NamedTuple, Optional,
                     Sequence, Tuple, Union)
 
 from stt.crash_reports import redact_home_paths
-from stt.model_disk import is_weight_file
-from stt.model_files import REQUIRED_FASTER_WHISPER, describe_missing
+from stt.model_disk import _CT2_MARKER, is_weight_file
+from stt.model_files import REQUIRED_BY_FAMILY, describe_missing
 
 #: Log tags whose lines are structurally operational and cannot carry caption
 #: text. Deliberately excludes everything on the text path — LIVE-TRANSLATION,
@@ -103,29 +103,14 @@ CONFIG_FIELDS: Tuple[str, ...] = (
     "crash_reporting.sentry_enabled",
 )
 
-#: Files a loader needs, per model family. Each entry is a filename, or a tuple
-#: of interchangeable filenames.
-#:
-#: faster-whisper's list is **imported, not restated**. This module previously
-#: kept its own copy demanding ``vocabulary.json`` exactly, while the library
-#: globs ``vocabulary.*`` and real Systran repos ship ``vocabulary.txt`` — so a
-#: perfectly good model was reported broken, telling an operator to delete
-#: something that worked. Two modules answering "is this loadable?" is the bug;
-#: stt/model_files.py owns the answer and this one asks it.
-#:
-#: A GGUF has no companions at all — the single file is the whole model — so it
-#: maps to an empty tuple rather than being left out, which would silently give
-#: it the default family's requirements and report every LLM as broken.
-REQUIRED_COMPANIONS: Dict[str, Tuple[Union[str, Tuple[str, ...]], ...]] = {
-    "faster-whisper": tuple(
-        entry if isinstance(entry, str) else tuple(entry)
-        for entry in REQUIRED_FASTER_WHISPER
-        if entry != "model.bin"  # the weights are judged separately, by size
-    ),
-    "nllb": ("config.json", "tokenizer.json"),
-    "gguf": (),
-    "whisper": (),
-}
+#: The required-file rules are **imported, not restated**. This module previously
+#: kept its own copy: it demanded ``vocabulary.json`` exactly where the library
+#: globs ``vocabulary.*``, and it applied faster-whisper's ``tokenizer.json`` rule
+#: to every transformers directory — which condemned a CTranslate2 conversion
+#: whose loader reads its tokenizer from the parent directory. Two modules
+#: answering "is this loadable?" is the bug; stt/model_files.py owns the answer
+#: and this one asks it.
+REQUIRED_COMPANIONS = REQUIRED_BY_FAMILY
 
 #: Approximate finished size of each faster-whisper weights file, in bytes, used
 #: only to flag an implausibly small one. Deliberately loose: this catches a
@@ -222,8 +207,17 @@ def infer_family(dir_name: str, filenames: Sequence[str]) -> Optional[str]:
 
     A GGUF is checked first because such a directory holds nothing else: no
     config, no tokenizer, so every later test would misread it.
+
+    A CTranslate2 conversion is recognised by name, before anything looks at its
+    contents. It holds a ``model.bin`` like a faster-whisper directory and a
+    ``config.json`` like a transformers one, so every content test mistakes it for
+    something with companions it was never meant to have — which is how a
+    production report came to demand a ``tokenizer.json`` from a directory whose
+    loader reads the tokenizer from its parent.
     """
     names = list(filenames)
+    if _CT2_MARKER in dir_name:
+        return "ct2"
     if any(n.endswith(".gguf") for n in names):
         return "gguf"
     if dir_name.startswith("faster-whisper-"):
@@ -231,7 +225,7 @@ def infer_family(dir_name: str, filenames: Sequence[str]) -> Optional[str]:
     if any(n.endswith(".pt") for n in names):
         return "whisper"
     if any(is_weight_file(n) for n in names) or "config.json" in names:
-        return "nllb"
+        return "transformers"
     return None
 
 
@@ -261,12 +255,21 @@ def check_model_dir(
     *,
     family: str = "faster-whisper",
     status: Optional[Any] = None,
+    sibling_weights: bool = False,
 ) -> ModelHealth:
     """Judge one model directory from its ``(filename, size)`` listing.
 
     Answers the question #8 needed and nobody could ask remotely: is this model
     actually complete, or did the download die part-way and leave something the
     UI still lists as available?
+
+    ``sibling_weights`` says another directory holds this model's weights, which is
+    the CTranslate2 arrangement: converting a model leaves the weights in a
+    ``-ct2-`` sibling, and the original HuggingFace directory is often stripped
+    afterwards to reclaim several gigabytes. That is a supported workflow the app
+    endorses elsewhere, so such a directory is complete without weights. Reporting
+    it as "not really downloaded" told an operator to re-fetch a model that was
+    working.
 
     ``status`` is an optional ``model_files.DirStatus`` from the caller, which —
     unlike this module — is allowed to touch the disk and so can check the
@@ -297,7 +300,10 @@ def check_model_dir(
             truncated = True
 
     notes: List[str] = []
-    if weight_name is None:
+    if weight_name is None and sibling_weights:
+        notes.append("Weights live in the CTranslate2 conversion beside this "
+                     "directory, which is normal once a model has been converted.")
+    elif weight_name is None:
         notes.append("No weights file — this model is not really downloaded.")
     else:
         notes.append(f"{weight_name}: {_human_bytes(weight_bytes)}")
@@ -311,12 +317,13 @@ def check_model_dir(
             "Missing " + describe_missing(missing)
             + " — the loader needs these; open the Model Manager and press Repair."
         )
-    if weight_name is not None and not missing and not truncated:
+    has_weights = weight_name is not None or sibling_weights
+    if has_weights and not missing and not truncated:
         notes.append("Looks complete.")
 
     return ModelHealth(
         name=dir_name,
-        ok=weight_name is not None and not missing and not truncated,
+        ok=has_weights and not missing and not truncated,
         weight_bytes=weight_bytes,
         missing=missing,
         truncated=truncated,

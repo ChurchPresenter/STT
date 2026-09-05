@@ -183,7 +183,7 @@ def test_safetensors_layouts_are_recognised_as_weights():
         ("model.safetensors", 2_400_000_000),
         ("config.json", 2_000),
         ("tokenizer.json", 1_000),
-    ], family="nllb")
+    ], family="transformers")
     assert health.ok is True
 
 
@@ -292,7 +292,7 @@ def test_an_openai_whisper_checkpoint_is_recognised():
 
 def test_a_transformers_directory_is_recognised():
     assert diagnostics.infer_family(
-        "facebook--nllb-200", ["model.safetensors", "config.json"]) == "nllb"
+        "facebook--nllb-200", ["model.safetensors", "config.json"]) == "transformers"
 
 
 def test_the_largest_shard_is_the_one_whose_size_is_judged():
@@ -300,7 +300,7 @@ def test_the_largest_shard_is_the_one_whose_size_is_judged():
         ("model-00001-of-00002.safetensors", 2_000_000_000),
         ("model-00002-of-00002.safetensors", 900_000_000),
         ("config.json", 1_000), ("tokenizer.json", 1_000),
-    ], family="nllb")
+    ], family="transformers")
     assert health.weight_bytes == 2_000_000_000
     assert health.ok is True
 
@@ -343,10 +343,9 @@ def test_the_required_list_is_imported_rather_than_restated():
     """Two modules answering 'is this loadable?' is the bug; one list is the fix."""
     from stt import model_files
 
-    ours = set(diagnostics.REQUIRED_COMPANIONS["faster-whisper"])
-    theirs = set(e if isinstance(e, str) else tuple(e)
-                 for e in model_files.REQUIRED_FASTER_WHISPER)
-    assert ours == theirs - {"model.bin"}, "the weights are judged separately, by size"
+    assert diagnostics.REQUIRED_COMPANIONS is model_files.REQUIRED_BY_FAMILY, (
+        "the report must ask model_files, not keep a second opinion"
+    )
 
 
 @pytest.mark.parametrize("files", [
@@ -412,3 +411,111 @@ def test_a_truncated_weights_file_is_not_listed_twice():
     )
     assert health.missing == (), "the weights are described by the truncation note"
     assert health.truncated is True
+
+
+# --- the pair a production report condemned --------------------------------
+#
+# Verbatim from a diagnostic report pulled off a machine whose translation was
+# working. Both entries were reported BAD:
+#
+#   [BAD ] google--madlad400-3b-mt
+#          No weights file — this model is not really downloaded.
+#   [BAD ] google--madlad400-3b-mt-ct2-int8_float16
+#          Missing tokenizer.json — ...
+#
+# Converting a model leaves the weights in the -ct2- sibling, and the original
+# HuggingFace directory is often stripped afterwards to reclaim several GB — a
+# workflow the app endorses. The conversion has no tokenizer because
+# ctranslate2.Translator never reads one; it comes from the parent directory.
+
+
+def _madlad_pair(tmp_path):
+    hf = tmp_path / "google--madlad400-3b-mt"
+    ct2 = tmp_path / "google--madlad400-3b-mt-ct2-int8_float16"
+    hf.mkdir()
+    ct2.mkdir()
+    for name in ("config.json", "tokenizer.json", "special_tokens_map.json"):
+        (hf / name).write_bytes(b"x" * 1400)
+    (ct2 / "model.bin").write_bytes(b"x" * 2_700_000)
+    (ct2 / "config.json").write_bytes(b"x" * 300)
+    (ct2 / "shared_vocabulary.json").write_bytes(b"x" * 4000)
+    return hf, ct2
+
+
+def _judge(tmp_path, model_dir):
+    from stt import model_disk, model_files
+
+    names = sorted(p.name for p in tmp_path.iterdir())
+    entries = [(f.name, f.stat().st_size) for f in model_dir.iterdir() if f.is_file()]
+    family = diagnostics.infer_family(model_dir.name, [n for n, _ in entries])
+    return diagnostics.check_model_dir(
+        model_dir.name, entries, family=family,
+        status=model_files.dir_status(str(model_dir), family),
+        sibling_weights=bool(model_disk.ct2_variant_names(names, model_dir.name)),
+    )
+
+
+def test_a_stripped_hf_directory_beside_its_conversion_is_healthy(tmp_path):
+    hf, _ = _madlad_pair(tmp_path)
+    health = _judge(tmp_path, hf)
+
+    assert health.ok is True, "the conversion holds the weights; this is a supported state"
+    assert any("conversion" in note for note in health.notes)
+    assert not any("not really downloaded" in note for note in health.notes)
+
+
+def test_a_ct2_conversion_is_not_asked_for_a_tokenizer(tmp_path):
+    _, ct2 = _madlad_pair(tmp_path)
+    health = _judge(tmp_path, ct2)
+
+    assert health.ok is True
+    assert health.missing == ()
+    assert "tokenizer.json" not in repr(health.notes), (
+        "ctranslate2.Translator never reads a tokenizer; it comes from the parent"
+    )
+
+
+def test_a_conversion_is_recognised_by_name_before_its_contents(tmp_path):
+    """It has model.bin like faster-whisper and config.json like transformers."""
+    assert diagnostics.infer_family(
+        "google--madlad400-3b-mt-ct2-int8_float16",
+        ["model.bin", "config.json", "shared_vocabulary.json"]) == "ct2"
+
+
+def test_a_stripped_hf_directory_with_no_conversion_is_still_broken(tmp_path):
+    """The sibling is what makes it legitimate — without one it really is empty."""
+    hf = tmp_path / "google--madlad400-3b-mt"
+    hf.mkdir()
+    (hf / "config.json").write_bytes(b"x" * 1400)
+
+    health = _judge(tmp_path, hf)
+    assert health.ok is False
+    assert any("not really downloaded" in note for note in health.notes)
+
+
+def test_the_report_agrees_with_the_predicate_that_was_already_right(tmp_path):
+    """model_presence has known this all along; the report just never asked."""
+    from stt import model_disk
+
+    hf, ct2 = _madlad_pair(tmp_path)
+    for model_dir in (hf, ct2):
+        presence = model_disk.model_presence(str(tmp_path), model_dir.name)
+        assert _judge(tmp_path, model_dir).ok is presence.downloaded
+
+
+def test_the_faster_whisper_tokenizer_rule_stays_in_its_own_family(tmp_path):
+    """That rule exists for an unkillable HTTP fetch peculiar to faster-whisper."""
+    from stt import model_files
+
+    assert "tokenizer.json" in model_files.REQUIRED_BY_FAMILY["faster-whisper"]
+    for family in ("ct2", "transformers", "gguf", "whisper"):
+        assert "tokenizer.json" not in model_files.REQUIRED_BY_FAMILY[family]
+
+
+@pytest.mark.parametrize("dir_name,files", [
+    ("en_US-lessac-medium", ["en_US-lessac-medium.onnx"]),
+    ("panns", ["Cnn14_mAP=0.431.pth"]),
+])
+def test_tts_and_panns_directories_are_no_longer_invisible(dir_name, files):
+    """.onnx and .pth were not recognised as weights, so these classified as None."""
+    assert diagnostics.infer_family(dir_name, files) is not None
