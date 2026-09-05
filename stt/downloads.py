@@ -400,6 +400,16 @@ def call_with_retry(
     raise AssertionError("unreachable")  # pragma: no cover
 
 
+#: A transfer is abandoned only once it has genuinely stalled: fewer than
+#: ``STALL_BYTES_PER_S`` bytes per second averaged over ``STALL_SECONDS``. This
+#: replaces a fixed cap on total transfer time, which could not tell a dead
+#: connection from a large file on a slow one and so punished exactly the users
+#: resume was built for. Deliberately low -- 1 KB/s for two minutes is not a
+#: download anybody is waiting on, while 30 KB/s is slow but finishes overnight.
+STALL_SECONDS = 120
+STALL_BYTES_PER_S = 1024
+
+
 def download_url_to_file(url: str, dest_path: str, cancel_check: Optional[Callable[[], bool]] = None, max_attempts: int = 5, log: Callable[[str], Any] = print,
                          expected_size: Optional[int] = None, expected_sha256: Optional[str] = None) -> str:
     """Download a URL to a file with resume + retry, preferring wget/curl.
@@ -465,9 +475,17 @@ def download_url_to_file(url: str, dest_path: str, cancel_check: Optional[Callab
         dl_cmd = ['wget', '-c', '-t', '3', '-T', '120', '--retry-connrefused',
                   '--waitretry', '5', '-O', part, url]
     elif shutil.which("curl"):
+        # No --max-time. It is a cap on the *whole* transfer, and a 3 GB model
+        # cannot cross a slow link inside any figure that is also short enough
+        # to catch a hang -- 600s demanded ~5 MB/s sustained, so on the
+        # connections this resume logic exists for every attempt was killed on
+        # the clock no matter how well it was going. --speed-time/--speed-limit
+        # abort on a transfer that has actually stopped moving, which is the
+        # thing we meant to detect, and let a slow one finish.
         dl_cmd = ['curl', '-L', '-C', '-', '--retry', '3', '--retry-delay', '5',
                   '--retry-connrefused', '--connect-timeout', '30',
-                  '--max-time', '600', '-o', part, url]
+                  '--speed-time', str(STALL_SECONDS), '--speed-limit', str(STALL_BYTES_PER_S),
+                  '-o', part, url]
     else:
         dl_cmd = None  # pure-Python fallback below
 
@@ -504,23 +522,52 @@ def download_url_to_file(url: str, dest_path: str, cancel_check: Optional[Callab
             returncode = proc.returncode
         else:
             try:
-                with urllib.request.urlopen(url, timeout=120) as src, open(part, "wb") as out:
-                    cancelled = False
-                    while True:
-                        if cancel_check and cancel_check():
-                            cancelled = True
-                            break
-                        chunk = src.read(65536)
-                        if not chunk:
-                            break
-                        out.write(chunk)
+                # Resume, like the two command-line tools already do. This branch
+                # opened "wb" and asked for the whole file every time, so on a
+                # machine with neither wget nor curl a large download could never
+                # finish however many times it was retried -- while the log below
+                # cheerfully announced it would resume.
+                have = os.path.getsize(part) if os.path.exists(part) else 0
+                request = urllib.request.Request(url)
+                if have:
+                    request.add_header("Range", f"bytes={have}-")
+                with urllib.request.urlopen(request, timeout=120) as src:
+                    # 206 honours the range; a 200 means the server ignored it and
+                    # is sending the whole file, so what we already have is not a
+                    # prefix of what is arriving and must go.
+                    resuming = have > 0 and getattr(src, "status", None) == 206
+                    if have and not resuming:
+                        log("[INFO] Server ignored the resume request; starting over")
+                    announced = src.headers.get("Content-Length")
+                    leg_bytes = int(announced) if announced and announced.isdigit() else None
+                    received = 0
+                    with open(part, "ab" if resuming else "wb") as out:
+                        cancelled = False
+                        while True:
+                            if cancel_check and cancel_check():
+                                cancelled = True
+                                break
+                            chunk = src.read(65536)
+                            if not chunk:
+                                break
+                            out.write(chunk)
+                            received += len(chunk)
                 if cancelled:
                     return "cancelled"
-                if _verified():
+                if leg_bytes is not None and received < leg_bytes:
+                    # The connection dropped part-way through the body. That is a
+                    # transport failure, not a corrupt file: what arrived is still
+                    # a valid prefix, so keep it for the next attempt to build on.
+                    # Discarding here is what made every retry start from zero.
+                    last_error = (f"connection closed after {received} of "
+                                  f"{leg_bytes} bytes")
+                    returncode = 1
+                elif _verified():
                     return _promote()
-                last_error = _size_mismatch_text(part, expected_size)
-                _discard_part()
-                returncode = 1
+                else:
+                    last_error = _size_mismatch_text(part, expected_size)
+                    _discard_part()
+                    returncode = 1
             except Exception as e:
                 last_error = str(e)
                 returncode = 1
@@ -530,7 +577,8 @@ def download_url_to_file(url: str, dest_path: str, cancel_check: Optional[Callab
         if attempt < max_attempts:
             if os.path.exists(part):
                 partial_size = os.path.getsize(part)
-                log(f"[INFO] Partial file exists ({partial_size / (1024*1024):.1f} MB), will resume")
+                log(f"[INFO] Partial file kept ({partial_size / (1024*1024):.1f} MB); "
+                    "the next attempt continues from there")
             _time.sleep(5 * attempt)
 
     raise Exception(

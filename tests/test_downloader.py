@@ -3,6 +3,7 @@
 import hashlib
 import http.server
 import os
+import pathlib
 import shutil
 import socketserver
 import threading
@@ -33,6 +34,10 @@ class _Handler(http.server.BaseHTTPRequestHandler):
                 start = int(rng.split("=", 1)[1].split("-", 1)[0])
             except ValueError:
                 start = 0
+        if self.path == "/norange":
+            # A server that ignores Range and sends the whole file with a 200.
+            # Resuming against one would concatenate two overlapping prefixes.
+            start = 0
         body = CONTENT[start:]
         self.send_response(206 if start else 200)
         if start:
@@ -229,3 +234,106 @@ class TestStaging:
                 expected_size=len(CONTENT) + 1, log=lambda _m: None,
             )
         assert not dest.exists()
+
+
+class TestPurePythonResume:
+    """The fallback used when neither wget nor curl is installed.
+
+    It opened the part file "wb" and asked for the whole URL every time, so it
+    restarted from zero on every attempt and every retry — while the retry log
+    announced that it would resume. A large model could therefore never finish
+    on a machine without either tool, however many times the user pressed
+    Download.
+    """
+
+    def test_an_interrupted_transfer_leaves_a_part_to_resume(self, http_server, no_tools, tmp_path):
+        dest = tmp_path / "model.bin"
+        with pytest.raises(Exception, match="Failed to download"):
+            downloads.download_url_to_file(
+                f"{http_server}/truncated", str(dest), max_attempts=1, log=lambda m: None)
+
+        part = pathlib.Path(_part(dest))
+        assert part.exists(), "a transport failure must keep what arrived"
+        assert 0 < part.stat().st_size < len(CONTENT)
+
+    def test_a_second_call_continues_rather_than_starting_over(self, http_server, no_tools, tmp_path):
+        dest = tmp_path / "model.bin"
+        with pytest.raises(Exception, match="Failed to download"):
+            downloads.download_url_to_file(
+                f"{http_server}/truncated", str(dest), max_attempts=1, log=lambda m: None)
+        part = pathlib.Path(_part(dest))
+        first = part.stat().st_size
+
+        downloads.download_url_to_file(
+            f"{http_server}/fast", str(dest), max_attempts=1, log=lambda m: None)
+
+        assert dest.read_bytes() == CONTENT
+        assert first > 0, "the resume must have had something to build on"
+
+    def test_a_server_that_ignores_the_range_starts_over_rather_than_corrupting(
+        self, http_server, no_tools, tmp_path
+    ):
+        """A 200 to a ranged request means the whole file is coming.
+
+        Appending it to what we already had would produce a file of the right
+        name and the wrong bytes — worse than restarting.
+        """
+        dest = tmp_path / "model.bin"
+        part = pathlib.Path(_part(dest))
+        part.write_bytes(b"y" * 50_000)
+
+        downloads.download_url_to_file(
+            f"{http_server}/norange", str(dest), max_attempts=1, log=lambda m: None)
+
+        assert dest.read_bytes() == CONTENT, "the stale prefix must not survive"
+
+
+class TestCurlHasNoTotalTimeCap:
+    """--max-time capped the whole transfer, not its idle time.
+
+    3 GB inside 600s demands ~5 MB/s sustained, so on the slow connections that
+    resume exists for, every attempt was killed on the clock regardless of how
+    well it was going — and no number of retries could ever finish the file.
+    """
+
+    def _argv(self, monkeypatch, tmp_path):
+        seen = {}
+
+        class _Curl:
+            @staticmethod
+            def which(name):
+                return "/usr/bin/curl" if name == "curl" else None
+
+        class _Proc:
+            returncode = 1
+
+            def poll(self):
+                return 1
+
+        def fake_popen(cmd, **kwargs):
+            seen["cmd"] = cmd
+            return _Proc()
+
+        monkeypatch.setattr(downloads, "shutil", _Curl)
+        # subprocess is imported inside download_url_to_file, so patch the
+        # stdlib module itself rather than an attribute of downloads.
+        monkeypatch.setattr("subprocess.Popen", fake_popen)
+        with pytest.raises(Exception, match="Failed to download"):
+            downloads.download_url_to_file(
+                "http://example.invalid/model.bin", str(tmp_path / "model.bin"),
+                max_attempts=1, log=lambda m: None)
+        return seen["cmd"]
+
+    def test_no_cap_on_total_transfer_time(self, monkeypatch, tmp_path):
+        assert "--max-time" not in self._argv(monkeypatch, tmp_path)
+
+    def test_it_aborts_on_a_stalled_transfer_instead(self, monkeypatch, tmp_path):
+        argv = self._argv(monkeypatch, tmp_path)
+        assert "--speed-time" in argv and "--speed-limit" in argv
+        assert argv[argv.index("--speed-time") + 1] == str(downloads.STALL_SECONDS)
+        assert argv[argv.index("--speed-limit") + 1] == str(downloads.STALL_BYTES_PER_S)
+
+    def test_the_stall_threshold_is_slow_enough_to_let_a_bad_link_finish(self):
+        """Guards the numbers themselves: this is the bug, restated as a test."""
+        assert downloads.STALL_BYTES_PER_S <= 8 * 1024, "must tolerate a very slow link"
+        assert downloads.STALL_SECONDS >= 60, "a brief pause is not a stall"
