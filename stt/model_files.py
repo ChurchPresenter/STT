@@ -274,6 +274,43 @@ def faster_whisper_status(model_dir: str) -> DirStatus:
     return DirStatus("complete", [])
 
 
+def bytes_on_disk(model_dir: str) -> int:
+    """Total bytes a model directory occupies, staged parts included.
+
+    Reported so an operator choosing between **Repair** and **Remove** can see
+    what Remove would throw away. Now that transfers resume, an incomplete
+    directory is not junk — it is however much of a multi-gigabyte download has
+    already survived a bad connection, and nothing in the UI distinguished 1.4 GB
+    of progress from an empty stub.
+
+    Unreadable entries are skipped rather than raising: a size shown for
+    information must never be the reason a listing fails.
+    """
+    total = 0
+    try:
+        names = os.listdir(model_dir)
+    except OSError:
+        return 0
+    for name in names:
+        try:
+            path = os.path.join(model_dir, name)
+            if os.path.isfile(path):
+                total += os.path.getsize(path)
+        except OSError:
+            continue
+    return total
+
+
+def describe_bytes(count: int) -> str:
+    """A size an operator can read, to one decimal place."""
+    size = float(count)
+    for unit in ("B", "KB", "MB"):
+        if size < 1024:
+            return f"{size:.0f} {unit}" if unit == "B" else f"{size:.1f} {unit}"
+        size /= 1024
+    return f"{size:.1f} GB"
+
+
 def describe_missing(missing: Iterable[str]) -> str:
     """Human phrasing for a missing-file list, for error text and UI badges."""
     names = list(missing)

@@ -508,7 +508,8 @@ def download_url_to_file(url: str, dest_path: str, cancel_check: Optional[Callab
                             proc.kill()
                         # The part file is left behind on purpose: a cancel that
                         # the operator reverses should resume, not restart. The
-                        # UI's Cancel removes the whole model directory anyway.
+                        # UI's Cancel keeps it too, so the model reports as
+                        # Incomplete and Repair continues from here.
                         return "cancelled"
                     _time.sleep(0.5)
                 if proc.returncode == 0:

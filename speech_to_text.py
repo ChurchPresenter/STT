@@ -14393,7 +14393,20 @@ def download_hf_repo_files(repo_id, local_dir, download_key, log=print, include=
         log(f"[OK] Downloaded: {filename}")
 
     # Written last, so the sidecar's presence is itself the claim "this finished".
-    _model_files.write_manifest(local_dir, repo_id, expectations)
+    #
+    # Only when we actually learned the sizes. If the metadata call failed, every
+    # expectation is (None, None) and verify_file degrades to "non-empty passes" —
+    # so a manifest written from it would assert this directory was verified while
+    # being incapable of ever detecting a truncated file in it, permanently. That
+    # is the pre-staging bug restored under a new name, and it is reachable exactly
+    # on the flaky connections the verification exists for. Better to leave no
+    # manifest: the directory then falls back to presence checks, which is where we
+    # were, rather than claiming a guarantee it cannot give.
+    if any(want.size is not None for want in expectations.values()):
+        _model_files.write_manifest(local_dir, repo_id, expectations)
+    else:
+        log(f"[DOWNLOAD] No sizes were available for {repo_id}; leaving no manifest "
+            f"rather than recording one that could never detect a short file")
     return "ok"
 
 # Start periodic cleanup thread
@@ -14738,21 +14751,27 @@ def cancel_download():
             # cancel — never delete files for a download that isn't in flight
             return jsonify({"success": True, "message": f"Dismissed {model_id}"})
 
-        # Clean up partial download directories/files so model shows as not downloaded
+        # What has already arrived is kept. This used to rmtree the whole model
+        # directory, on the reasoning that a cancelled download should not leave
+        # something looking downloaded — but transfers resume now, so those bytes
+        # are hours of progress on a slow link, and the × on a stalled progress
+        # card silently destroyed them. A partial directory reports as Incomplete
+        # on its own (see model_files.faster_whisper_status), so nothing mistakes
+        # it for a finished model, and Repair continues from here. Remove is the
+        # button that deletes, and it is one click away.
         # model_id already includes prefix (e.g., "whisper-small.en" or "faster-whisper-base.en")
         # For HuggingFace models like "facebook/nllb-200-distilled-600M", slashes become double dashes
         dir_name = model_id.replace("/", "--")
-        # Containment check: model_id is user input and must resolve to a
-        # subdirectory strictly inside MODELS_DIR (rmtree happens below)
         model_path = safe_model_path(MODELS_DIR, dir_name)
         if model_path is None:
             return jsonify({"success": False, "error": "Invalid model id"}), 400
+        kept = ""
         if os.path.exists(model_path):
-            try:
-                shutil.rmtree(model_path)
-                print(f"[INFO] Cleaned up partial download: {model_path}")
-            except Exception as e:
-                print(f"[WARNING] Failed to clean up {model_path}: {e}")
+            kept_bytes = _model_files.bytes_on_disk(model_path)
+            if kept_bytes:
+                kept = f" — {_model_files.describe_bytes(kept_bytes)} kept; press Repair to continue"
+                print(f"[INFO] Cancelled; keeping partial download: {model_path} "
+                      f"({_model_files.describe_bytes(kept_bytes)})")
 
         # For whisper .pt files in cache, extract base name (e.g., "whisper-small.en" -> "small.en")
         if model_id.startswith("whisper-") and not model_id.startswith("whisper-faster"):
@@ -14766,7 +14785,7 @@ def cancel_download():
                 except Exception as e:
                     print(f"[WARNING] Failed to clean up {pt_file}: {e}")
 
-        return jsonify({"success": True, "message": f"Cancelled {model_id}"})
+        return jsonify({"success": True, "message": f"Cancelled {model_id}{kept}"})
     except Exception as e:
         print(f"[ERROR] Error cancelling download: {e}")
         return jsonify({"success": False, "error": str(e)}), 500
@@ -15775,6 +15794,14 @@ def list_faster_whisper_models():
                 "state": status.state,
                 "missing": status.missing,
                 "missing_text": _model_files.describe_missing(status.missing),
+                # What Remove would discard. With resume working, an incomplete
+                # directory is accumulated progress, not junk — the operator
+                # needs to see which it is before choosing Repair or Remove.
+                "bytes_on_disk": (_model_files.bytes_on_disk(model_path)
+                                  if status.state != "absent" else 0),
+                "on_disk_text": (_model_files.describe_bytes(
+                    _model_files.bytes_on_disk(model_path))
+                    if status.state != "absent" else ""),
                 "path": model_path if status.state != "absent" else None,
             })
 

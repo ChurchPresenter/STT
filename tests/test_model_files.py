@@ -220,3 +220,47 @@ class TestDescribeMissing:
 
     def test_three(self):
         assert mf.describe_missing(["a", "b", "c"]) == "a, b and c"
+
+
+class TestBytesOnDisk:
+    """What Remove would throw away.
+
+    Transfers resume now, so an incomplete directory is not junk — it is however
+    much of a multi-gigabyte download survived a bad connection. Nothing in the
+    UI distinguished 1.4 GB of progress from an empty stub, which made the choice
+    between Repair and Remove a guess.
+    """
+
+    def test_a_staged_part_counts_towards_what_would_be_lost(self, tmp_path):
+        d = tmp_path / "faster-whisper-large-v3"
+        d.mkdir()
+        (d / "config.json").write_bytes(b"x" * 100)
+        (d / "model.bin.part").write_bytes(b"x" * 5000)
+
+        assert mf.bytes_on_disk(str(d)) == 5100
+
+    def test_an_absent_directory_is_zero_rather_than_an_error(self, tmp_path):
+        assert mf.bytes_on_disk(str(tmp_path / "nope")) == 0
+
+    def test_an_empty_directory_is_zero(self, tmp_path):
+        d = tmp_path / "empty"
+        d.mkdir()
+        assert mf.bytes_on_disk(str(d)) == 0
+
+    def test_subdirectories_do_not_break_the_count(self, tmp_path):
+        d = tmp_path / "m"
+        d.mkdir()
+        (d / "sub").mkdir()
+        (d / "model.bin").write_bytes(b"x" * 42)
+        assert mf.bytes_on_disk(str(d)) == 42
+
+
+class TestDescribeBytes:
+    def test_it_scales_to_a_unit_a_person_can_read(self):
+        assert mf.describe_bytes(0) == "0 B"
+        assert mf.describe_bytes(999) == "999 B"
+        assert mf.describe_bytes(1536) == "1.5 KB"
+        assert mf.describe_bytes(3 * 1024 ** 3) == "3.0 GB"
+
+    def test_a_multi_terabyte_figure_still_renders(self):
+        assert mf.describe_bytes(5 * 1024 ** 4).endswith("GB")

@@ -1167,12 +1167,17 @@
         }
 
         // Load Faster Whisper models library
+        // Last listing, so Remove can tell the operator what it is about to
+        // delete without a second round trip.
+        let lastFasterWhisperModels = [];
+
         async function loadFasterWhisperModels() {
             try {
                 const response = await fetch('/api/models/faster-whisper/list');
                 const data = await response.json();
 
                 if (data.success && data.models) {
+                    lastFasterWhisperModels = data.models;
                     const listEl = document.getElementById('faster_whisper_models_list');
                     listEl.innerHTML = '';
 
@@ -1199,6 +1204,7 @@
                                 <div class="model-info">
                                     <div class="model-name">${modelNameCap}${statusBadge}</div>
                                     <div class="model-details">${model.params} parameters • ${model.size} • ${model.lang}</div>
+                                    ${isIncomplete ? `<div class="model-details" style="color: var(--warning);">${model.on_disk_text} downloaded so far${model.missing_text ? ` — missing ${model.missing_text}` : ''}. Repair continues from here; Remove discards it.</div>` : ''}
                                     <div class="model-details" style="color: var(--text-secondary); font-size: 0.75em;">${model.repo}</div>
                                 </div>
                                 <div class="model-actions">
@@ -1256,13 +1262,18 @@
 
                 if (data.success) {
                     showAlert(`✅ Downloaded faster-whisper-${modelName}`, 'success');
-                    await loadFasterWhisperModels();
                 } else {
-                    showAlert('❌ Download failed: ' + data.error, 'error');
+                    showAlert('❌ Download failed: ' + data.error + ' — press Repair to continue from where it stopped.', 'error');
                 }
             } catch (error) {
-                showAlert('❌ Download error: ' + error.message, 'error');
+                showAlert('❌ Download error: ' + error.message + ' — press Repair to continue from where it stopped.', 'error');
             } finally {
+                // Refresh on failure too, not only on success. A part-downloaded
+                // model becomes Incomplete with a Repair button, and refreshing
+                // only the success path meant the row still read "Download" —
+                // so the one moment the operator needed to see Repair was the
+                // one moment it was hidden, until they reloaded the page.
+                await loadFasterWhisperModels();
                 // Stop download progress tracking
                 stopDownloadProgress(`faster-whisper-${modelName}`);
             }
@@ -1270,7 +1281,14 @@
 
         // Remove a Faster Whisper model
         async function removeFasterWhisperModel(modelName) {
-            if (!confirm(`Are you sure you want to remove the faster-whisper-${modelName} model?\n\nThis will delete the model files from ./models/faster-whisper-${modelName}/`)) {
+            const row = (lastFasterWhisperModels || []).find(m => m.name === modelName);
+            const discards = row && row.on_disk_text
+                ? `\n\nThis deletes ${row.on_disk_text} from ./models/faster-whisper-${modelName}/.`
+                  + (row.state === 'incomplete'
+                     ? ' That includes a part-finished download — Repair would continue it instead.'
+                     : '')
+                : `\n\nThis will delete the model files from ./models/faster-whisper-${modelName}/`;
+            if (!confirm(`Are you sure you want to remove the faster-whisper-${modelName} model?${discards}`)) {
                 return;
             }
 
