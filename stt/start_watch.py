@@ -17,6 +17,14 @@ This module is the missing judgement, kept pure so it can be tested without a
 Manager dict, a process, or Flask. The caller supplies the state, whether the
 process is alive, and the clock.
 
+It also holds the judgement that comes *before* a start: whether the selected
+model is loadable at all. That check already existed on the loader, but only
+inside the worker — so an incomplete model still cost a process spawn, a
+re-import of the whole monolith (slow on Windows, where spawn is the start
+method), and a model-load attempt before anything said so. :func:`refusal_reason`
+lets the route answer in the same breath as the request, using the same wording
+the loader uses, so the two can never tell an operator different stories.
+
 **Why the deadline is per-stage, not total.** A cold load of large-v3 on a slow
 disk legitimately takes minutes, and a fixed total budget either kills that or is
 so generous it never fires. The worker instead stamps which init step it is on;
@@ -120,3 +128,29 @@ def evaluate_start(
             "The model files may be incomplete — check the Model Manager, then press Start again."
         ),
     )
+
+
+def refusal_reason(model_name: str, state: str, missing_text: str) -> Optional[str]:
+    """Why a start with this model must be refused, or None to proceed.
+
+    ``state`` and ``missing_text`` come from ``model_files.faster_whisper_status``
+    and ``describe_missing`` — this function decides what to *say*, and the caller
+    does the stat. Kept deliberately identical in wording to the loader's own
+    refusal (``ModelFactory._load_faster_whisper``): an operator who sees one
+    message on Start and a different one in the log has been told there are two
+    problems.
+
+    An empty ``model_name`` is not refused here. A fresh install has nothing
+    selected yet, which the setup banner already explains far better than an
+    error on a button the operator was told to press.
+    """
+    if not model_name.strip():
+        return None
+    if state == "absent":
+        return (f"Faster-whisper model '{model_name}' is not downloaded. "
+                "Download it first from the Model Manager (Settings → Model Manager).")
+    if state != "complete":
+        return (f"Faster-whisper model '{model_name}' is incomplete — "
+                f"{missing_text} missing or truncated. "
+                "Open the Model Manager and press Repair on this model.")
+    return None

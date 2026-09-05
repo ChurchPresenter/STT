@@ -12846,6 +12846,31 @@ def browse_remote_destination():
         return jsonify({"success": False, "error": str(e)}), 500
 
 
+def _model_refusal_reason(cfg):
+    """Why a start would fail on the selected model, or None if it can proceed.
+
+    The loader already refuses an incomplete faster-whisper directory, but it
+    does so inside the worker — after a process spawn that re-imports this whole
+    module. Asking here costs a stat and answers instantly, in the loader's own
+    words (see stt/start_watch.py). Other backends keep their existing behaviour:
+    this is not the place to invent preconditions for them.
+    """
+    model_cfg = cfg.get("model", {})
+    if model_cfg.get("type", "whisper") != "whisper":
+        return None
+    if model_cfg.get("backend", "whisper") != "faster-whisper":
+        return None
+    name = (model_cfg.get("whisper", {}).get("model") or "").strip()
+    if not name:
+        return None
+    path = safe_model_path(MODELS_DIR, f"faster-whisper-{name}")
+    if path is None:
+        return None  # a name we cannot resolve is not ours to diagnose here
+    status = _model_files.faster_whisper_status(path)
+    return _start_watch.refusal_reason(
+        name, status.state, _model_files.describe_missing(status.missing))
+
+
 @app.route("/api/transcription/start", methods=["POST"])
 def start_transcription():
     """Start the transcription process
@@ -12886,6 +12911,17 @@ def start_transcription():
                 return jsonify(
                     {"success": False, "error": "Transcription is still stopping, please wait"}
                 ), 400
+
+            # Refuse a model that cannot load, before spawning anything. Without
+            # this the worker starts, re-imports this module, reaches the loader
+            # and only then raises — minutes of nothing on a Windows box, to
+            # discover something a stat answers. Skipped in the demo, which has
+            # no models and never loads one.
+            if not DEMO:
+                refusal = _model_refusal_reason(config)
+                if refusal:
+                    _note_access_detail("rejected: selected model not loadable")
+                    return jsonify({"success": False, "error": refusal}), 400
 
             # Ensure we have a valid worker process
             # Worker stays alive between Start/Stop cycles, so we usually just reuse it

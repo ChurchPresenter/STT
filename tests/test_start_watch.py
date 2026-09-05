@@ -1,5 +1,7 @@
 """evaluate_start: turning a start that never finished into one that failed."""
 
+import pathlib
+
 import pytest
 
 from stt import start_watch
@@ -121,3 +123,46 @@ class TestStageOf:
 
     def test_stage_is_stripped(self):
         assert start_watch.stage_of({"init_stage": "  4/5 opening database  "}) == "4/5 opening database"
+
+
+class TestRefusalBeforeSpawn:
+    """Refusing a bad model at the route, not inside the worker.
+
+    The loader has always refused an incomplete directory, but only after the
+    start route spawned a process that re-imported the whole monolith. On Windows
+    that is the difference between an instant error and minutes of nothing.
+    """
+
+    def test_a_complete_model_is_not_refused(self):
+        assert start_watch.refusal_reason("large-v3", "complete", "") is None
+
+    def test_an_incomplete_model_is_refused_and_names_what_is_missing(self):
+        reason = start_watch.refusal_reason(
+            "large-v3", "incomplete", "tokenizer.json")
+        assert reason is not None
+        assert "large-v3" in reason
+        assert "tokenizer.json" in reason
+        assert "Repair" in reason, "the message must name the remedy that exists"
+
+    def test_a_model_that_was_never_downloaded_is_told_to_download_not_repair(self):
+        reason = start_watch.refusal_reason("large-v3", "absent", "")
+        assert reason is not None
+        assert "not downloaded" in reason
+        assert "Repair" not in reason, "there is nothing to repair yet"
+
+    def test_a_fresh_install_with_nothing_selected_is_not_refused(self):
+        """The setup banner explains this far better than an error on Start."""
+        for name in ("", "   "):
+            assert start_watch.refusal_reason(name, "absent", "") is None
+
+    def test_the_refusal_matches_the_loader_s_own_wording(self):
+        """One fault must not be described two ways.
+
+        The loader raises its own message from inside the worker. If these drift,
+        an operator who reads both concludes there are two problems.
+        """
+        remedy = "Open the Model Manager and press Repair on this model."
+        source = pathlib.Path("speech_to_text.py").read_text(encoding="utf-8")
+
+        assert remedy in source, "the loader stopped offering Repair; this must follow"
+        assert remedy in start_watch.refusal_reason("m", "incomplete", "tokenizer.json")
