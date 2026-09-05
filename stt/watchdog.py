@@ -41,6 +41,7 @@ import zipfile
 from typing import ClassVar, Optional
 
 try:
+    from stt import win_job as _win_job
     from stt.crash_reports import redact_home_paths, scrub_event
     from stt.wheel_policy import only_binary_args
 except ImportError:  # pragma: no cover - depends on how the process was started
@@ -48,6 +49,7 @@ except ImportError:  # pragma: no cover - depends on how the process was started
     # plain script, so sys.path[0] is stt/ and the package is not importable.
     # crash_reports is stdlib-only, which is what lets the bootstrapper use it.
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    from stt import win_job as _win_job
     from stt.crash_reports import redact_home_paths, scrub_event
     from stt.wheel_policy import only_binary_args
 
@@ -1712,6 +1714,9 @@ class ProcessManager:
         self._no_restart = no_restart_event   # set = don't auto-restart on exit
         self._python = get_python_bin()
         self._log_fh = None
+        # Windows job object binding the server's whole tree; see stt/win_job.py.
+        # Unbound on POSIX, where start_new_session + killpg already do this.
+        self._job = _win_job.JobResult(None, False)
 
     def start(self):
         with self.state._lock:
@@ -1774,6 +1779,15 @@ class ProcessManager:
                 # restarts and leak memory. No-op on Windows.
                 start_new_session=not IS_WINDOWS,
             )
+            # Windows has no process groups to sweep, so bind the server and
+            # everything it spawns into a job that dies when we close its handle.
+            # Without it, terminating the server orphans its multiprocessing
+            # children — measured in the field at four strays holding ~1.1 GB,
+            # one with a Whisper model still resident. See stt/win_job.py.
+            self._job = _win_job.bind_process_tree(proc.pid)
+            if IS_WINDOWS and not self._job.bound:
+                logging.warning(f"[PM] Could not bind STT to a job object "
+                                f"({self._job.error}); its children may outlive it")
             self.state.set(process=proc, status="running", consecutive_crashes=0)
             logging.info(f"[PM] STT started (PID {proc.pid})")
             return True
@@ -1856,6 +1870,12 @@ class ProcessManager:
                     os.killpg(pgid, signal.SIGKILL)  # type: ignore[attr-defined]
             except (ProcessLookupError, OSError):
                 pass
+
+        # Windows equivalent of the killpg above: closing the job handle kills
+        # everything still in it, children included.
+        if _win_job.release(self._job):
+            logging.info("[PM] Job object closed; any surviving children went with it")
+        self._job = _win_job.JobResult(None, False)
 
         self.state.set(process=None, status="stopped")
         logging.info("[PM] STT stopped")
