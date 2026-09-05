@@ -1278,15 +1278,22 @@ def load_translation_model(use_gpu=True, model_id=None, use_fp16=False, use_ct2=
         # translation next — a message with nothing in it about downloads.
         # Reported from the settings-save thread in the wild, which is why the
         # check belongs here rather than in any start-up precondition.
-        _incomplete = _model_files.manifest_mismatches(model_path)
-        if _incomplete:
-            raise RuntimeError(
-                f"The translation model '{model_id}' is incomplete on disk — "
-                f"{_model_files.describe_missing(_incomplete)} "
-                f"{'are' if len(_incomplete) > 1 else 'is'} missing or truncated. "
-                f"Download it again in the Model Manager (Settings -> Model Manager); "
-                f"the download now repairs what is already there."
-            )
+        #
+        # Not on the CT2 path. There the weights are read from the conversion and
+        # this directory supplies only the tokenizer, so an operator who reclaimed
+        # the HF weights after converting — which the Model Manager treats as
+        # downloaded, and which is the documented way to save several gigabytes —
+        # would have a working setup refused for missing a file nothing reads.
+        if not use_ct2:
+            _incomplete = _model_files.manifest_mismatches(model_path)
+            if _incomplete:
+                raise RuntimeError(
+                    f"The translation model '{model_id}' is incomplete on disk — "
+                    f"{_model_files.describe_missing(_incomplete)} "
+                    f"{'are' if len(_incomplete) > 1 else 'is'} missing or truncated. "
+                    f"Download it again in the Model Manager (Settings -> Model Manager); "
+                    f"the download now repairs what is already there."
+                )
     else:
         model_path = model_id
         print(f"[INFO] Loading translation model from HuggingFace: {model_path}")
@@ -16696,7 +16703,21 @@ def download_translation_model():
                     # Written last: the sidecar's presence is the claim that this
                     # directory finished, and is what load_translation_model
                     # checks before handing a .bin to torch.load.
-                    _model_files.write_manifest(model_path, model_id, _expectations)
+                    #
+                    # Only when sizes were actually learned. If the metadata call
+                    # failed, every expectation is (None, None) and verify_file
+                    # degrades to "any non-empty file passes" — a manifest built
+                    # from that asserts a verification it can never perform, and
+                    # would refuse nothing for the life of the directory. The
+                    # faster-whisper path refuses to write one for the same
+                    # reason; leaving none falls back to presence checks, which is
+                    # merely where we were.
+                    if any(w.size is not None for w in _expectations.values()):
+                        _model_files.write_manifest(model_path, model_id, _expectations)
+                    else:
+                        dl_logger.info(
+                            "No file sizes were available; leaving no manifest rather "
+                            "than recording one that could never detect a short file")
                 finally:
                     stop_monitor.set()
                     dl_logger.info("Stopped progress monitor")

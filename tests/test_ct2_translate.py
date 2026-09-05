@@ -1,5 +1,6 @@
 """CTranslate2 translation-backend helpers (stt/ct2_translate.py)."""
 
+import pathlib
 import math
 import os
 
@@ -119,3 +120,43 @@ class TestDecodeAndConfidence:
         assert score_to_confidence(None) is None
         assert score_to_confidence(0.0) == 1.0
         assert score_to_confidence(-0.5) == math.exp(-0.5)
+
+
+class TestManifestCheckSkipsTheConversionPath:
+    """A converted model whose HF weights were reclaimed must still load.
+
+    Converting leaves the weights in a "-ct2-" sibling and the original directory
+    is often stripped afterwards to save several gigabytes — a workflow the Model
+    Manager endorses, counting a conversion as downloaded. But the manifest still
+    lists pytorch_model.bin, so a check that runs before the CT2 branch refuses a
+    setup that works, for a file the CT2 path never reads.
+    """
+
+    def test_the_manifest_does_report_the_reclaimed_weights(self, tmp_path):
+        """Load-bearing: without the guard, this list is what refuses the load."""
+        from stt import model_files
+
+        model_dir = tmp_path / "google--madlad400-3b-mt"
+        model_dir.mkdir()
+        (model_dir / "config.json").write_bytes(b"x" * 1400)
+        (model_dir / "tokenizer.json").write_bytes(b"x" * 1400)
+        model_files.write_manifest(str(model_dir), "google/madlad400-3b-mt", {
+            "pytorch_model.bin": model_files.FileExpectation(size=11_800_000_000),
+            "config.json": model_files.FileExpectation(size=1400),
+            "tokenizer.json": model_files.FileExpectation(size=1400),
+        })
+
+        assert "pytorch_model.bin" in model_files.manifest_mismatches(str(model_dir))
+
+    def test_the_check_is_guarded_by_use_ct2(self):
+        """The monolith cannot be imported, so assert the shape that matters."""
+        import re
+
+        source = pathlib.Path("speech_to_text.py").read_text(encoding="utf-8")
+        guarded = re.search(
+            r"if not use_ct2:\s*\n\s*_incomplete = _model_files\.manifest_mismatches",
+            source)
+        assert guarded, (
+            "manifest_mismatches must run only off the CT2 path — a converted "
+            "model supplies only its tokenizer from this directory"
+        )
