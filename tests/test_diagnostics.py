@@ -149,7 +149,7 @@ def test_a_truncated_download_is_caught():
     ])
     assert health.truncated is True
     assert health.ok is False
-    assert any("download it again" in note for note in health.notes)
+    assert any("Repair" in note for note in health.notes)
 
 
 def test_a_missing_tokenizer_is_named_as_the_thing_that_hangs_the_start():
@@ -159,7 +159,7 @@ def test_a_missing_tokenizer_is_named_as_the_thing_that_hangs_the_start():
     ])
     assert health.ok is False
     assert "tokenizer.json" in health.missing
-    assert any("hang" in note for note in health.notes)
+    assert any("Repair" in note for note in health.notes)
 
 
 def test_a_directory_with_no_weights_is_not_a_downloaded_model():
@@ -303,3 +303,112 @@ def test_the_largest_shard_is_the_one_whose_size_is_judged():
     ], family="nllb")
     assert health.weight_bytes == 2_000_000_000
     assert health.ok is True
+
+
+# --- agreement with the loader's own predicate -----------------------------
+#
+# The bug these exist for: this module used to demand "vocabulary.json" exactly,
+# while faster-whisper globs "vocabulary.*" and real Systran repos ship
+# "vocabulary.txt". A working model was reported broken, which invites an
+# operator to delete something that was fine.
+
+def test_a_model_shipping_vocabulary_txt_is_not_condemned():
+    health = diagnostics.check_model_dir("faster-whisper-large-v3", [
+        ("model.bin", 3_090_000_000),
+        ("config.json", 2_000),
+        ("tokenizer.json", 2_400_000),
+        ("vocabulary.txt", 900_000),
+    ])
+    assert health.ok is True, "vocabulary.txt satisfies the requirement"
+    assert health.missing == ()
+
+
+def test_either_vocabulary_spelling_satisfies_the_requirement():
+    for name in ("vocabulary.txt", "vocabulary.json"):
+        health = diagnostics.check_model_dir("faster-whisper-small", [
+            ("model.bin", 490_000_000), ("config.json", 1),
+            ("tokenizer.json", 1), (name, 1),
+        ])
+        assert health.ok is True, f"{name} should be accepted"
+
+
+def test_a_missing_vocabulary_is_reported_as_either_spelling():
+    health = diagnostics.check_model_dir("faster-whisper-small", [
+        ("model.bin", 490_000_000), ("config.json", 1), ("tokenizer.json", 1),
+    ])
+    assert health.missing == ("vocabulary.txt or vocabulary.json",)
+
+
+def test_the_required_list_is_imported_rather_than_restated():
+    """Two modules answering 'is this loadable?' is the bug; one list is the fix."""
+    from stt import model_files
+
+    ours = set(diagnostics.REQUIRED_COMPANIONS["faster-whisper"])
+    theirs = set(e if isinstance(e, str) else tuple(e)
+                 for e in model_files.REQUIRED_FASTER_WHISPER)
+    assert ours == theirs - {"model.bin"}, "the weights are judged separately, by size"
+
+
+@pytest.mark.parametrize("files", [
+    ["model.bin", "config.json", "tokenizer.json", "vocabulary.txt"],
+    ["model.bin", "config.json", "tokenizer.json", "vocabulary.json"],
+    ["model.bin", "config.json", "tokenizer.json"],
+    ["model.bin", "config.json"],
+    ["config.json"],
+])
+def test_the_report_and_the_loader_agree_about_a_real_directory(tmp_path, files):
+    """Agreement is the property worth asserting, not either verdict alone."""
+    from stt import model_files
+
+    model_dir = tmp_path / "faster-whisper-small"
+    model_dir.mkdir()
+    for name in files:
+        (model_dir / name).write_bytes(b"x" * 1000)
+
+    status = model_files.faster_whisper_status(str(model_dir))
+    entries = [(f, 1000) for f in files]
+    health = diagnostics.check_model_dir(
+        "faster-whisper-small", entries, status=status)
+
+    assert health.ok is status.complete
+
+
+# --- the disk-aware status wins -------------------------------------------
+
+
+def test_the_manifest_backed_verdict_overrides_the_size_guess():
+    """A directory the loader accepts must not be called truncated by a table."""
+    from stt.model_files import DirStatus
+
+    health = diagnostics.check_model_dir(
+        "faster-whisper-large-v3",
+        [("model.bin", 12_345), ("config.json", 1),
+         ("tokenizer.json", 1), ("vocabulary.txt", 1)],
+        status=DirStatus("complete", []),
+    )
+    assert health.ok is True, "the size hint must not overrule the real check"
+    assert health.truncated is False
+
+
+def test_a_status_reporting_missing_files_is_believed():
+    from stt.model_files import DirStatus
+
+    health = diagnostics.check_model_dir(
+        "faster-whisper-large-v3",
+        [("model.bin", 3_090_000_000)],
+        status=DirStatus("incomplete", ["tokenizer.json"]),
+    )
+    assert health.ok is False
+    assert health.missing == ("tokenizer.json",)
+    assert any("Repair" in note for note in health.notes)
+
+
+def test_a_truncated_weights_file_is_not_listed_twice():
+    from stt.model_files import DirStatus
+
+    health = diagnostics.check_model_dir(
+        "faster-whisper-large-v3", [("model.bin", 1_000)],
+        status=DirStatus("incomplete", ["model.bin"]),
+    )
+    assert health.missing == (), "the weights are described by the truncation note"
+    assert health.truncated is True

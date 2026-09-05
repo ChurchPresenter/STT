@@ -34,10 +34,12 @@ lists the directories, then passes plain data in. That keeps the redaction rules
 from __future__ import annotations
 
 import re
-from typing import Any, Dict, Iterable, List, Mapping, NamedTuple, Optional, Sequence, Tuple
+from typing import (Any, Dict, Iterable, List, Mapping, NamedTuple, Optional,
+                    Sequence, Tuple, Union)
 
 from stt.crash_reports import redact_home_paths
 from stt.model_disk import is_weight_file
+from stt.model_files import REQUIRED_FASTER_WHISPER, describe_missing
 
 #: Log tags whose lines are structurally operational and cannot carry caption
 #: text. Deliberately excludes everything on the text path — LIVE-TRANSLATION,
@@ -101,15 +103,25 @@ CONFIG_FIELDS: Tuple[str, ...] = (
     "crash_reporting.sentry_enabled",
 )
 
-#: Files a loader needs beyond the weights, per model family. A directory holding
-#: model.bin but no tokenizer.json is the exact shape that sends faster-whisper
-#: to the network at load time and hangs the worker (see issue #11).
+#: Files a loader needs, per model family. Each entry is a filename, or a tuple
+#: of interchangeable filenames.
+#:
+#: faster-whisper's list is **imported, not restated**. This module previously
+#: kept its own copy demanding ``vocabulary.json`` exactly, while the library
+#: globs ``vocabulary.*`` and real Systran repos ship ``vocabulary.txt`` — so a
+#: perfectly good model was reported broken, telling an operator to delete
+#: something that worked. Two modules answering "is this loadable?" is the bug;
+#: stt/model_files.py owns the answer and this one asks it.
 #:
 #: A GGUF has no companions at all — the single file is the whole model — so it
 #: maps to an empty tuple rather than being left out, which would silently give
 #: it the default family's requirements and report every LLM as broken.
-REQUIRED_COMPANIONS: Dict[str, Tuple[str, ...]] = {
-    "faster-whisper": ("config.json", "tokenizer.json", "vocabulary.json"),
+REQUIRED_COMPANIONS: Dict[str, Tuple[Union[str, Tuple[str, ...]], ...]] = {
+    "faster-whisper": tuple(
+        entry if isinstance(entry, str) else tuple(entry)
+        for entry in REQUIRED_FASTER_WHISPER
+        if entry != "model.bin"  # the weights are judged separately, by size
+    ),
     "nllb": ("config.json", "tokenizer.json"),
     "gguf": (),
     "whisper": (),
@@ -223,17 +235,45 @@ def infer_family(dir_name: str, filenames: Sequence[str]) -> Optional[str]:
     return None
 
 
+def missing_companions(
+    present: Iterable[str],
+    required: Sequence[Union[str, Sequence[str]]],
+) -> Tuple[str, ...]:
+    """Which ``required`` entries no file in ``present`` satisfies.
+
+    An entry that is itself a sequence is a set of interchangeable names,
+    satisfied by any one of them and reported as "a or b" — the same rule as
+    ``model_files.missing_required``, which is what keeps the diagnostic report
+    and the Model Manager from disagreeing about the same directory.
+    """
+    names = set(present)
+    missing = []
+    for entry in required:
+        options = [entry] if isinstance(entry, str) else list(entry)
+        if not any(option in names for option in options):
+            missing.append(" or ".join(options))
+    return tuple(missing)
+
+
 def check_model_dir(
     dir_name: str,
     entries: Sequence[Tuple[str, int]],
     *,
     family: str = "faster-whisper",
+    status: Optional[Any] = None,
 ) -> ModelHealth:
     """Judge one model directory from its ``(filename, size)`` listing.
 
     Answers the question #8 needed and nobody could ask remotely: is this model
     actually complete, or did the download die part-way and leave something the
     UI still lists as available?
+
+    ``status`` is an optional ``model_files.DirStatus`` from the caller, which —
+    unlike this module — is allowed to touch the disk and so can check the
+    download manifest. When it is supplied it **wins**: it knows the size every
+    file was supposed to be, where this function can only compare a weights file
+    against a table of typical sizes. Passing it is how the report and the
+    loader are kept from reaching different verdicts about one directory.
     """
     sizes = {name: size for name, size in entries}
     # Largest recognised weight file: a sharded layout has several, and the
@@ -244,14 +284,17 @@ def check_model_dir(
     )
     weight_name, weight_bytes = weights[0] if weights else (None, 0)
 
-    missing = tuple(
-        name for name in REQUIRED_COMPANIONS.get(family, ()) if name not in sizes
-    )
-
-    truncated = False
-    hint = _size_hint(dir_name, family)
-    if weight_name is not None and hint and weight_bytes < hint * _SIZE_FLOOR:
-        truncated = True
+    if status is not None:
+        # The authoritative answer. Its "missing" already covers the weights, so
+        # drop that entry here rather than reporting the same file twice.
+        missing = tuple(m for m in status.missing if m != "model.bin")
+        truncated = bool(status.missing) and weight_name is not None and not missing
+    else:
+        missing = missing_companions(sizes, REQUIRED_COMPANIONS.get(family, ()))
+        truncated = False
+        hint = _size_hint(dir_name, family)
+        if weight_name is not None and hint and weight_bytes < hint * _SIZE_FLOOR:
+            truncated = True
 
     notes: List[str] = []
     if weight_name is None:
@@ -260,14 +303,13 @@ def check_model_dir(
         notes.append(f"{weight_name}: {_human_bytes(weight_bytes)}")
         if truncated:
             notes.append(
-                f"Weights look truncated — expected roughly {_human_bytes(hint)}. "
-                "Delete this folder and download it again."
+                "Weights look truncated — the download did not finish. "
+                "Open the Model Manager and press Repair on this model."
             )
     if missing:
         notes.append(
-            "Missing " + ", ".join(missing)
-            + " — the loader will try to fetch these over the network at start, "
-              "which can hang."
+            "Missing " + describe_missing(missing)
+            + " — the loader needs these; open the Model Manager and press Repair."
         )
     if weight_name is not None and not missing and not truncated:
         notes.append("Looks complete.")

@@ -13162,7 +13162,13 @@ def _diagnostic_model_health():
         family = _diagnostics.infer_family(name, [e for e, _ in entries])
         if family is None:
             continue
-        healths.append(_diagnostics.check_model_dir(name, entries, family=family))
+        # The disk-aware verdict, which reads the download manifest and so knows
+        # the size each file was meant to be. Passing it in keeps this report and
+        # the Model Manager from disagreeing about the same directory.
+        status = (_model_files.faster_whisper_status(path)
+                  if family == "faster-whisper" else None)
+        healths.append(_diagnostics.check_model_dir(
+            name, entries, family=family, status=status))
     return healths
 
 
