@@ -433,12 +433,23 @@ def save_config(config_to_save):
         # Single choke point for session provenance: any settings change that
         # reaches disk is recorded against the running session, whichever route
         # made it. Guarded because config persistence is critical and must not
-        # fail on a provenance problem — including a NameError if some future
-        # caller invokes save_config before this module finishes importing.
-        try:
-            _sync_session_meta_from_config()
-        except Exception as e:
-            print(f"[SESSION-META] WARNING: could not sync provenance after save: {e}")
+        # fail on a provenance problem.
+        #
+        # The probe is not defensive padding: this module *does* call save_config
+        # during its own import — the password-generation block below runs at
+        # import and writes the generated password — and the sync function is not
+        # defined until later in the file. Catching the resulting NameError and
+        # warning made every fresh start print a provenance failure that had not
+        # happened: there is no session to record against during import
+        # (transcription_state is not bound yet), so there is nothing to sync and
+        # nothing lost. Distinguishing "not yet defined" from a real failure keeps
+        # the warning meaningful for the cases that are.
+        _sync = globals().get("_sync_session_meta_from_config")
+        if _sync is not None:
+            try:
+                _sync()
+            except Exception as e:
+                print(f"[SESSION-META] WARNING: could not sync provenance after save: {e}")
         return True
     except Exception as e:
         print(f"[ERROR] Failed to save config: {e}")
