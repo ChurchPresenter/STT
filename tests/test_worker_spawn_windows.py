@@ -9,11 +9,18 @@ Nothing in our suite could see that. `tests/test_watchdog_process.py` uses a fak
 `Popen` with a fake stdin, so no test creates a real pipe or a real child. This
 does both, and is deliberately the reporter's shape rather than a tidier one.
 
-It is worth running for two opposite reasons. If it wedges on a GitHub runner,
-the mechanism is real and general and we have it pinned. If it passes there while
-their machine still fails, the cause is local to that machine and our fix is
-treating a symptom — which is just as useful to know, and is why this asserts the
-behaviour rather than skipping when it cannot explain it.
+**It wedged on a GitHub `windows-2022` runner**, so the mechanism is general
+rather than anything about the reporting machine — and the objection raised
+during review, that `popen_spawn_win32` passes `bInheritHandles=False` and so the
+handle cannot reach the child, was simply wrong about the outcome whatever the
+route turns out to be.
+
+That platform behaviour is not ours to fix, so it is recorded as an expected
+failure rather than asserted. What *is* ours is the mitigation, and the third
+case here is the one that earns its keep: with the pipe moved to a private
+descriptor and fd 0 left on `NUL` — exactly what `stt.shutdown_channel` does in
+the server — the child starts normally. That is the proof the fix works on the
+platform we cannot otherwise test.
 
 Windows-only: the reported failure is a Win32 handle-inheritance effect, and on
 POSIX the child gets its own fd table anyway.
@@ -22,6 +29,7 @@ POSIX the child gets its own fd table anyway.
 from __future__ import annotations
 
 import os
+import pathlib
 import subprocess
 import sys
 import textwrap
@@ -39,14 +47,20 @@ SERVER = textwrap.dedent('''
     def child(q):
         q.put("child-alive")
 
-    def watcher():
-        for line in sys.stdin:   # the pending blocking read
+    def watcher(stream):
+        for line in stream:      # the pending blocking read
             pass
 
     if __name__ == "__main__":
         mp.set_start_method("spawn", force=True)
-        if os.environ.get("USE_STDIN_WATCHER") == "1":
-            threading.Thread(target=watcher, daemon=True).start()
+        mode = os.environ.get("USE_STDIN_WATCHER", "0")
+        if mode in ("1", "detached"):
+            stream = sys.stdin
+            if mode == "detached":
+                sys.path.insert(0, os.environ["STT_ROOT"])
+                from stt.shutdown_channel import detach_stdin
+                stream = detach_stdin().stream
+            threading.Thread(target=watcher, args=(stream,), daemon=True).start()
             time.sleep(1.0)      # let the read block
         q = mp.Queue()
         p = mp.Process(target=child, args=(q,))
@@ -61,7 +75,7 @@ SERVER = textwrap.dedent('''
 ''')
 
 
-def _run(tmp_path, *, watcher: bool, detach: bool = False) -> str:
+def _run(tmp_path, *, mode: str) -> str:
     """Spawn the server with its stdin pipe held open and unwritten.
 
     `communicate()` is deliberately not used: it closes stdin, the watcher sees
@@ -71,7 +85,8 @@ def _run(tmp_path, *, watcher: bool, detach: bool = False) -> str:
     script.write_text(SERVER, encoding="utf-8")
 
     env = dict(os.environ)
-    env["USE_STDIN_WATCHER"] = "1" if watcher else "0"
+    env["USE_STDIN_WATCHER"] = mode
+    env["STT_ROOT"] = str(pathlib.Path(__file__).resolve().parent.parent)
     env["PYTHONUNBUFFERED"] = "1"
 
     proc = subprocess.Popen(
@@ -92,13 +107,29 @@ def _run(tmp_path, *, watcher: bool, detach: bool = False) -> str:
 
 def test_a_child_spawns_when_nothing_is_reading_stdin(tmp_path):
     """The control: without the pending read the child is immediate."""
-    assert _run(tmp_path, watcher=False) == "RESULT:OK:child-alive"
+    assert _run(tmp_path, mode="0") == "RESULT:OK:child-alive"
 
 
-def test_a_child_spawns_even_while_a_thread_blocks_on_stdin(tmp_path):
-    """The reported failure. A wedge here is the bug, reproduced on CI."""
-    result = _run(tmp_path, watcher=True)
-    assert result == "RESULT:OK:child-alive", (
-        "a spawned child did not start while the parent held a blocking read on "
-        "an inherited stdin pipe — see ChurchPresenter/STT#13"
+@pytest.mark.xfail(strict=True, reason="the platform bug this exists to record: a "
+                                       "spawned child wedges behind a pending read "
+                                       "on an inherited stdin pipe (STT#13)")
+def test_a_child_wedges_behind_a_pending_read_on_inherited_stdin(tmp_path):
+    """Reproduced on a GitHub windows-2022 runner, so it is not machine-specific.
+
+    strict=True on purpose: if this ever starts passing, the platform behaviour
+    has changed and the mitigation below can be reconsidered — which is worth
+    being told about rather than discovering by accident.
+    """
+    assert _run(tmp_path, mode="1") == "RESULT:OK:child-alive"
+
+
+def test_the_detached_channel_lets_the_child_start(tmp_path):
+    """The fix, on the platform that actually breaks without it.
+
+    Same pending read, same spawn — but the pipe is on a private descriptor and
+    fd 0 is the null device, which is what the server now does.
+    """
+    assert _run(tmp_path, mode="detached") == "RESULT:OK:child-alive", (
+        "detaching the pipe from fd 0 did not unblock the spawn — the mitigation "
+        "in stt/shutdown_channel.py does not work on this platform"
     )
