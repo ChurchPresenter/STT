@@ -50,4 +50,8 @@ jobs:
         # and file_mover — ffmpeg, process management and SMB — where a unit
         # test would mostly assert its own mocks; the logic modules are at
         # 88-100%.
-        run: uv run pytest --cov --cov-report=term --cov-fail-under=63
+        # -n auto: the suite is CPU-bound and was ~40 minutes on Windows
+        # serially, which dominated the feedback loop. Worker *processes*,
+        # so tests that manipulate process-global state stay isolated.
+        # pytest-cov aggregates the workers' data; the ratchet is unchanged.
+        run: uv run pytest -n auto --cov --cov-report=term --cov-fail-under=63
