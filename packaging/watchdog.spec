@@ -62,10 +62,15 @@ a = Analysis(
         "sentry_sdk.integrations.threading",
         "sentry_sdk.integrations.argv",
         # Imported by the bootstrapper through their package path: the Sentry
-        # before_send scrubber and the wheels-only install policy. Both are
-        # stdlib-only, which is what lets a frozen bootstrapper use them.
+        # before_send scrubber, the wheels-only install policy, and the Windows
+        # job object that binds the server's process tree. All stdlib-only, which
+        # is what lets a frozen bootstrapper use them. Listed rather than left to
+        # static analysis because the bundled watchdog imports them before it
+        # hands off to the git checkout — a miss here is a binary that dies at
+        # startup, on every install, before it can reach the source that works.
         "stt.crash_reports",
         "stt.wheel_policy",
+        "stt.win_job",
     ],
     hookspath=[],
     hooksconfig={},
