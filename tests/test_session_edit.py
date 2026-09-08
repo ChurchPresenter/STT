@@ -234,7 +234,10 @@ def test_a_symlink_to_the_live_database_is_still_the_live_database(db, tmp_path)
     """Compared by realpath, or the file manager's resolved path and the recorder's
     own name would look like two different files and an edit would land mid-service."""
     link = str(tmp_path / "link.db")
-    os.symlink(db, link)
+    try:
+        os.symlink(db, link)
+    except (OSError, NotImplementedError):  # Windows without developer mode
+        pytest.skip("this filesystem will not make a symlink")
 
     assert session_edit.is_live_database(link, db) is True
 

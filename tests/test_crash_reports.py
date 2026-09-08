@@ -4,6 +4,7 @@ from stt.crash_reports import (
     is_websocket_handover,
     redact_home_paths,
     scrub_event,
+    sentry_environment,
 )
 
 
@@ -157,3 +158,21 @@ def test_an_exception_message_is_redacted():
 def test_a_top_level_message_is_redacted():
     assert scrub_event({"message": "failed at /home/ai/.stt"})["message"] == \
         "failed at <home>/.stt"
+
+
+# --- which environment a process reports into -------------------------------
+
+
+def test_a_real_install_reports_into_production():
+    assert sentry_environment(False) == "production"
+
+
+def test_a_demo_reports_into_its_own_environment():
+    """Left unset the SDK files everything under production, so a visitor's demo
+    crash arrived in the same environment as a running service. The demo tag already
+    separated them for search; alerts and release health read the environment."""
+    assert sentry_environment(True) == "demo"
+
+
+def test_the_two_environments_are_not_the_same():
+    assert sentry_environment(True) != sentry_environment(False)

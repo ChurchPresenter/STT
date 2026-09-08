@@ -18,6 +18,7 @@ Tk shell below them is kept thin deliberately, because it cannot be.
 from __future__ import annotations
 
 import os
+import sys
 from typing import Any, Callable, Dict, List, MutableMapping, Optional, Sequence, Tuple
 
 from stt import demo_mode
@@ -140,6 +141,8 @@ def _forked_probe() -> bool:
     the question and still be running afterwards. The child touches nothing before
     ``os._exit``, so the parent's buffers and atexit handlers are untouched.
     """
+    if sys.platform == "win32":  # no fork; the caller never takes this branch there
+        return _probe_window()
     read_fd, write_fd = os.pipe()
     pid = os.fork()
     if pid == 0:  # child
@@ -193,9 +196,9 @@ def display_available() -> bool:
     if forced is not None:
         return forced
     try:
-        if hasattr(os, "fork"):
-            return _forked_probe()
-        return _probe_window()
+        if sys.platform == "win32":
+            return _probe_window()
+        return _forked_probe()
     except Exception:
         return False
 

@@ -65,6 +65,25 @@ _HOME_PATTERNS = (
 _HOME_PLACEHOLDER = "<home>"
 
 
+# Sentry's own default when ``environment`` is left unset. Named here so the demo's
+# separation from it is a decision in one place rather than an omission.
+PRODUCTION_ENVIRONMENT = "production"
+DEMO_ENVIRONMENT = "demo"
+
+
+def sentry_environment(demo: bool) -> str:
+    """Which Sentry environment this process reports into.
+
+    A demo is somebody trying the application on a machine we will never see. Its
+    crashes are worth having — that is a packaging bug nobody else will report — but
+    they are not production incidents, and left unset the SDK filed them under
+    ``production`` alongside real services. The ``demo`` tag already separated them
+    for search; this separates them for alerts, dashboards and release health, which
+    read the environment and not the tags.
+    """
+    return DEMO_ENVIRONMENT if demo else PRODUCTION_ENVIRONMENT
+
+
 def redact_home_paths(text: str) -> str:
     """Replace home directories in ``text`` with ``<home>``.
 

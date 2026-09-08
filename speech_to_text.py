@@ -628,6 +628,7 @@ _SENTRY_DEFAULT_DSN = "https://eff01fdec5e9330b80ffd96093038588@o451105091872358
 
 
 from stt.crash_reports import scrub_event as _sentry_scrub_request  # noqa: E402
+from stt.crash_reports import sentry_environment as _sentry_environment  # noqa: E402
 
 
 def _init_sentry():
@@ -662,6 +663,9 @@ def _init_sentry():
             dsn=dsn,
             integrations=[FlaskIntegration()],
             release=release,
+            # Left unset the SDK files everything under "production", which put a
+            # visitor's demo crash in the same environment as a running service.
+            environment=_sentry_environment(DEMO),
             # PII off: no client IP addresses, headers or cookies. Opt-in via a
             # new key, so installs carrying the old sentry_send_pii=true default
             # in their config.json are healed rather than grandfathered.
