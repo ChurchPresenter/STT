@@ -46,8 +46,17 @@ def get_platform_name():
     return "windows" if s == "windows" else "macos" if s == "darwin" else "linux"
 
 
+def _synthetic_session():
+    """Generate a written service into build/ and return its path."""
+    target = os.path.join(ROOT, "build", "demo.db")
+    os.makedirs(os.path.dirname(target), exist_ok=True)
+    run([sys.executable, os.path.join(ROOT, "scripts", "make_demo_session.py"),
+         "--synthetic", "-o", target])
+    return target
+
+
 def _resolve_demo_session(args, parser):
-    """Which recording the demo bundles, refusing to guess."""
+    """Which recording the demo bundles. Never a real one nobody named."""
     if args.session and args.synthetic:
         parser.error("choose either --session or --synthetic, not both")
     if args.session:
@@ -55,17 +64,17 @@ def _resolve_demo_session(args, parser):
             parser.error(f"--session does not exist: {args.session}")
         return os.path.abspath(args.session)
     if args.synthetic:
-        target = os.path.join(ROOT, "build", "demo.db")
-        os.makedirs(os.path.dirname(target), exist_ok=True)
-        run([sys.executable, os.path.join(ROOT, "scripts", "make_demo_session.py"),
-             "--synthetic", "-o", target])
-        return target
+        return _synthetic_session()
     existing = os.environ.get("STT_DEMO_DB", "").strip()
     if existing:
         return existing
-    parser.error(
-        "--demo needs a recording to bundle. Use --synthetic for a written service "
-        "(safe to publish), or --session <db> for a specific one.")
+    # Nothing was named, so write one. This is not the spec's "refuse to guess"
+    # rule being relaxed: that rule is about never bundling a *recording* nobody
+    # chose, and a synthetic service is nobody's speech. Erroring here only ever
+    # taught people to append --synthetic.
+    print("[BUILD] No recording named; generating a synthetic service "
+          "(pass --session <db> to bundle a real one).")
+    return _synthetic_session()
 
 
 SESSIONS_README = """\

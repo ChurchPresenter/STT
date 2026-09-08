@@ -245,6 +245,115 @@ def test_find_sessions_skips_directories_that_do_not_exist(tmp_path):
     assert demo_mode.find_sessions([str(tmp_path / "nope")]) == []
 
 
+# --- ensuring there is something to play -----------------------------------
+
+
+def test_ensure_returns_what_discovery_found_without_generating(tmp_path):
+    bundle = str(tmp_path / "bundle")
+    bundled = _session(os.path.join(bundle, "demo"), "demo.db")
+
+    path, generated = demo_mode.ensure_session(bundle, None, str(tmp_path / "root"))
+
+    assert (path, generated) == (bundled, False)
+
+
+def test_ensure_writes_a_synthetic_service_when_there_is_nothing_to_play(tmp_path):
+    """A checkout carries no recording — only the frozen build does — so running the
+    demo from source used to find nothing and exit."""
+    root = str(tmp_path / "root")
+    os.makedirs(os.path.join(root, demo_mode.SESSIONS_DIR_NAME))
+
+    path, generated = demo_mode.ensure_session(str(tmp_path / "bundle"), None, root)
+
+    assert generated is True
+    assert os.path.isfile(path)
+    assert path.startswith(os.path.join(root, demo_mode.SESSIONS_DIR_NAME))
+
+
+def test_the_generated_service_is_a_session_the_player_can_read(tmp_path):
+    root = str(tmp_path / "root")
+    os.makedirs(os.path.join(root, demo_mode.SESSIONS_DIR_NAME))
+    path, _ = demo_mode.ensure_session(str(tmp_path / "bundle"), None, root)
+
+    from stt import demo_playback
+
+    assert demo_playback.load_schedule(path)
+
+
+def test_the_generated_service_is_found_by_discovery_on_the_next_look(tmp_path):
+    root = str(tmp_path / "root")
+    os.makedirs(os.path.join(root, demo_mode.SESSIONS_DIR_NAME))
+    generated, _ = demo_mode.ensure_session(str(tmp_path / "bundle"), None, root)
+
+    assert demo_mode.discover_session(str(tmp_path / "bundle"), None, root) == generated
+
+
+def test_ensure_never_generates_over_a_recording_that_was_asked_for(tmp_path):
+    """Being pointed at a specific file and handed a written one instead would be a
+    worse answer than being told the file is missing."""
+    root = str(tmp_path / "root")
+    os.makedirs(os.path.join(root, demo_mode.SESSIONS_DIR_NAME))
+
+    path, generated = demo_mode.ensure_session(
+        str(tmp_path / "bundle"), None, root, explicit=str(tmp_path / "missing.db"))
+
+    assert (path, generated) == (None, False)
+    assert os.listdir(os.path.join(root, demo_mode.SESSIONS_DIR_NAME)) == []
+
+
+# --- how the demo was launched ---------------------------------------------
+
+
+def test_no_port_asked_for_is_no_port():
+    assert demo_mode.requested_port({}, []) is None
+
+
+def test_the_environment_can_name_the_port():
+    assert demo_mode.requested_port({demo_mode.ENV_PORT: "9123"}, []) == 9123
+
+
+@pytest.mark.parametrize("argv", [["--port", "9123"], ["--port=9123"]])
+def test_the_command_line_can_name_the_port_either_way(argv):
+    assert demo_mode.requested_port({}, argv) == 9123
+
+
+def test_the_flag_beats_the_environment():
+    """The control window relaunches by setting the variable; a flag typed by hand
+    still has to win."""
+    assert demo_mode.requested_port({demo_mode.ENV_PORT: "9123"}, ["--port", "9200"]) == 9200
+
+
+@pytest.mark.parametrize("value", ["", "  ", "nope", "0", "-1", "70000"])
+def test_an_unusable_port_is_ignored_rather_than_fatal(value):
+    """A demo that refuses to open because of a typo has already failed."""
+    assert demo_mode.requested_port({demo_mode.ENV_PORT: value}, []) is None
+
+
+def test_a_bad_flag_still_lets_the_environment_answer():
+    assert demo_mode.requested_port({demo_mode.ENV_PORT: "9123"}, ["--port", "nope"]) == 9123
+
+
+def test_no_session_asked_for_is_no_session():
+    assert demo_mode.requested_session({}, []) is None
+    assert demo_mode.requested_session({"STT_DEMO_DB": "  "}, []) is None
+
+
+def test_the_session_can_be_named_by_flag_or_environment():
+    assert demo_mode.requested_session({}, ["--session", "/tmp/a.db"]) == "/tmp/a.db"
+    assert demo_mode.requested_session({"STT_DEMO_DB": "/tmp/b.db"}, []) == "/tmp/b.db"
+
+
+def test_the_session_flag_beats_the_environment():
+    assert demo_mode.requested_session(
+        {"STT_DEMO_DB": "/tmp/b.db"}, ["--session", "/tmp/a.db"]) == "/tmp/a.db"
+
+
+def test_a_named_session_is_returned_unvalidated():
+    """ensure_session is what decides a missing explicit path is an error; reporting
+    it here would lose which path was asked for."""
+    assert demo_mode.requested_session({}, ["--session", "/nope.db"]) == "/nope.db"
+
+
 # --- state shims -----------------------------------------------------------
 
 

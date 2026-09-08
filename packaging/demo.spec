@@ -86,6 +86,8 @@ a = Analysis(
         "stt.demo_api",
         "stt.demo_fixtures",
         "stt.demo_redact",
+        "stt.demo_synth",
+        "stt.demo_window",
         # The two things a demo reports. requests is what the live-map ping uses;
         # sentry_sdk loads its integrations dynamically, so PyInstaller's static
         # analysis needs them named (same list as watchdog.spec).
@@ -101,6 +103,11 @@ a = Analysis(
         "sentry_sdk.integrations.logging",
         "sentry_sdk.integrations.threading",
         "sentry_sdk.integrations.argv",
+        # The control window (stt/demo_window.py). The demo is windowed on Windows
+        # and macOS, so without it there is no console to Ctrl-C and no way at all
+        # to quit the thing short of the task manager.
+        "tkinter",
+        "_tkinter",
     ],
     hookspath=[],
     hooksconfig={},
@@ -139,7 +146,7 @@ a = Analysis(
         "pydub",
         "datasets",
         "accelerate",
-        "tkinter",
+        # tkinter is deliberately NOT excluded — see the hiddenimports above.
         "PIL",
     ],
     cipher=block_cipher,

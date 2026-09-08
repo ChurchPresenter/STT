@@ -30,7 +30,7 @@ import shutil
 import socket
 import threading
 import webbrowser
-from typing import Any, Dict, List, MutableMapping, Optional, Sequence
+from typing import Any, Dict, List, MutableMapping, Optional, Sequence, Tuple
 
 # Env var the PyInstaller runtime hook sets, so the shipped artifact is a demo by
 # construction. Also the dev switch: STT_DEMO=1 .venv/bin/python3 speech_to_text.py
@@ -278,6 +278,94 @@ def discover_session(bundle_dir: str, exe_dir: Optional[str], root: str,
     dirs = session_search_dirs(bundle_dir, exe_dir, root, use_local_sessions, home)
     candidates = find_sessions(dirs)
     return candidates[0] if candidates else None
+
+
+# Name of the service written when nothing playable can be found. Generated, not
+# recorded — nobody's speech — so it may be created without anyone deciding first.
+GENERATED_SESSION_NAME = "generated-service.db"
+
+
+def ensure_session(bundle_dir: str, exe_dir: Optional[str], root: str,
+                   explicit: Optional[str] = None, use_local_sessions: bool = False,
+                   home: Optional[str] = None) -> Tuple[Optional[str], bool]:
+    """The recording to replay, generating a written service if there is none.
+
+    Returns ``(path, generated)``. A checkout has no bundled recording — only the
+    frozen build carries one — so running the demo from source found nothing and
+    exited. Generating is safe where guessing is not: :mod:`stt.demo_synth` writes a
+    service nobody spoke, which is exactly the material the published demo ships.
+
+    ``explicit`` that does not exist still resolves to ``(None, False)``: being
+    pointed at a specific file and silently handed a different one is worse than
+    being told the file is missing.
+    """
+    if explicit:
+        return (explicit if os.path.isfile(explicit) else None), False
+    found = discover_session(bundle_dir, exe_dir, root, None, use_local_sessions, home)
+    if found:
+        return found, False
+    from stt import demo_synth  # local: keeps this module import-time side-effect free
+
+    dest = os.path.join(root, SESSIONS_DIR_NAME, GENERATED_SESSION_NAME)
+    return demo_synth.generate(dest), True
+
+
+# --- how it was launched ---------------------------------------------------
+
+# Port override, so a demo can be put on a known port instead of whatever
+# :func:`pick_port` found. Also what the control window sets when it relaunches.
+ENV_PORT = "STT_DEMO_PORT"
+
+
+def _int_or_none(raw: Optional[str]) -> Optional[int]:
+    try:
+        value = int(str(raw).strip())
+    except (TypeError, ValueError):
+        return None
+    return value if 1 <= value <= 65535 else None
+
+
+def _argv_value(flag: str, argv: Sequence[str]) -> Optional[str]:
+    """``--flag value`` or ``--flag=value`` from ``argv``, last occurrence winning."""
+    found: Optional[str] = None
+    for index, item in enumerate(argv):
+        if item == flag and index + 1 < len(argv):
+            found = argv[index + 1]
+        elif item.startswith(flag + "="):
+            found = item.split("=", 1)[1]
+    return found
+
+
+def requested_port(environ: Optional[MutableMapping[str, str]] = None,
+                   argv: Optional[Sequence[str]] = None) -> Optional[int]:
+    """The port asked for on the command line or in the environment, if valid.
+
+    ``--port`` wins over the environment variable, which is what lets the control
+    window's relaunch (which sets the variable) still be overridden by a flag. An
+    unparseable or out-of-range value is ignored rather than fatal — a demo that
+    refuses to open because of a typo has already failed.
+    """
+    import sys
+
+    args = list(sys.argv[1:] if argv is None else argv)
+    env = os.environ if environ is None else environ
+    return _int_or_none(_argv_value("--port", args)) or _int_or_none(env.get(ENV_PORT))
+
+
+def requested_session(environ: Optional[MutableMapping[str, str]] = None,
+                      argv: Optional[Sequence[str]] = None) -> Optional[str]:
+    """The recording asked for by ``--session`` or ``STT_DEMO_DB``, if either was given.
+
+    Returned unvalidated: :func:`ensure_session` is what decides a missing explicit
+    path is an error rather than a reason to play something else.
+    """
+    import sys
+
+    args = list(sys.argv[1:] if argv is None else argv)
+    env = os.environ if environ is None else environ
+    value = _argv_value("--session", args) or env.get("STT_DEMO_DB")
+    value = (value or "").strip()
+    return value or None
 
 
 def executable_dir() -> Optional[str]:

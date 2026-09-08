@@ -64,6 +64,22 @@ congregation speech until someone decides otherwise. Prefer `stt/demo_synth.py` 
 anything published; `stt/demo_scrub.py` exists for a real recording, reduces risk, and
 does not certify — read the `.review.txt` it writes.
 
+`demo.spec` still refuses to *bundle* a recording nobody named, but nothing else does:
+`demo_mode.ensure_session` writes a synthetic service into `~/.stt-demo/sessions` when
+discovery finds nothing, and `build.py --demo` on its own generates one. The rule being
+protected is "never ship somebody's speech by accident", and a written service is nobody's
+speech — erroring on the safe case only taught people to append `--synthetic`.
+
+`stt/demo_window.py` is the demo's only lifecycle control. The artifact is windowed on
+Windows and macOS (`console=not (IS_WINDOWS or IS_MACOS)`), ships no watchdog, and
+`demo_api` refuses `/api/restart` and `/api/server/restart` — so **without the window the
+only way to stop a demo is the task manager**. That is why `tkinter` is deliberately *not*
+in `demo.spec`'s excludes and a test asserts so. Tk owns the main thread on macOS, so the
+window is the demo's main loop; a machine with no display keeps the old join loop. Changing
+the port re-execs the process (`relaunch_command`) because `demo_mode.write_config` bakes
+the port into config before the server reads it — `STT_DEMO_PORT` / `--port` are the same
+lever from outside.
+
 ## Architecture
 
 The server is mostly a monolith — most changes land in `speech_to_text.py`.
@@ -79,7 +95,7 @@ The server is mostly a monolith — most changes land in `speech_to_text.py`.
 | `stt/model_catalog.py` | The shipped faster-whisper catalogue as a floor under the on-disk cache |
 | `stt/model_files.py` | Download manifests, file verification, per-family "is this model loadable" |
 | `stt/start_watch.py` | Judges a start that is dead or wedged, so STARTING always resolves |
-| `stt/demo_*.py` | The shippable demo: playback engine, fake backends, egress guards, redaction, synthetic service generator |
+| `stt/demo_*.py` | The shippable demo: playback engine, fake backends, egress guards, redaction, synthetic service generator, control window |
 | `scripts/` | Dev-only tools: fixture recorder, demo session builder |
 | `tests/` | Pytest suite: download state, path safety, staging, text utils, watchdog update |
 | `packaging/` | Binary build tooling (build.py, make_icon.py, watchdog.spec, demo.spec) — NOT `build/`, which PyInstaller uses as its workdir |

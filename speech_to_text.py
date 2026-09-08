@@ -36,7 +36,10 @@ DEMO_PORT = 0
 if DEMO:
     _demo_install_id = _demo_mode.read_install_id()  # before the wipe takes it
     APP_DIR = _demo_mode.prepare_data_dir(BUNDLE_DIR)
-    DEMO_PORT = _demo_mode.pick_port()
+    # --port / STT_DEMO_PORT if either was given, otherwise the usual 8099 search.
+    # A requested port that is taken still falls through to the next free one: the
+    # control window then shows where the demo actually is, which beats dying at bind.
+    DEMO_PORT = _demo_mode.pick_port(start=_demo_mode.requested_port() or _demo_mode.DEFAULT_PORT)
     _demo_mode.write_config(APP_DIR, BUNDLE_DIR, DEMO_PORT, install_id=_demo_install_id)
 
 os.makedirs(APP_DIR, exist_ok=True)
@@ -23921,13 +23924,18 @@ if __name__ == "__main__":
     if DEMO:
         from stt import demo_playback as _demo_playback
 
-        _demo_source = _demo_mode.discover_session(
-            BUNDLE_DIR, _demo_mode.executable_dir(), APP_DIR,
-            explicit=os.environ.get("STT_DEMO_DB") or None)
+        _demo_explicit = _demo_mode.requested_session()
+        # Only the frozen build carries a recording, so a run from the checkout used
+        # to find nothing and exit. Generating a written service is safe where
+        # guessing is not — see stt/demo_synth.py.
+        _demo_source, _demo_generated = _demo_mode.ensure_session(
+            BUNDLE_DIR, _demo_mode.executable_dir(), APP_DIR, explicit=_demo_explicit)
         if not _demo_source:
-            print("[DEMO] No recorded service found. Drop a session .db into "
-                  f"{os.path.join(APP_DIR, _demo_mode.SESSIONS_DIR_NAME)} and start again.")
+            print(f"[DEMO] The recording asked for does not exist: {_demo_explicit}")
             sys.exit(1)
+        if _demo_generated:
+            print("[DEMO] No recording found — generated a synthetic service at "
+                  f"{_demo_source}")
         print(f"[DEMO] Replaying {_demo_source}")
 
         # The player stands in for the transcription worker: it consumes the same
@@ -23950,6 +23958,41 @@ if __name__ == "__main__":
         globals()["thread2"] = thread2
         print(_demo_mode.startup_banner(DEMO_PORT, _demo_mode.lan_address()), flush=True)
         _demo_mode.open_browser_later(DEMO_PORT)
+
+        from stt import demo_window as _demo_window
+
+        def _demo_relaunch(new_port):
+            """Re-exec this demo on ``new_port``.
+
+            The port is written into the demo's config before the server reads it,
+            so a new process is the only thing that rebinds. The launch wipe means
+            the replay starts again, which the window says before doing it.
+            """
+            command, env = _demo_window.relaunch_command(
+                new_port, sys.argv, sys.executable, bool(getattr(sys, "frozen", False)))
+            try:
+                _demo_player.shutdown()
+            except Exception:
+                pass
+            sys.stdout.flush()
+            os.execve(command[0], command, env)
+
+        def _demo_quit():
+            signal_handler(signal.SIGTERM, None)  # exits the process
+
+        # Tk must own the main thread on macOS, so the window replaces the join loop.
+        # A machine with no display (a demo run over ssh) keeps the loop, and so does
+        # one where Tk gets further than the probe and then fails: the demo losing
+        # its window is a nuisance, the demo not running at all is a broken download.
+        if _demo_window.display_available():
+            try:
+                _demo_window.run(DEMO_PORT, _demo_source, SERVER_DISPLAY_VERSION,
+                                 on_quit=_demo_quit, on_set_port=_demo_relaunch,
+                                 status_probe=thread2.is_alive)
+                _demo_quit()
+            except Exception as _demo_win_err:
+                print(f"[DEMO] Control window unavailable ({_demo_win_err}); "
+                      "press Ctrl-C to stop the demo.")
         try:
             while thread2.is_alive():
                 thread2.join(timeout=1.0)

@@ -75,6 +75,7 @@ module = [
     "stt.wheel_policy",
     "stt.optional_deps",
     "stt.demo_mode",
+    "stt.demo_window",
     "stt.demo_playback",
     "stt.demo_api",
     "stt.demo_redact",

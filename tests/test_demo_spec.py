@@ -56,6 +56,17 @@ def test_the_web_stack_is_not_excluded(module, spec):
     assert f'"{module}"' not in excludes
 
 
+def test_tkinter_is_bundled_because_it_is_the_only_way_to_quit_the_demo(spec):
+    """The demo is windowed on Windows and macOS, so there is no console to Ctrl-C
+    and no watchdog. Cull tkinter for size and the artifact can only be stopped from
+    the task manager. See stt/demo_window.py."""
+    excludes = spec.split("excludes=[", 1)[1].split("]", 1)[0]
+    assert '"tkinter"' not in excludes
+    hidden = spec.split("hiddenimports=[", 1)[1].split("]", 1)[0]
+    assert '"tkinter"' in hidden
+    assert '"_tkinter"' in hidden
+
+
 def test_the_engineio_async_driver_is_named_explicitly(spec):
     """engineio picks its driver by dynamic import, which PyInstaller cannot see.
     Without this the demo serves pages and then fails every WebSocket."""
@@ -65,6 +76,7 @@ def test_the_engineio_async_driver_is_named_explicitly(spec):
 
 @pytest.mark.parametrize("module", [
     "stt.demo_mode", "stt.demo_playback", "stt.demo_api", "stt.demo_fixtures",
+    "stt.demo_synth", "stt.demo_window",
 ])
 def test_the_demo_modules_are_named_explicitly(module, spec):
     """The monolith reaches them through names PyInstaller's analysis cannot follow."""
@@ -108,3 +120,14 @@ def test_the_build_script_offers_the_demo_target():
     assert "demo.spec" in build
     # Building one target must not delete the other's artifacts.
     assert 'shutil.rmtree(os.path.join(ROOT, "dist"))' not in build
+
+
+def test_the_build_writes_a_service_rather_than_refusing_when_none_is_named():
+    """The spec still refuses to guess, but --demo on its own now produces an
+    artifact: erroring here only ever taught people to append --synthetic."""
+    with open(BUILD, encoding="utf-8") as handle:
+        build = handle.read()
+
+    resolve = build.split("def _resolve_demo_session", 1)[1].split("\ndef ", 1)[0]
+    assert "_synthetic_session()" in resolve
+    assert "--demo needs a recording" not in build
