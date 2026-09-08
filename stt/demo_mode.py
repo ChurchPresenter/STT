@@ -158,8 +158,13 @@ def config_overlay(port: int) -> Dict[str, Any]:
             "settings_ip_whitelist": [],
             "access_token": "",
         },
-        # The visitor presses Start, exactly as an operator does.
-        "audio": {"autostart": False},
+        # The visitor presses Start, exactly as an operator does — so both of the
+        # Start button's preconditions have to read as met. The microphone is
+        # already "default"; this is the flag that says somebody chose it. The
+        # model name matches the shipped recording's own asr_model, so the pages
+        # that display which model is running are not blank.
+        "audio": {"autostart": False, "microphone_selected": True},
+        "model": {"backend": "faster-whisper", "whisper": {"model": "large-v3"}},
         # Translations come from the recording's own translated_text column. The
         # monolith skips fresh translation, backfill and in-progress translation
         # outright in demo mode, so a drop-in session with untranslated rows cannot

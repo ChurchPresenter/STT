@@ -225,6 +225,23 @@ class State:
 # --- helpers ---------------------------------------------------------------
 
 
+def setup_status() -> Dict[str, Any]:
+    """The Start button's two preconditions, as a demo answers them.
+
+    The real check asks whether the selected model's weights are on disk. A demo
+    ships none and loads none — :mod:`stt.demo_playback` stands in for the worker —
+    so the honest answer greys out Start and refuses the first thing a visitor
+    clicks, which is the one thing a demo may not do.
+    """
+    return {
+        "model_ready": True,
+        "mic_ready": True,
+        "ready": True,
+        "model_hint": "",
+        "mic_hint": "",
+    }
+
+
 def _unavailable(message: str = UNAVAILABLE_MESSAGE) -> Canned:
     return {"success": False, "error": message, "demo": True}, 200
 

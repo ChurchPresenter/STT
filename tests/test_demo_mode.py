@@ -469,6 +469,21 @@ def test_write_config_applies_the_demo_settings_over_the_template(tmp_path):
     assert config["auto_update"]["enabled"] is False
 
 
+def test_the_demo_config_meets_both_of_the_start_buttons_preconditions(tmp_path):
+    """A visitor presses Start as their first action. Leaving the model unset and
+    the microphone unchosen greyed the button out with "Download the selected
+    model in the Model Manager" — in a build that ships no models."""
+    bundle = _template(tmp_path)
+    root = demo_mode.prepare_data_dir(bundle, home=str(tmp_path))
+
+    with open(demo_mode.write_config(root, bundle, 8099)) as handle:
+        config = json.load(handle)
+
+    assert config["audio"]["microphone_selected"] is True
+    assert config["model"]["whisper"]["model"]
+    assert config["model"]["backend"] == "faster-whisper"
+
+
 def test_write_config_keeps_settings_the_demo_does_not_care_about(tmp_path):
     bundle = _template(tmp_path)
     root = demo_mode.prepare_data_dir(bundle, home=str(tmp_path))

@@ -7937,6 +7937,11 @@ def _mic_explicitly_selected(cfg):
 def _setup_status():
     """Readiness of the two prerequisites for Start (drives the checklist +
     the greyed-out Start button on the web UI and the watchdog GUI)."""
+    # A demo has no weights on disk and never loads any, so the disk check is
+    # always false and Start would be permanently greyed out — the same reason
+    # start_transcription skips _model_refusal_reason under DEMO.
+    if DEMO:
+        return _demo_api.setup_status()
     model_ready = _selected_model_downloaded(config)
     mic_ready = _mic_explicitly_selected(config)
     return {

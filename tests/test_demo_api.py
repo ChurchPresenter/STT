@@ -430,3 +430,16 @@ def test_the_refusal_says_which_capability_was_refused(state):
     assert tunnel["error"] != mover["error"]
     assert "public address" in tunnel["error"]
     assert "network share" in mover["error"]
+
+
+def test_the_demo_reports_the_start_button_as_ready():
+    """The real check asks whether the selected model's weights are on disk. A demo
+    ships none and loads none, so the honest answer permanently disables the first
+    thing a visitor clicks."""
+    status = demo_api.setup_status()
+
+    assert status["ready"] is True
+    assert status["model_ready"] is True
+    assert status["mic_ready"] is True
+    assert status["model_hint"] == ""
+    assert status["mic_hint"] == ""
