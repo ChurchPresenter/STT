@@ -85,6 +85,7 @@ module = [
     "stt.worker_crash",
     "stt.diagnostics",
     "stt.start_watch",
+    "stt.session_edit",
     "stt.shutdown_channel",
     "stt.win_job",
 ]

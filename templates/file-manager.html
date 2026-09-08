@@ -705,6 +705,26 @@
             </div>
         </div>
     </div>
+    <!-- Session editor: captions, translations and timings of one session .db.
+         Reads through /api/file-manager/db-rows (full-length cells, unlike the
+         preview) and writes through /api/file-manager/db-edit as one batch. -->
+    <div class="modal" id="sessionEditModal" role="dialog" aria-modal="true" aria-labelledby="sessionEditName">
+        <div class="preview-modal-content">
+            <div class="modal-header">
+                <span id="sessionEditName">Edit session</span>
+            </div>
+            <div class="preview-content" id="sessionEditContent" style="max-height:75vh;"></div>
+            <div class="modal-footer" style="display:flex;gap:8px;align-items:center;justify-content:space-between;flex-wrap:wrap;">
+                <span id="sessionEditStatus" style="color:var(--text-secondary);font-size:0.85em;"></span>
+                <span style="display:flex;gap:8px;">
+                    <button class="btn btn-secondary" onclick="addSessionRow()">+ Add line</button>
+                    <button class="btn btn-primary" id="sessionEditSave" onclick="saveSessionEdits()">Save changes</button>
+                    <button class="btn btn-secondary" onclick="closeSessionEditor()">Close</button>
+                </span>
+            </div>
+        </div>
+    </div>
+
     <div id="fm-announce" role="status" aria-live="polite" aria-atomic="true" style="position:absolute;width:1px;height:1px;padding:0;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0;"></div>
 {% endblock %}
 
@@ -1043,6 +1063,13 @@
                     ? `<button class="action-btn action-preview" onclick="previewFile('${item.path.replace(/\\/g, '\\\\')}', '${item.name.replace(/'/g, "\\'")}')">Preview</button>`
                     : '';
 
+                // Editing a session's captions. Databases only, and not on a remote
+                // listing — the write route resolves a local managed path.
+                const editButton = (!isRemote && item.type === 'file'
+                                    && /\.(db|sqlite|sqlite3)$/i.test(item.name))
+                    ? `<button class="action-btn" style="background: var(--accent, #2563eb); color: white;" onclick="openSessionEditor('${item.path.replace(/\\/g, '\\\\')}', '${item.name.replace(/'/g, "\\'")}')">Edit</button>`
+                    : '';
+
                 // Trimming sits with the other per-file actions rather than
                 // behind a scan, so a recording can be trimmed straight from the
                 // listing. Dev mode only: it writes files, and it is not
@@ -1071,6 +1098,7 @@
                         <td>
                             <div class="file-actions">
                                 ${previewButton}
+                                ${editButton}
                                 ${trimButton}
                                 ${downloadButton}
                                 ${hideButton}
@@ -2072,6 +2100,12 @@
             }
         });
 
+        document.getElementById('sessionEditModal').addEventListener('click', (e) => {
+            // Goes through closeSessionEditor so a stray click outside the dialog
+            // still asks before throwing away unsaved edits.
+            if (e.target.id === 'sessionEditModal') closeSessionEditor();
+        });
+
         document.getElementById('previewModal').addEventListener('click', (e) => {
             if (e.target.id === 'previewModal') {
                 closePreviewModal();
@@ -2354,6 +2388,200 @@
                     </div>
                 `;
             }
+        }
+
+        // --- session editor ------------------------------------------------
+        //
+        // Edits are collected in memory and sent as one batch, so a save is all or
+        // nothing: a half-applied transcript is one nobody can reason about, and the
+        // operator's screen is the only record of what they meant.
+        let sessionEdit = { path: '', name: '', rows: [], columns: [], dirty: new Map(),
+                            added: [], removed: new Set(), nextTempId: -1 };
+
+        const SESSION_EDIT_LABELS = {
+            text: 'Caption', translated_text: 'Translation',
+            start_time: 'Start (s)', end_time: 'End (s)', ts_ms: 'Position (ms)',
+        };
+
+        async function openSessionEditor(path, name) {
+            sessionEdit = { path, name, rows: [], columns: [], dirty: new Map(),
+                            added: [], removed: new Set(), nextTempId: -1 };
+            document.getElementById('sessionEditName').textContent = 'Edit — ' + name;
+            const content = document.getElementById('sessionEditContent');
+            content.innerHTML = '<div class="loading">Loading session…</div>';
+            document.getElementById('sessionEditStatus').textContent = '';
+            document.getElementById('sessionEditModal').classList.add('active');
+
+            try {
+                const response = await fetch('/api/file-manager/db-rows?path=' + encodeURIComponent(path));
+                const data = await response.json();
+                if (!data.success) {
+                    content.innerHTML = `<div class="empty-state"><p>${escapeHtml(data.error || 'Could not open this database.')}</p></div>`;
+                    return;
+                }
+                if (data.live) {
+                    content.innerHTML = '<div class="empty-state"><h3>This service is recording right now</h3>' +
+                        '<p>Stop transcription first, or correct captions live on the Corrections page.</p></div>';
+                    return;
+                }
+                sessionEdit.rows = data.rows;
+                sessionEdit.columns = data.columns;
+                renderSessionEditor();
+            } catch (error) {
+                content.innerHTML = `<div class="empty-state"><p>Failed to load: ${escapeHtml(error.message)}</p></div>`;
+            }
+        }
+
+        function renderSessionEditor() {
+            const content = document.getElementById('sessionEditContent');
+            const cols = sessionEdit.columns;
+            const all = sessionEdit.rows.concat(sessionEdit.added);
+            if (!all.length) {
+                content.innerHTML = '<div class="empty-state"><p>This session has no captions. Use “Add line” to write one.</p></div>';
+                return;
+            }
+            const th = 'text-align:left;padding:6px 10px;position:sticky;top:0;background:var(--bg-base);border-bottom:1px solid var(--border);white-space:nowrap;';
+            const head = `<tr><th style="${th}">#</th>` +
+                cols.map(c => `<th style="${th}">${escapeHtml(SESSION_EDIT_LABELS[c] || c)}</th>`).join('') +
+                `<th style="${th}"></th></tr>`;
+
+            const body = all.map(row => {
+                const gone = sessionEdit.removed.has(row.id);
+                const wide = (c) => c === 'text' || c === 'translated_text';
+                const cells = cols.map(c => {
+                    const value = row[c] === null || row[c] === undefined ? '' : row[c];
+                    return `<td style="padding:4px 6px;border-bottom:1px solid var(--border);vertical-align:top;">
+                        <input value="${escapeHtml(String(value))}" data-row="${row.id}" data-col="${c}"
+                               oninput="markSessionCell(this)" ${gone ? 'disabled' : ''}
+                               style="width:${wide(c) ? '32ch' : '11ch'};padding:4px 6px;border:1px solid var(--border);border-radius:var(--radius-sm);background:var(--bg-input,var(--bg-base));color:var(--text-primary);font-size:0.9em;${gone ? 'opacity:0.4;text-decoration:line-through;' : ''}"></td>`;
+                }).join('');
+                return `<tr><td style="padding:4px 10px;border-bottom:1px solid var(--border);color:var(--text-secondary);font-variant-numeric:tabular-nums;">${row.id > 0 ? row.id : 'new'}</td>${cells}
+                    <td style="padding:4px 6px;border-bottom:1px solid var(--border);white-space:nowrap;">
+                        <button class="action-btn ${gone ? '' : 'action-delete'}" onclick="toggleSessionRowDeleted(${row.id})">${gone ? 'Keep' : 'Delete'}</button>
+                    </td></tr>`;
+            }).join('');
+
+            content.innerHTML =
+                `<div style="margin-bottom:8px;color:var(--text-secondary);font-size:0.85em;">${all.length} lines — edit a cell, then Save changes. Nothing is written until you save.</div>
+                 <div style="width:85vw;max-width:1200px;max-height:60vh;overflow:auto;border:1px solid var(--border);border-radius:var(--radius-sm);">
+                    <table style="border-collapse:collapse;font-size:0.85em;width:max-content;min-width:100%;">${head}${body}</table>
+                 </div>`;
+            updateSessionEditStatus();
+        }
+
+        function markSessionCell(input) {
+            const id = Number(input.dataset.row);
+            const added = sessionEdit.added.find(r => r.id === id);
+            if (added) {
+                added[input.dataset.col] = input.value;
+            } else {
+                if (!sessionEdit.dirty.has(id)) sessionEdit.dirty.set(id, {});
+                sessionEdit.dirty.get(id)[input.dataset.col] = input.value;
+            }
+            updateSessionEditStatus();
+        }
+
+        function toggleSessionRowDeleted(id) {
+            if (id < 0) {
+                sessionEdit.added = sessionEdit.added.filter(r => r.id !== id);
+            } else if (sessionEdit.removed.has(id)) {
+                sessionEdit.removed.delete(id);
+            } else {
+                sessionEdit.removed.add(id);
+                sessionEdit.dirty.delete(id);
+            }
+            renderSessionEditor();
+        }
+
+        function addSessionRow() {
+            if (!sessionEdit.path) return;
+            // Positioned after the last existing line by default; the server works
+            // out a ts_ms between that row and the next one.
+            const existing = sessionEdit.rows[sessionEdit.rows.length - 1];
+            const row = { id: sessionEdit.nextTempId--, after_id: existing ? existing.id : null };
+            sessionEdit.columns.forEach(c => { row[c] = ''; });
+            sessionEdit.added.push(row);
+            renderSessionEditor();
+            const content = document.getElementById('sessionEditContent');
+            const inputs = content.querySelectorAll(`input[data-row="${row.id}"]`);
+            if (inputs.length) inputs[0].focus();
+        }
+
+        function collectSessionEdits() {
+            const edits = [];
+            sessionEdit.removed.forEach(id => edits.push({ op: 'delete', id }));
+            sessionEdit.dirty.forEach((values, id) => {
+                if (!sessionEdit.removed.has(id) && Object.keys(values).length) {
+                    edits.push({ op: 'update', id, values });
+                }
+            });
+            sessionEdit.added.forEach(row => {
+                const values = {};
+                sessionEdit.columns.forEach(c => {
+                    if (String(row[c] ?? '') !== '') values[c] = row[c];
+                });
+                if (Object.keys(values).length) {
+                    edits.push({ op: 'insert', values, after_id: row.after_id });
+                }
+            });
+            return edits;
+        }
+
+        function updateSessionEditStatus() {
+            const n = collectSessionEdits().length;
+            document.getElementById('sessionEditStatus').textContent =
+                n ? `${n} unsaved change${n === 1 ? '' : 's'}` : 'No changes';
+        }
+
+        async function saveSessionEdits() {
+            const edits = collectSessionEdits();
+            if (!edits.length) { showNotification('Nothing to save', 'error'); return; }
+
+            // The backup choice is asked every time rather than remembered: a
+            // recorded service is verbatim speech, and "yes, overwrite it" should
+            // not be a setting somebody ticked once and forgot.
+            const keep = confirm(
+                `Save ${edits.length} change${edits.length === 1 ? '' : 's'} to ${sessionEdit.name}?\n\n` +
+                'OK — keep a dated copy of the file first (recommended).\n' +
+                'Cancel — choose again; nothing is written yet.');
+            if (!keep) {
+                const overwrite = confirm(
+                    'Write the changes without keeping a copy?\n\n' +
+                    'OK — edit the file in place. This cannot be undone.\n' +
+                    'Cancel — do nothing.');
+                if (!overwrite) return;
+            }
+
+            const button = document.getElementById('sessionEditSave');
+            button.disabled = true;
+            try {
+                const response = await fetch('/api/file-manager/db-edit', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ path: sessionEdit.path, edits,
+                                           backup: keep ? 'keep' : 'none' }),
+                });
+                const data = await response.json();
+                if (!data.success) { showNotification(data.error || 'Could not save', 'error'); return; }
+                const c = data.counts || {};
+                showNotification(
+                    `Saved — ${c.updated || 0} changed, ${c.inserted || 0} added, ${c.deleted || 0} removed` +
+                    (data.backup ? `; copy kept as ${data.backup}` : ''));
+                await openSessionEditor(sessionEdit.path, sessionEdit.name);
+                loadFiles(currentPath);
+            } catch (error) {
+                showNotification('Could not save: ' + error.message, 'error');
+            } finally {
+                button.disabled = false;
+            }
+        }
+
+        function closeSessionEditor() {
+            if (collectSessionEdits().length &&
+                !confirm('Discard your unsaved changes?')) return;
+            document.getElementById('sessionEditModal').classList.remove('active');
+            sessionEdit = { path: '', name: '', rows: [], columns: [], dirty: new Map(),
+                            added: [], removed: new Set(), nextTempId: -1 };
         }
 
         function closePreviewModal() {

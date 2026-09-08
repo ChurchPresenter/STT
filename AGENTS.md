@@ -98,11 +98,24 @@ The server is mostly a monolith — most changes land in `speech_to_text.py`.
 | `stt/model_catalog.py` | The shipped faster-whisper catalogue as a floor under the on-disk cache |
 | `stt/model_files.py` | Download manifests, file verification, per-family "is this model loadable" |
 | `stt/start_watch.py` | Judges a start that is dead or wedged, so STARTING always resolves |
+| `stt/session_edit.py` | What may be changed in a recorded session's rows, and what it costs |
 | `stt/demo_*.py` | The shippable demo: playback engine, fake backends, egress guards, redaction, synthetic service generator, control window |
 | `scripts/` | Dev-only tools: fixture recorder, demo session builder |
 | `tests/` | Pytest suite: download state, path safety, staging, text utils, watchdog update |
 | `packaging/` | Binary build tooling (build.py, make_icon.py, watchdog.spec, demo.spec) — NOT `build/`, which PyInstaller uses as its workdir |
 | `deploy/` | OS service templates: stt-watchdog.service (systemd), com.stt.watchdog.plist (launchd) |
+
+**A recorded session can be edited, but only deliberately.** `stt/session_edit.py` backs
+the File Manager's Edit button (`/api/file-manager/db-rows` to read at full length,
+`/api/file-manager/db-edit` to write). It accepts exactly `text`, `translated_text`,
+`start_time`, `end_time` and `ts_ms` — **never `words_json`**, whose hand-edited timings
+would desynchronise the live preview from the text it highlights with nothing on screen to
+show it. A batch applies inside one transaction or not at all, the route refuses the
+database the recorder currently holds (`transcription_state["db_name"]`, compared by
+realpath), and `backup` has no default: rewriting congregation speech is a decision
+somebody has to make, so the caller must say `keep` or `none`. The demo's own recording is
+just another file this reaches, which is why `Player.begin_session` re-reads its schedule
+every session instead of caching it for the life of the process.
 
 ## Configuration
 

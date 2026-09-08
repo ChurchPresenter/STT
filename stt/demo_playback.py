@@ -436,8 +436,11 @@ class Player:
     def begin_session(self) -> str:
         """Open a new live session and start the clock at the top of the recording."""
         with self._lock:
-            if not self._schedule:
-                self._schedule = load_schedule(self._config.source_db)
+            # Re-read every time, not once per process: the recording is an ordinary
+            # session database and the File Manager can now edit it, so a cached
+            # schedule would replay the old captions until someone restarted the
+            # demo. One query at the top of a service costs nothing.
+            self._schedule = load_schedule(self._config.source_db)
             now = time.time()
             path = session_path(self._config.session_dir, now,
                                 self._config.filename_format, self._config.path_format)

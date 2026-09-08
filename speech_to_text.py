@@ -91,6 +91,7 @@ from stt.http_params import merge_request_params, parse_json_body as _parse_json
 from stt.model_disk import _CT2_MARKER, dir_has_weights, dir_is_writable, has_weight_file, is_weight_file, model_presence  # noqa: F401
 from stt import model_catalog as _model_catalog
 from stt import model_files as _model_files
+from stt import session_edit as _session_edit
 from stt import start_watch as _start_watch
 
 
@@ -12705,6 +12706,115 @@ def preview_db():
         "total": total,
         "truncated": total > len(rows),
     })
+
+
+@app.route("/api/file-manager/db-rows", methods=["GET"])
+def db_rows_for_edit():
+    """The editable columns of a session database, at full length.
+
+    Separate from preview-db, which elides every cell at 300 characters: an editor
+    that loaded a truncated caption would write the ellipsis back into the row. Only
+    the columns stt/session_edit.py will accept are returned, so the payload of a
+    long service stays small and nothing offers to edit a words_json blob.
+    """
+    if not check_ip_whitelist():
+        return jsonify({"success": False, "error": "Access denied"}), 403
+
+    path = request.args.get("path")
+    if not path:
+        return jsonify({"success": False, "error": "Path is required"}), 400
+    abs_path = safe_managed_path(path)
+    if abs_path is None:
+        return jsonify({"success": False, "error": "Access denied"}), 403
+    if not os.path.isfile(abs_path):
+        return jsonify({"success": False, "error": "File not found"}), 404
+
+    try:
+        with sqlite3.connect(f"file:{abs_path}?mode=ro", uri=True) as conn:
+            tables = {r[0] for r in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'")}
+            if _session_edit.TABLE not in tables:
+                return jsonify({"success": False,
+                                "error": "This is not a session database."}), 400
+            present = [c for c in conn.execute(
+                f'PRAGMA table_info("{_session_edit.TABLE}")')]
+            columns = [c for c in _session_edit.EDITABLE if c in {p[1] for p in present}]
+            selected = ", ".join(f'"{c}"' for c in ["id", *columns])
+            rows = [dict(zip(["id", *columns], r)) for r in conn.execute(
+                f'SELECT {selected} FROM "{_session_edit.TABLE}" ORDER BY ts_ms, id')]
+    except sqlite3.Error:
+        return jsonify({"success": False, "error": "Could not read database"}), 400
+
+    live = _session_edit.is_live_database(abs_path, transcription_state.get("db_name"))
+    return jsonify({"success": True, "columns": columns, "rows": rows,
+                    "total": len(rows), "live": live})
+
+
+@app.route("/api/file-manager/db-edit", methods=["POST"])
+def db_edit():
+    """Apply caption/translation/timing edits to a session database.
+
+    The decisions live in stt/session_edit.py; this route is the three things that
+    need the monolith: path confinement, whether the recorder holds this file, and
+    the connection. ``backup`` is not defaulted — the caller has to say, because
+    rewriting a recorded service is a decision somebody should have made on purpose.
+    """
+    if not check_ip_whitelist():
+        return jsonify({"success": False, "error": "Access denied"}), 403
+
+    body = request.get_json(silent=True) or \
+        _parse_json_body(request.get_data(as_text=True)) or {}
+    path = body.get("path")
+    if not path:
+        return jsonify({"success": False, "error": "Path is required"}), 400
+    abs_path = safe_managed_path(path)
+    if abs_path is None:
+        return jsonify({"success": False, "error": "Access denied"}), 403
+    if not os.path.isfile(abs_path):
+        return jsonify({"success": False, "error": "File not found"}), 404
+
+    # Never the session being recorded. The live path has its own writer and its own
+    # lock; a second connection editing rows underneath it is how a service loses
+    # the minutes either side of the edit.
+    if _session_edit.is_live_database(abs_path, transcription_state.get("db_name")):
+        return jsonify({"success": False,
+                        "error": ("This session is being recorded right now. "
+                                  "Stop transcription, or use the Corrections page.")}), 409
+
+    backup = str(body.get("backup", "")).strip().lower()
+    if backup not in ("keep", "none"):
+        return jsonify({"success": False,
+                        "error": "Say whether to keep a copy first: backup=keep or none."}), 400
+
+    try:
+        edits = _session_edit.parse_edits(body.get("edits"))
+    except _session_edit.EditError as err:
+        return jsonify({"success": False, "error": str(err)}), 400
+
+    backup_at = None
+    try:
+        if backup == "keep":
+            backup_at = _session_edit.make_backup(abs_path)
+    except OSError as err:
+        return jsonify({"success": False,
+                        "error": f"Could not write the backup: {err}"}), 500
+
+    conn = sqlite3.connect(abs_path)
+    try:
+        with conn:  # commits on success, rolls the whole batch back on any exception
+            counts = _session_edit.apply_edits(conn, edits)
+    except _session_edit.EditError as err:
+        return jsonify({"success": False, "error": str(err)}), 400
+    except sqlite3.Error as err:
+        return jsonify({"success": False, "error": f"Could not write: {err}"}), 500
+    finally:
+        conn.close()
+
+    make_db_world_readable(abs_path)
+    print(f"[DB-EDIT] {os.path.basename(abs_path)}: {counts}"
+          + (f" (copy at {os.path.basename(backup_at)})" if backup_at else ""))
+    return jsonify({"success": True, "counts": counts,
+                    "backup": os.path.basename(backup_at) if backup_at else None})
 
 
 @app.route("/api/file-manager/session-meta", methods=["GET"])
