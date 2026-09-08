@@ -23928,6 +23928,12 @@ if __name__ == "__main__":
     # web server runs in this process with the playback engine beside it.
     if DEMO:
         from stt import demo_playback as _demo_playback
+        from stt import demo_window as _demo_window
+
+        # Asked before anything else starts a thread: the probe forks, and forking a
+        # process that already holds a lock in another thread is how a child hangs
+        # instead of answering. See demo_window.display_available.
+        _demo_show_window = _demo_window.display_available()
 
         _demo_explicit = _demo_mode.requested_session()
         # Only the frozen build carries a recording, so a run from the checkout used
@@ -23964,8 +23970,6 @@ if __name__ == "__main__":
         print(_demo_mode.startup_banner(DEMO_PORT, _demo_mode.lan_address()), flush=True)
         _demo_mode.open_browser_later(DEMO_PORT)
 
-        from stt import demo_window as _demo_window
-
         def _demo_relaunch(new_port):
             """Re-exec this demo on ``new_port``.
 
@@ -23989,7 +23993,7 @@ if __name__ == "__main__":
         # A machine with no display (a demo run over ssh) keeps the loop, and so does
         # one where Tk gets further than the probe and then fails: the demo losing
         # its window is a nuisance, the demo not running at all is a broken download.
-        if _demo_window.display_available():
+        if _demo_show_window:
             try:
                 _demo_window.run(DEMO_PORT, _demo_source, SERVER_DISPLAY_VERSION,
                                  on_quit=_demo_quit, on_set_port=_demo_relaunch,

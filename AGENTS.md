@@ -75,7 +75,10 @@ Windows and macOS (`console=not (IS_WINDOWS or IS_MACOS)`), ships no watchdog, a
 `demo_api` refuses `/api/restart` and `/api/server/restart` — so **without the window the
 only way to stop a demo is the task manager**. That is why `tkinter` is deliberately *not*
 in `demo.spec`'s excludes and a test asserts so. Tk owns the main thread on macOS, so the
-window is the demo's main loop; a machine with no display keeps the old join loop. Changing
+window is the demo's main loop; a machine with no display keeps the old join loop —
+**probed in a forked child**, because Tk failing to reach a window server aborts the
+process rather than raising, and the cheap withdrawn-root probe answered yes right
+before the demo took SIGSEGV. `STT_DEMO_WINDOW=0` settles it without probing. Changing
 the port re-execs the process (`relaunch_command`) because `demo_mode.write_config` bakes
 the port into config before the server reads it — `STT_DEMO_PORT` / `--port` are the same
 lever from outside.

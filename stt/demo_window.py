@@ -105,20 +105,97 @@ def relaunch_command(port: int, argv: Sequence[str], executable: str,
 # --- the Tk shell ----------------------------------------------------------
 
 
+# Forces the window on ("1") or off ("0"). Off is what a smoke test, a CI run or a
+# demo started by a service manager wants: those have no window server, and asking
+# for one there does not raise — it kills the process.
+ENV_WINDOW = "STT_DEMO_WINDOW"
+
+
+def _probe_window() -> bool:
+    """Open a real, visible Tk window and pump it once, then take it down.
+
+    Deliberately not the watchdog's withdrawn-root probe. A withdrawn root succeeds
+    in contexts where showing a window then aborts the process, so the cheap probe
+    answered yes and the demo died a moment later — measured as SIGSEGV when the demo
+    was started detached from a GUI session. The probe has to do what the window does
+    or it is not testing the thing that fails.
+    """
+    import tkinter as tk
+
+    root = tk.Tk()
+    try:
+        root.geometry("1x1+0+0")
+        root.deiconify()
+        root.update()
+    finally:
+        root.destroy()
+    return True
+
+
+def _forked_probe() -> bool:
+    """Run :func:`_probe_window` in a child, so a crash costs a process, not the demo.
+
+    Tk failing to reach a window server does not raise on macOS: it aborts, and no
+    ``except`` in this process can see that coming. A child is the only way to ask
+    the question and still be running afterwards. The child touches nothing before
+    ``os._exit``, so the parent's buffers and atexit handlers are untouched.
+    """
+    read_fd, write_fd = os.pipe()
+    pid = os.fork()
+    if pid == 0:  # child
+        try:
+            os.close(read_fd)
+            ok = _probe_window()
+            os.write(write_fd, b"1" if ok else b"0")
+        except BaseException:
+            try:
+                os.write(write_fd, b"0")
+            except OSError:
+                pass
+        finally:
+            os._exit(0)
+    os.close(write_fd)
+    try:
+        answer = os.read(read_fd, 1)
+    except OSError:
+        answer = b""
+    finally:
+        os.close(read_fd)
+    try:
+        _, status = os.waitpid(pid, 0)
+    except OSError:
+        return False
+    # A crash reaches us as a signal or a non-zero exit, never as an exception.
+    if os.WIFSIGNALED(status) or os.WEXITSTATUS(status) != 0:
+        return False
+    return answer == b"1"
+
+
+def forced_window(environ: Optional[MutableMapping[str, str]] = None) -> Optional[bool]:
+    """``True``/``False`` if STT_DEMO_WINDOW settles it, ``None`` to probe."""
+    env = os.environ if environ is None else environ
+    raw = str(env.get(ENV_WINDOW, "")).strip().lower()
+    if raw in {"1", "true", "yes", "on"}:
+        return True
+    if raw in {"0", "false", "no", "off"}:
+        return False
+    return None
+
+
 def display_available() -> bool:
     """Whether a Tk window can actually be opened here.
 
-    Same probe the watchdog uses: importing tkinter succeeds on a headless box, and
-    only creating a root window finds out there is no display. A demo on a server
-    with no screen must still run — it just falls back to its console loop.
+    Probed in a child process where fork exists, because the failure mode is a crash
+    rather than an exception. Windows has no fork, and there the demo is a windowed
+    .exe with a desktop under it, so the probe runs in place.
     """
+    forced = forced_window()
+    if forced is not None:
+        return forced
     try:
-        import tkinter as tk
-
-        root = tk.Tk()
-        root.withdraw()
-        root.destroy()
-        return True
+        if hasattr(os, "fork"):
+            return _forked_probe()
+        return _probe_window()
     except Exception:
         return False
 

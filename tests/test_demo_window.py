@@ -9,6 +9,8 @@ deliberately thin.
 
 from __future__ import annotations
 
+import os
+
 import pytest
 
 from stt import demo_mode, demo_window
@@ -113,3 +115,88 @@ def test_other_arguments_are_carried_across_unchanged():
 def test_strip_port_flag_leaves_a_bare_trailing_flag_from_taking_the_next_argument():
     assert demo_window.strip_port_flag(["--session", "a.db", "--port"]) == [
         "--session", "a.db"]
+
+
+# --- deciding whether to open a window at all -------------------------------
+
+
+def test_no_preference_means_probe():
+    assert demo_window.forced_window({}) is None
+
+
+@pytest.mark.parametrize("value", ["1", "true", "YES", "on", " 1 "])
+def test_the_window_can_be_forced_on(value):
+    assert demo_window.forced_window({demo_window.ENV_WINDOW: value}) is True
+
+
+@pytest.mark.parametrize("value", ["0", "false", "no", "off", " OFF "])
+def test_the_window_can_be_forced_off(value):
+    """What a smoke test, a CI run or a service-managed demo wants: those have no
+    window server, and asking for one there does not raise, it kills the process."""
+    assert demo_window.forced_window({demo_window.ENV_WINDOW: value}) is False
+
+
+def test_an_unrecognised_preference_falls_back_to_probing():
+    assert demo_window.forced_window({demo_window.ENV_WINDOW: "maybe"}) is None
+
+
+def test_forcing_the_window_off_skips_the_probe_entirely(monkeypatch):
+    def explode():
+        raise AssertionError("the probe must not run when the answer is settled")
+
+    monkeypatch.setenv(demo_window.ENV_WINDOW, "0")
+    monkeypatch.setattr(demo_window, "_forked_probe", explode)
+    monkeypatch.setattr(demo_window, "_probe_window", explode)
+
+    assert demo_window.display_available() is False
+
+
+def test_forcing_the_window_on_skips_the_probe_entirely(monkeypatch):
+    monkeypatch.setenv(demo_window.ENV_WINDOW, "1")
+    monkeypatch.setattr(demo_window, "_forked_probe", lambda: False)
+
+    assert demo_window.display_available() is True
+
+
+@pytest.mark.skipif(not hasattr(os, "fork"), reason="no fork on this platform")
+def test_a_probe_that_crashes_the_child_reports_no_display(monkeypatch):
+    """The reason the probe is forked at all: Tk failing to reach a window server
+    aborts the process instead of raising, so no except clause in the parent can
+    see it coming. Measured as SIGSEGV when the demo was started detached."""
+    import signal
+
+    def crash():
+        # SIGKILL rather than SIGSEGV: the same WIFSIGNALED path, without
+        # faulthandler dumping the child's stack across the test output.
+        os.kill(os.getpid(), signal.SIGKILL)
+
+    monkeypatch.setattr(demo_window, "_probe_window", crash)
+
+    assert demo_window._forked_probe() is False
+
+
+@pytest.mark.skipif(not hasattr(os, "fork"), reason="no fork on this platform")
+def test_a_probe_that_raises_in_the_child_reports_no_display(monkeypatch):
+    def boom():
+        raise RuntimeError("no display name and no $DISPLAY environment variable")
+
+    monkeypatch.setattr(demo_window, "_probe_window", boom)
+
+    assert demo_window._forked_probe() is False
+
+
+@pytest.mark.skipif(not hasattr(os, "fork"), reason="no fork on this platform")
+def test_a_probe_that_succeeds_in_the_child_reports_a_display(monkeypatch):
+    monkeypatch.setattr(demo_window, "_probe_window", lambda: True)
+
+    assert demo_window._forked_probe() is True
+
+
+@pytest.mark.skipif(not hasattr(os, "fork"), reason="no fork on this platform")
+def test_the_probe_leaves_no_child_behind(monkeypatch):
+    """An unreaped child would sit as a zombie for the life of the demo."""
+    monkeypatch.setattr(demo_window, "_probe_window", lambda: True)
+    demo_window._forked_probe()
+
+    with pytest.raises(ChildProcessError):
+        os.waitpid(-1, os.WNOHANG)
