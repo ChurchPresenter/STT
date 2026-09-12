@@ -270,6 +270,24 @@ def find_sessions(dirs: Sequence[str]) -> List[str]:
     return found
 
 
+def available_sessions(bundle_dir: str, exe_dir: Optional[str], root: str,
+                       current: Optional[str] = None, use_local_sessions: bool = False,
+                       home: Optional[str] = None) -> List[str]:
+    """Every recording the control window can offer to switch to.
+
+    ``discover_session`` picks the first match and throws the rest away; this is that
+    same search with nothing discarded, for a picker. ``current`` — the recording
+    actually playing — is prepended when it exists on disk and isn't already among the
+    matches, so a demo started with an explicit ``--session``/``STT_DEMO_DB`` pointing
+    outside the search dirs still lists (and preselects) what it's really playing.
+    """
+    dirs = session_search_dirs(bundle_dir, exe_dir, root, use_local_sessions, home)
+    found = find_sessions(dirs)
+    if current and os.path.isfile(current) and current not in found:
+        found = [current, *found]
+    return found
+
+
 def discover_session(bundle_dir: str, exe_dir: Optional[str], root: str,
                      explicit: Optional[str] = None, use_local_sessions: bool = False,
                      home: Optional[str] = None) -> Optional[str]:

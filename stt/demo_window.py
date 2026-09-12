@@ -35,9 +35,15 @@ def browser_url(port: int, host: str = "127.0.0.1") -> str:
     return f"http://{host}:{port}/"
 
 
-def status_text(running: bool, port: int) -> str:
-    """The one-line status the window shows for the web server."""
-    return f"● Running — {browser_url(port)}" if running else "● Stopped"
+def status_text(running: bool, port: int, host: str = "127.0.0.1") -> str:
+    """The one-line status the window shows for the web server.
+
+    ``host`` defaults to loopback but callers pass the LAN address when one is known —
+    the server binds 0.0.0.0 and the point of the demo is to be opened from a phone or
+    a second screen, so showing the address nobody but this machine can use isn't
+    useful.
+    """
+    return f"● Running — {browser_url(port, host)}" if running else "● Stopped"
 
 
 def validate_port(raw: str) -> Tuple[Optional[int], str]:
@@ -60,11 +66,11 @@ def validate_port(raw: str) -> Tuple[Optional[int], str]:
     return value, ""
 
 
-def strip_port_flag(args: Sequence[str]) -> List[str]:
-    """``args`` with every ``--port`` (and ``--port=N``) removed.
+def _strip_flag(args: Sequence[str], flag: str) -> List[str]:
+    """``args`` with every occurrence of ``flag`` (and ``flag=value``) removed.
 
     A relaunch appends nothing — it sets the environment — so leaving the old flag
-    in place would let it win over the port the visitor just typed.
+    in place would let it win over whatever the visitor just picked.
     """
     kept: List[str] = []
     skip = False
@@ -72,13 +78,39 @@ def strip_port_flag(args: Sequence[str]) -> List[str]:
         if skip:
             skip = False
             continue
-        if item == "--port":
+        if item == flag:
             skip = True
             continue
-        if item.startswith("--port="):
+        if item.startswith(flag + "="):
             continue
         kept.append(item)
     return kept
+
+
+def strip_port_flag(args: Sequence[str]) -> List[str]:
+    """``args`` with every ``--port`` (and ``--port=N``) removed."""
+    return _strip_flag(args, "--port")
+
+
+def strip_session_flag(args: Sequence[str]) -> List[str]:
+    """``args`` with every ``--session`` (and ``--session=PATH``) removed."""
+    return _strip_flag(args, "--session")
+
+
+def _relaunch_command(rest: List[str], argv: Sequence[str], executable: str,
+                      frozen: bool, environ: Optional[MutableMapping[str, str]],
+                      env_key: str, env_value: str) -> Tuple[List[str], Dict[str, str]]:
+    """Shared shape of a re-exec: argv from ``rest``, environment from ``environ``
+    (or the live process) with ``env_key`` set.
+
+    Frozen, ``sys.executable`` is the demo binary itself and ``argv[0]`` is the same
+    path, so the script argument must not be repeated. From source the interpreter
+    and the script are two separate words.
+    """
+    command = [executable, *rest] if frozen else [executable, argv[0], *rest]
+    env = dict(os.environ if environ is None else environ)
+    env[env_key] = env_value
+    return command, env
 
 
 def relaunch_command(port: int, argv: Sequence[str], executable: str,
@@ -90,17 +122,53 @@ def relaunch_command(port: int, argv: Sequence[str], executable: str,
     Restarting is the honest way to change the port: it is baked into the demo's
     ``config.json`` by :func:`stt.demo_mode.write_config` before the server ever
     reads it, so nothing short of a new process rebinds.
-
-    Frozen, ``sys.executable`` is the demo binary itself and ``argv[0]`` is the same
-    path, so the script argument must not be repeated. From source the interpreter
-    and the script are two separate words.
     """
     rest = strip_port_flag(list(argv)[1:])
-    command = [executable, *rest] if frozen else [executable, argv[0], *rest]
-    env = dict(os.environ if environ is None else environ)
-    env[demo_mode.ENV_PORT] = str(port)
     # The flag was stripped from argv, so the variable is the only instruction left.
-    return command, env
+    return _relaunch_command(rest, argv, executable, frozen, environ,
+                             demo_mode.ENV_PORT, str(port))
+
+
+def relaunch_command_for_session(session_path: str, argv: Sequence[str], executable: str,
+                                 frozen: bool,
+                                 environ: Optional[MutableMapping[str, str]] = None,
+                                 ) -> Tuple[List[str], Dict[str, str]]:
+    """Argv and environment to re-exec this demo playing ``session_path``.
+
+    Same shape as :func:`relaunch_command`: the recording is picked at startup
+    (``stt.demo_mode.ensure_session``/``requested_session``), so switching it is
+    another restart. Because ``os.execve`` replaces the process environment outright,
+    a later port change (whose ``relaunch_command`` copies ``os.environ``) still
+    carries this session forward without being told to.
+    """
+    rest = strip_session_flag(list(argv)[1:])
+    return _relaunch_command(rest, argv, executable, frozen, environ,
+                             "STT_DEMO_DB", session_path)
+
+
+def sessions_dir(executable_dir: Optional[str], data_dir: str) -> str:
+    """Where the "Open Sessions Folder" button points.
+
+    The drop-in folder beside the shipped executable when there is one (what the
+    README tells someone to use); the demo's own data dir otherwise — a dev run from
+    source has no ``executable_dir``, but ``data_dir`` (``~/.stt-demo``) always exists.
+    """
+    base = executable_dir if executable_dir else data_dir
+    return os.path.join(base, demo_mode.SESSIONS_DIR_NAME)
+
+
+def open_folder_command(path: str, platform: str = sys.platform) -> Optional[List[str]]:
+    """The argv to open ``path`` in the OS file manager, or ``None`` on Windows.
+
+    Windows has no single-purpose "open a folder" executable to shell out to —
+    ``os.startfile`` is the documented way, and it isn't a subprocess call, so callers
+    use it directly instead of this argv when ``platform == "win32"``.
+    """
+    if platform == "darwin":
+        return ["open", path]
+    if platform == "win32":
+        return None
+    return ["xdg-open", path]
 
 
 # --- the Tk shell ----------------------------------------------------------
@@ -221,27 +289,61 @@ def display_available() -> bool:
     return ok
 
 
+# A fixed light palette for the window, deliberately not following the system's
+# light/dark setting — see the comment in DemoWindow.__init__ for why.
+_BG = "#f0f0f0"
+_FG = "#000000"
+
+
 class DemoWindow:
-    """Status, port and quit. Nothing else — the demo itself is the web UI."""
+    """Status, port, session, transcription and quit. The demo itself is the web UI —
+    this is only the controls that UI has no way to expose."""
 
     def __init__(self, port: int, session_path: str, version: str,
                  on_quit: Callable[[], None],
                  on_set_port: Callable[[int], None],
-                 status_probe: Callable[[], bool]) -> None:
+                 status_probe: Callable[[], bool],
+                 lan: Optional[str] = None,
+                 sessions_path: str = "",
+                 sessions: Sequence[str] = (),
+                 on_select_session: Optional[Callable[[str], None]] = None,
+                 on_start: Optional[Callable[[], None]] = None,
+                 on_stop: Optional[Callable[[], None]] = None,
+                 transcription_status_probe: Optional[Callable[[], bool]] = None,
+                 ) -> None:
         import tkinter as tk
 
         self._tk = tk
         self._port = port
-        self._session = os.path.basename(session_path)
+        self._session = session_path
         self._on_quit = on_quit
         self._on_set_port = on_set_port
         self._status_probe = status_probe
+        self._lan = lan
+        self._sessions_path = sessions_path
+        # Basename -> full path, same pattern as the watchdog GuiWindow's microphone
+        # menu — Tk shows the short label, the callback gets the real path.
+        self._session_map: Dict[str, str] = {
+            os.path.basename(path): path for path in sessions
+        }
+        self._on_select_session = on_select_session
+        self._on_start = on_start
+        self._on_stop = on_stop
+        self._transcription_status_probe = transcription_status_probe
         self.root = tk.Tk()
         self.root.title(f"STT Demo v{version}")
         self.root.config(menu=tk.Menu(self.root))  # drop Tk's stock macOS menubar
         self.root.resizable(False, False)
         self.root.minsize(380, 1)
         self.root.protocol("WM_DELETE_WINDOW", self._quit)
+        # Plain tk.Label/tk.Frame text goes invisible in macOS Dark Mode: Tk resolves
+        # their foreground against the system's dynamic window-background color, and
+        # that resolution silently breaks for these (non-ttk) widgets — confirmed on
+        # this machine, where "Web UI:", the status line and every other Label simply
+        # didn't paint, while native Button/OptionMenu/Entry chrome was unaffected.
+        # Pinning to a fixed light palette here sidesteps the bug instead of chasing
+        # Tk's dark-mode color resolution.
+        self.root.configure(bg=_BG)
         self._build()
         self.root.after(500, self._poll)
 
@@ -251,23 +353,44 @@ class DemoWindow:
         tk = self._tk
         pad = {"padx": 12, "pady": 4}
 
-        row = tk.Frame(self.root)
+        row = tk.Frame(self.root, bg=_BG)
         row.pack(fill="x", **pad)
-        tk.Label(row, text="Web UI:", width=11, anchor="w").pack(side="left")
-        self._status_lbl = tk.Label(row, text=status_text(False, self._port),
-                                    fg="red", font=("", 10, "bold"))
+        tk.Label(row, text="Web UI:", width=11, anchor="w", bg=_BG, fg=_FG).pack(side="left")
+        self._status_lbl = tk.Label(
+            row, text=status_text(False, self._port, self._lan or "127.0.0.1"),
+            fg="red", bg=_BG, font=("", 10, "bold"))
         self._status_lbl.pack(side="left", anchor="w")
 
-        row = tk.Frame(self.root)
+        row = tk.Frame(self.root, bg=_BG)
         row.pack(fill="x", **pad)
-        tk.Label(row, text="Replaying:", width=11, anchor="w").pack(side="left")
-        tk.Label(row, text=self._session, fg="gray", anchor="w").pack(side="left")
+        tk.Label(row, text="Transcription:", width=11, anchor="w", bg=_BG, fg=_FG).pack(side="left")
+        self._transcription_lbl = tk.Label(row, text="● Stopped", fg="red", bg=_BG,
+                                           font=("", 10, "bold"))
+        self._transcription_lbl.pack(side="left", expand=True, anchor="w")
+        self._transcription_btn = tk.Button(
+            row, text="Start", width=8, command=self._on_toggle_transcription)
+        self._transcription_btn.pack(side="right")
+
+        row = tk.Frame(self.root, bg=_BG)
+        row.pack(fill="x", **pad)
+        tk.Label(row, text="Replaying:", width=11, anchor="w", bg=_BG, fg=_FG).pack(side="left")
+        self._session_var = tk.StringVar(value=os.path.basename(self._session))
+        session_menu = tk.OptionMenu(row, self._session_var,
+                                     *(self._session_map or {self._session_var.get(): ""}),
+                                     command=self._on_select_session_changed)
+        session_menu.config(width=20, font=("", 9))
+        session_menu.pack(side="left")
+
+        row = tk.Frame(self.root, bg=_BG)
+        row.pack(fill="x", **pad)
+        tk.Label(row, text="Sessions:", width=11, anchor="w", bg=_BG, fg=_FG).pack(side="left")
+        tk.Button(row, text="Open Folder", command=self._open_sessions).pack(side="left")
 
         tk.Frame(self.root, height=1, bg="#cccccc").pack(fill="x", padx=12, pady=4)
 
-        row = tk.Frame(self.root)
+        row = tk.Frame(self.root, bg=_BG)
         row.pack(fill="x", **pad)
-        tk.Label(row, text="Port:", width=11, anchor="w").pack(side="left")
+        tk.Label(row, text="Port:", width=11, anchor="w", bg=_BG, fg=_FG).pack(side="left")
         self._port_var = tk.StringVar(value=str(self._port))
         tk.Entry(row, textvariable=self._port_var, width=8).pack(side="left")
         tk.Button(row, text="Apply", width=8, command=self._apply_port).pack(side="right")
@@ -275,10 +398,10 @@ class DemoWindow:
         self._hint_lbl = tk.Label(
             self.root,
             text="Changing the port restarts the demo; the replay starts again.",
-            fg="gray", font=("", 8), anchor="w", justify="left", wraplength=340)
+            fg="gray", bg=_BG, font=("", 8), anchor="w", justify="left", wraplength=340)
         self._hint_lbl.pack(fill="x", padx=12)
 
-        row = tk.Frame(self.root)
+        row = tk.Frame(self.root, bg=_BG)
         row.pack(fill="x", padx=12, pady=(10, 12))
         tk.Button(row, text="Open in Browser",
                   command=self._open_browser).pack(side="left")
@@ -294,6 +417,20 @@ class DemoWindow:
         except Exception:
             pass
 
+    def _open_sessions(self) -> None:
+        try:
+            os.makedirs(self._sessions_path, exist_ok=True)
+            if sys.platform == "win32":
+                os.startfile(self._sessions_path)  # type: ignore[attr-defined]
+                return
+            command = open_folder_command(self._sessions_path)
+            if command:
+                import subprocess
+
+                subprocess.Popen(command)
+        except Exception:
+            pass
+
     def _apply_port(self) -> None:
         port, reason = validate_port(self._port_var.get())
         if port is None:
@@ -305,6 +442,36 @@ class DemoWindow:
         self._hint_lbl.config(text=f"Restarting on port {port}…", fg="gray")
         self.root.update_idletasks()
         self._on_set_port(port)
+
+    def _on_select_session_changed(self, label: str) -> None:
+        from tkinter import messagebox
+
+        path = self._session_map.get(label)
+        if not path or path == self._session or self._on_select_session is None:
+            return
+        if not messagebox.askokcancel(
+                "Switch recording",
+                "Switching recordings restarts the demo — continue?"):
+            self._session_var.set(os.path.basename(self._session))
+            return
+        self._on_select_session(path)
+
+    def _on_toggle_transcription(self) -> None:
+        running = self._transcription_running()
+        if running:
+            if self._on_stop is not None:
+                self._on_stop()
+        else:
+            if self._on_start is not None:
+                self._on_start()
+
+    def _transcription_running(self) -> bool:
+        if self._transcription_status_probe is None:
+            return False
+        try:
+            return bool(self._transcription_status_probe())
+        except Exception:
+            return False
 
     def _quit(self) -> None:
         from tkinter import messagebox
@@ -324,8 +491,16 @@ class DemoWindow:
             running = bool(self._status_probe())
         except Exception:
             running = False
-        self._status_lbl.config(text=status_text(running, self._port),
-                                fg="green" if running else "red")
+        self._status_lbl.config(
+            text=status_text(running, self._port, self._lan or "127.0.0.1"),
+            fg="green" if running else "red")
+
+        transcribing = self._transcription_running()
+        self._transcription_lbl.config(
+            text="● Running" if transcribing else "● Stopped",
+            fg="green" if transcribing else "red")
+        self._transcription_btn.config(text="Stop" if transcribing else "Start")
+
         self.root.after(1000, self._poll)
 
     def mainloop(self) -> None:
@@ -335,8 +510,20 @@ class DemoWindow:
 def run(port: int, session_path: str, version: str,
         on_quit: Callable[[], None],
         on_set_port: Callable[[int], None],
-        status_probe: Callable[[], bool]) -> Any:
+        status_probe: Callable[[], bool],
+        lan: Optional[str] = None,
+        sessions_path: str = "",
+        sessions: Sequence[str] = (),
+        on_select_session: Optional[Callable[[str], None]] = None,
+        on_start: Optional[Callable[[], None]] = None,
+        on_stop: Optional[Callable[[], None]] = None,
+        transcription_status_probe: Optional[Callable[[], bool]] = None,
+        ) -> Any:
     """Open the control window and block until it closes."""
-    window = DemoWindow(port, session_path, version, on_quit, on_set_port, status_probe)
+    window = DemoWindow(port, session_path, version, on_quit, on_set_port, status_probe,
+                        lan=lan, sessions_path=sessions_path, sessions=sessions,
+                        on_select_session=on_select_session, on_start=on_start,
+                        on_stop=on_stop,
+                        transcription_status_probe=transcription_status_probe)
     window.mainloop()
     return window

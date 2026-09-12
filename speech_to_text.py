@@ -24117,8 +24117,25 @@ if __name__ == "__main__":
             sys.stdout.flush()
             os.execve(command[0], command, env)
 
+        def _demo_relaunch_session(new_session):
+            """Re-exec this demo playing ``new_session`` instead."""
+            command, env = _demo_window.relaunch_command_for_session(
+                new_session, sys.argv, sys.executable, bool(getattr(sys, "frozen", False)))
+            try:
+                _demo_player.shutdown()
+            except Exception:
+                pass
+            sys.stdout.flush()
+            os.execve(command[0], command, env)
+
         def _demo_quit():
             signal_handler(signal.SIGTERM, None)  # exits the process
+
+        _demo_sessions_path = _demo_window.sessions_dir(
+            _demo_mode.executable_dir(), APP_DIR)
+        os.makedirs(_demo_sessions_path, exist_ok=True)
+        _demo_sessions = _demo_mode.available_sessions(
+            BUNDLE_DIR, _demo_mode.executable_dir(), APP_DIR, current=_demo_source)
 
         # Tk must own the main thread on macOS, so the window replaces the join loop.
         # A machine with no display (a demo run over ssh) keeps the loop, and so does
@@ -24126,9 +24143,17 @@ if __name__ == "__main__":
         # its window is a nuisance, the demo not running at all is a broken download.
         if _demo_show_window:
             try:
-                _demo_window.run(DEMO_PORT, _demo_source, SERVER_DISPLAY_VERSION,
-                                 on_quit=_demo_quit, on_set_port=_demo_relaunch,
-                                 status_probe=thread2.is_alive)
+                _demo_window.run(
+                    DEMO_PORT, _demo_source, SERVER_DISPLAY_VERSION,
+                    on_quit=_demo_quit, on_set_port=_demo_relaunch,
+                    status_probe=thread2.is_alive,
+                    lan=_demo_mode.lan_address(),
+                    sessions_path=_demo_sessions_path,
+                    sessions=_demo_sessions,
+                    on_select_session=_demo_relaunch_session,
+                    on_start=lambda: control_queue.put({"command": "start"}),
+                    on_stop=lambda: control_queue.put({"command": "stop"}),
+                    transcription_status_probe=lambda: _demo_player.running)
                 _demo_quit()
             except Exception as _demo_win_err:
                 _demo_log(f"[DEMO] Control window crashed: {_demo_win_err}")

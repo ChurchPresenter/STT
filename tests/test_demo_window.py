@@ -118,6 +118,71 @@ def test_strip_port_flag_leaves_a_bare_trailing_flag_from_taking_the_next_argume
         "--session", "a.db"]
 
 
+def test_a_lan_host_replaces_the_loopback_address_in_the_status_line():
+    text = demo_window.status_text(True, 8099, host="192.168.1.42")
+    assert "http://192.168.1.42:8099/" in text
+    assert "127.0.0.1" not in text
+
+
+# --- switching the recording -------------------------------------------------
+
+
+def test_a_frozen_demo_re_execs_playing_the_new_session():
+    command, env = demo_window.relaunch_command_for_session(
+        "/Users/x/.stt-demo/sessions/b.db", ["/Apps/STT-Demo"], "/Apps/STT-Demo",
+        frozen=True, environ={})
+    assert command == ["/Apps/STT-Demo"]
+    assert env["STT_DEMO_DB"] == "/Users/x/.stt-demo/sessions/b.db"
+
+
+def test_the_old_session_flag_is_dropped_so_it_cannot_outvote_the_new_one():
+    command, env = demo_window.relaunch_command_for_session(
+        "/tmp/b.db", ["/Apps/STT-Demo", "--session", "/tmp/a.db"], "/Apps/STT-Demo",
+        frozen=True, environ={})
+    assert "--session" not in command
+    assert demo_mode.requested_session(env, command[1:]) == "/tmp/b.db"
+
+
+def test_strip_session_flag_leaves_a_bare_trailing_flag_from_taking_the_next_argument():
+    assert demo_window.strip_session_flag(["--port", "8099", "--session"]) == [
+        "--port", "8099"]
+
+
+def test_a_port_change_after_a_session_switch_carries_the_session_forward():
+    """os.execve replaces the process environment outright, so a later port-change
+    relaunch (which copies os.environ) must still see the session that was switched
+    to, without being told about it again."""
+    _, session_env = demo_window.relaunch_command_for_session(
+        "/tmp/b.db", ["/Apps/STT-Demo"], "/Apps/STT-Demo", frozen=True, environ={})
+    _, port_env = demo_window.relaunch_command(
+        9000, ["/Apps/STT-Demo"], "/Apps/STT-Demo", frozen=True, environ=session_env)
+    assert port_env["STT_DEMO_DB"] == "/tmp/b.db"
+
+
+def test_sessions_dir_prefers_the_folder_beside_the_executable():
+    assert demo_window.sessions_dir("/Apps/STT-Demo", "/Users/x/.stt-demo") == (
+        os.path.join("/Apps/STT-Demo", "sessions"))
+
+
+def test_sessions_dir_falls_back_to_the_data_dir_from_source():
+    assert demo_window.sessions_dir(None, "/Users/x/.stt-demo") == (
+        os.path.join("/Users/x/.stt-demo", "sessions"))
+
+
+@pytest.mark.parametrize("platform,expected", [
+    ("darwin", ["open", "/some/path"]),
+    ("linux", ["xdg-open", "/some/path"]),
+])
+def test_open_folder_command_per_platform(platform, expected):
+    assert demo_window.open_folder_command("/some/path", platform) == expected
+
+
+def test_open_folder_command_is_none_on_windows():
+    """os.startfile is the documented way there, and it is not a subprocess call —
+    callers branch on the platform instead of shelling out to explorer.exe."""
+    assert demo_window.open_folder_command("/some/path", "win32") is None
+
+
 # --- deciding whether to open a window at all -------------------------------
 
 

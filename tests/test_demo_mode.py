@@ -245,6 +245,53 @@ def test_find_sessions_skips_directories_that_do_not_exist(tmp_path):
     assert demo_mode.find_sessions([str(tmp_path / "nope")]) == []
 
 
+# --- listing every recording, for the switcher ------------------------------
+
+
+def test_available_sessions_lists_every_match_not_just_the_first(tmp_path):
+    bundle = str(tmp_path / "bundle")
+    exe_dir = str(tmp_path / "exe")
+    root = str(tmp_path / "root")
+    _session(os.path.join(bundle, "demo"), "demo.db")
+    dropped = _session(os.path.join(exe_dir, demo_mode.SESSIONS_DIR_NAME), "2026-08-02_090000.db")
+
+    found = demo_mode.available_sessions(bundle, exe_dir, root)
+
+    assert dropped in found
+    assert len(found) == 2
+
+
+def test_available_sessions_prepends_an_out_of_tree_current(tmp_path):
+    bundle = str(tmp_path / "bundle")
+    _session(os.path.join(bundle, "demo"), "demo.db")
+    current = _session(str(tmp_path / "elsewhere"), "chosen.db")
+
+    found = demo_mode.available_sessions(bundle, None, str(tmp_path / "root"), current=current)
+
+    assert found[0] == current
+    assert found.count(current) == 1
+
+
+def test_available_sessions_does_not_duplicate_a_current_already_found(tmp_path):
+    bundle = str(tmp_path / "bundle")
+    exe_dir = str(tmp_path / "exe")
+    dropped = _session(os.path.join(exe_dir, demo_mode.SESSIONS_DIR_NAME), "2026-08-02_090000.db")
+
+    found = demo_mode.available_sessions(bundle, exe_dir, str(tmp_path / "root"), current=dropped)
+
+    assert found.count(dropped) == 1
+
+
+def test_available_sessions_ignores_a_current_that_does_not_exist(tmp_path):
+    bundle = str(tmp_path / "bundle")
+    bundled = _session(os.path.join(bundle, "demo"), "demo.db")
+
+    found = demo_mode.available_sessions(bundle, None, str(tmp_path / "root"),
+                                         current=str(tmp_path / "missing.db"))
+
+    assert found == [bundled]
+
+
 # --- ensuring there is something to play -----------------------------------
 
 
