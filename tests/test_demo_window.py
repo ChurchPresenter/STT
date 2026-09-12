@@ -10,6 +10,7 @@ deliberately thin.
 from __future__ import annotations
 
 import os
+import sys
 
 import pytest
 
@@ -156,6 +157,30 @@ def test_forcing_the_window_on_skips_the_probe_entirely(monkeypatch):
     monkeypatch.setattr(demo_window, "_forked_probe", lambda: False)
 
     assert demo_window.display_available() is True
+
+
+def test_a_probe_exception_is_recorded_as_the_reason(monkeypatch):
+    """print() is invisible on the windowed builds, so the reason a display was
+    not found has to survive somewhere a log file can pick it up."""
+    monkeypatch.delenv(demo_window.ENV_WINDOW, raising=False)
+
+    def boom():
+        raise RuntimeError("no display name and no $DISPLAY environment variable")
+
+    monkeypatch.setattr(demo_window, "_forked_probe", boom)
+    monkeypatch.setattr(sys, "platform", "linux")
+
+    assert demo_window.display_available() is False
+    assert "no display name" in demo_window.last_probe_error()
+
+
+def test_a_successful_probe_clears_the_reason(monkeypatch):
+    monkeypatch.delenv(demo_window.ENV_WINDOW, raising=False)
+    monkeypatch.setattr(demo_window, "_forked_probe", lambda: True)
+    monkeypatch.setattr(sys, "platform", "linux")
+
+    assert demo_window.display_available() is True
+    assert demo_window.last_probe_error() is None
 
 
 @pytest.mark.skipif(not hasattr(os, "fork"), reason="no fork on this platform")

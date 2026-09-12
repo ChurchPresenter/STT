@@ -185,6 +185,21 @@ def forced_window(environ: Optional[MutableMapping[str, str]] = None) -> Optiona
     return None
 
 
+_last_probe_error: Optional[str] = None
+
+
+def last_probe_error() -> Optional[str]:
+    """Why the most recent :func:`display_available` said no, or ``None`` if it
+    said yes.
+
+    The demo is windowed on Windows and macOS, so ``print`` has nowhere to go —
+    a windowed PyInstaller build has no console and silently discards writes to
+    it. Callers that want the reason on disk (see ``speech_to_text.py``'s DEMO
+    startup) read this instead of relying on stdout.
+    """
+    return _last_probe_error
+
+
 def display_available() -> bool:
     """Whether a Tk window can actually be opened here.
 
@@ -192,15 +207,18 @@ def display_available() -> bool:
     rather than an exception. Windows has no fork, and there the demo is a windowed
     .exe with a desktop under it, so the probe runs in place.
     """
+    global _last_probe_error
     forced = forced_window()
     if forced is not None:
+        _last_probe_error = None if forced else f"{ENV_WINDOW} forced off"
         return forced
     try:
-        if sys.platform == "win32":
-            return _probe_window()
-        return _forked_probe()
-    except Exception:
+        ok = _probe_window() if sys.platform == "win32" else _forked_probe()
+    except Exception as exc:
+        _last_probe_error = f"{type(exc).__name__}: {exc}"
         return False
+    _last_probe_error = None if ok else "probe did not report a display"
+    return ok
 
 
 class DemoWindow:

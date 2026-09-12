@@ -24049,6 +24049,23 @@ if __name__ == "__main__":
         # instead of answering. See demo_window.display_available.
         _demo_show_window = _demo_window.display_available()
 
+        # print() has nowhere to go on the windowed Windows/macOS builds — no
+        # console, and PyInstaller's windowed bootloader discards writes to a
+        # None stdout rather than raising. Without this, "no window opened" was
+        # unfalsifiable: nothing the demo saw ever reached whoever ran it.
+        _demo_log_path = os.path.join(APP_DIR, "logs", "demo_window.log")
+
+        def _demo_log(line):
+            try:
+                os.makedirs(os.path.dirname(_demo_log_path), exist_ok=True)
+                with open(_demo_log_path, "a", encoding="utf-8") as _f:
+                    _f.write(line + "\n")
+            except Exception:
+                pass
+
+        if not _demo_show_window:
+            _demo_log(f"[DEMO] No control window: {_demo_window.last_probe_error()}")
+
         _demo_explicit = _demo_mode.requested_session()
         # Only the frozen build carries a recording, so a run from the checkout used
         # to find nothing and exit. Generating a written service is safe where
@@ -24114,6 +24131,7 @@ if __name__ == "__main__":
                                  status_probe=thread2.is_alive)
                 _demo_quit()
             except Exception as _demo_win_err:
+                _demo_log(f"[DEMO] Control window crashed: {_demo_win_err}")
                 print(f"[DEMO] Control window unavailable ({_demo_win_err}); "
                       "press Ctrl-C to stop the demo.")
         try:
