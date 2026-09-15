@@ -2299,7 +2299,12 @@ class AutoUpdater:
             logging.info(f"[AU] {result}")
             self.state.set(last_update_result=result)
         except Exception as e:
-            result = f"Update failed: {e}"
+            # CalledProcessError's own str() drops stderr, which is the only
+            # place git says *why* (locked index, missing ref, disk/AV
+            # interference) — without it every failure here is unactionable.
+            stderr = getattr(e, "stderr", None)
+            detail = f"{e}: {stderr.strip()}" if stderr else str(e)
+            result = f"Update failed: {detail}"
             logging.error(f"[AU] {result}")
             self.state.set(last_update_result=result)
         finally:
