@@ -813,6 +813,32 @@ def _is_permanent_dep_failure(message):
     return any(sign in low for sign in _RESOLUTION_FAILURE_SIGNS + _BUILD_FAILURE_SIGNS)
 
 
+def _newer_release_hint(message):
+    """"Download the latest installer" line when a permanent dep failure during
+    first-run SETUP could be fixed by a newer release, or None otherwise.
+
+    SETUP runs on the bootstrapper baked into *this* executable, before any
+    source checkout or venv exists — there is no auto-update, no
+    _fresh_provisioner, no self-healing of any kind available to it. A machine
+    stuck here (e.g. no wheel for a dependency on this platform, later fixed by
+    wheel_policy) can only be unstuck by a person downloading a build that
+    already has the fix. This is the one failure path that must say so,
+    because every other repair mechanism is structurally unreachable from it.
+    """
+    if not _is_permanent_dep_failure(message):
+        return None
+    try:
+        latest = Provisioner(log=lambda m: None)._latest_release_tag()
+        if not latest:
+            return None
+        if parse_version(latest.lstrip("v")) <= parse_version(read_bundle_version()):
+            return None
+    except Exception:
+        return None
+    return (f"A newer STT version ({latest}) is available and may fix this — "
+            f"download it from {GITHUB_REPO_URL}/releases/latest")
+
+
 def _is_resolution_failure(message):
     """True when uv gave up while *resolving* requirements, before installing.
 
@@ -3392,6 +3418,9 @@ def _run_provisioning_headless(max_attempts=None):
                 # No attempt counter here: it is part of the Sentry grouping key.
                 logging.error(f"[SETUP] Provisioning failed: {e}")
                 _sentry_capture(e, fingerprint=_provision_fingerprint(e))
+                hint = _newer_release_hint(str(e))
+                if hint:
+                    logging.error(f"[SETUP] {hint}")
             else:
                 logging.warning(f"[SETUP] Provisioning failed again (attempt {attempt}): {e}")
             if max_attempts is not None and attempt >= max_attempts:
@@ -3464,6 +3493,9 @@ class ProvisionWindow:
                 _sentry_capture(e)
             except Exception as e:
                 self._q.put(("log", f"[ERROR] {e}"))
+                hint = _newer_release_hint(str(e))
+                if hint:
+                    self._q.put(("log", f"[SETUP] {hint}"))
                 self._q.put(("done", False))
                 # Same grouping as the headless path: an operator pressing
                 # Retry five times must not mint five issues.

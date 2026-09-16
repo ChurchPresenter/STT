@@ -268,6 +268,47 @@ def test_the_module_exposes_what_these_tests_patch():
     assert isinstance(watchdog.UV_PYTHON_VERSION, str)
 
 
+class TestNewerReleaseHint:
+    """Whether a permanent SETUP dep failure should point at a newer installer.
+
+    SETUP runs on the bootstrapper baked into the executable itself, before any
+    source checkout exists — none of the self-repair machinery elsewhere in
+    this module (auto-update, _fresh_provisioner) can reach it. A newer release
+    is the only fix a stuck machine can actually apply, so this is the one
+    failure path responsible for saying so.
+    """
+
+    def test_a_transient_failure_gets_no_hint(self, monkeypatch):
+        monkeypatch.setattr(watchdog, "read_bundle_version", lambda: "26.3.16")
+        monkeypatch.setattr(watchdog.Provisioner, "_latest_release_tag",
+                            lambda self: "26.9.1")
+        assert watchdog._newer_release_hint("Connection timed out") is None
+
+    def test_a_permanent_failure_with_no_newer_release_gets_no_hint(self, monkeypatch):
+        monkeypatch.setattr(watchdog, "read_bundle_version", lambda: "26.9.1")
+        monkeypatch.setattr(watchdog.Provisioner, "_latest_release_tag",
+                            lambda self: "26.9.1")
+        msg = "Build failures usually indicate a problem with the package"
+        assert watchdog._newer_release_hint(msg) is None
+
+    def test_a_permanent_failure_with_a_newer_release_points_at_it(self, monkeypatch):
+        monkeypatch.setattr(watchdog, "read_bundle_version", lambda: "26.3.16")
+        monkeypatch.setattr(watchdog.Provisioner, "_latest_release_tag",
+                            lambda self: "v26.9.1")
+        msg = "Build failures usually indicate a problem with the package"
+        hint = watchdog._newer_release_hint(msg)
+        assert hint is not None
+        assert "26.9.1" in hint
+        assert "releases/latest" in hint
+
+    def test_offline_or_no_releases_gets_no_hint(self, monkeypatch):
+        monkeypatch.setattr(watchdog, "read_bundle_version", lambda: "26.3.16")
+        monkeypatch.setattr(watchdog.Provisioner, "_latest_release_tag",
+                            lambda self: None)
+        msg = "Build failures usually indicate a problem with the package"
+        assert watchdog._newer_release_hint(msg) is None
+
+
 class TestSourceFallsBackToTheArchive:
     """git passed the usability probe and still could not clone.
 
