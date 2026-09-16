@@ -336,6 +336,43 @@ def _maybe_handoff_to_source(args):
         return  # fall through: frozen main() continues with the bundled code
 
 
+def _fresh_provisioner(log):
+    """A Provisioner bound to the just-pulled source, not whatever Provisioner
+    was already imported when this process (or its last handoff) started.
+
+    `git reset --hard` only changes files on disk — it does not touch this
+    process's already-imported modules. A caller that reinstalls deps right
+    after a pull by calling the in-process `Provisioner` is testing the *old*
+    install logic against the *new* requirements.txt. That is exactly how a
+    fix to the install logic itself (e.g. wheel_policy's --only-binary) can
+    never reach a machine via auto-update: the reinstall fails the same way it
+    always did, the caller rolls the pull back to undo it, and the fix is
+    discarded along with everything else in the commit.
+
+    Loads SOURCE_DIR/stt/watchdog.py fresh, the same way _maybe_handoff_to_source
+    does, and falls back to the already-imported Provisioner on any failure — a
+    pull that doesn't even compile must not block the rollback path, which still
+    needs to reinstall deps for the commit being restored.
+
+    Reads SOURCE_DIR at call time rather than the WATCHDOG_SCRIPT constant
+    (fixed at import), since a test-swapped or otherwise-relocated SOURCE_DIR
+    should not have this method reach outside it.
+    """
+    try:
+        import importlib.util
+        script = os.path.join(SOURCE_DIR, "stt", "watchdog.py")
+        spec = importlib.util.spec_from_file_location("stt_watchdog_fresh", script)
+        if spec is None or spec.loader is None:
+            raise ImportError(f"cannot load {script}")
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod.Provisioner(log=log)
+    except Exception as e:
+        logging.warning(f"[WATCHDOG] Could not load fresh install logic ({e}); "
+                         f"reinstalling with the running watchdog's own Provisioner")
+        return Provisioner(log=log)
+
+
 def _sync_source_to_bundle():
     """Bring the source checkout up to the installed app's version.
 
@@ -374,7 +411,7 @@ def _sync_source_to_bundle():
         subprocess.run([git, "-C", SOURCE_DIR, "clean", "-fd"], capture_output=True, timeout=60,
                        creationflags=_CREATE_NO_WINDOW)
         try:
-            Provisioner(log=lambda m: logging.info(f"[SYNC] {m}")).install_deps_only()
+            _fresh_provisioner(lambda m: logging.info(f"[SYNC] {m}")).install_deps_only()
         except Exception as e:
             logging.warning(f"[WATCHDOG] Dep sync after source bump failed: {e}")
         logging.info(f"[WATCHDOG] Source synced to {read_version()}")
@@ -2257,7 +2294,7 @@ class AutoUpdater:
 
             try:
                 logging.info("[AU] Reinstalling dependencies...")
-                Provisioner(log=lambda m: logging.info(f"[AU] {m}")).install_deps_only()
+                _fresh_provisioner(lambda m: logging.info(f"[AU] {m}")).install_deps_only()
             except Exception as e:
                 # Remember the commit that failed so the next launch does not
                 # repeat the whole stop/reset/fail/roll-back/restart cycle for it.
@@ -2278,7 +2315,7 @@ class AutoUpdater:
                                      "skipping the repair reinstall")
                     else:
                         try:
-                            Provisioner(log=lambda m: logging.info(f"[AU] {m}")).install_deps_only()
+                            _fresh_provisioner(lambda m: logging.info(f"[AU] {m}")).install_deps_only()
                         except Exception as e2:
                             logging.warning(f"[AU] Dep reinstall after rollback also failed: {e2}")
                     result = f"Update to {remote} failed (deps); rolled back: {e}"
@@ -2386,7 +2423,7 @@ class AutoUpdater:
                     shutil.move(src, dst)
 
                 logging.info("[AU] Reinstalling dependencies...")
-                Provisioner(log=lambda m: logging.info(f"[AU] {m}")).install_deps_only()
+                _fresh_provisioner(lambda m: logging.info(f"[AU] {m}")).install_deps_only()
             except Exception:
                 _restore()
                 raise

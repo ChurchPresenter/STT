@@ -262,6 +262,42 @@ def test_main_channel_rollback_on_dep_failure(git_updater, monkeypatch):
 
 
 @needs_git
+def test_deps_reinstall_uses_the_freshly_pulled_source(git_updater, monkeypatch, tmp_path):
+    """The post-pull dependency reinstall must run the *pulled* commit's own
+    install logic, not whatever Provisioner this test process already had
+    imported — otherwise a fix to the install logic itself (e.g. wheel_policy's
+    --only-binary) could never take effect through auto-update. Proven here by
+    shipping a fake stt/watchdog.py in the pulled commit whose Provisioner
+    writes a marker file the in-process (monkeypatched) Provisioner does not."""
+    upd, seed, _clone = git_updater
+    marker = tmp_path / "fresh_ran.txt"
+
+    stt_dir = seed / "stt"
+    stt_dir.mkdir()
+    (stt_dir / "watchdog.py").write_text(
+        "class Provisioner:\n"
+        "    def __init__(self, log=None):\n"
+        "        self.log = log\n"
+        "    def install_deps_only(self):\n"
+        f"        open({str(marker)!r}, 'w').close()\n"
+    )
+    _git(seed, "add", "stt/watchdog.py")
+    _git(seed, "commit", "-m", "add fresh watchdog")
+    _git(seed, "push", "origin", "main")
+
+    def stale_deps(self, log=None):
+        pass  # the in-process Provisioner must not be the one that runs
+
+    monkeypatch.setattr(watchdog.Provisioner, "install_deps_only", stale_deps)
+
+    upd._check_for_branch_update()
+    upd.apply_pending_update()
+
+    assert marker.exists(), "deps reinstall must use the freshly pulled source's Provisioner"
+    assert "Updated to" in upd.state.values["last_update_result"]
+
+
+@needs_git
 def test_check_for_update_defaults_to_main_channel(git_updater, monkeypatch):
     upd, seed, _clone = git_updater
     monkeypatch.setattr(watchdog, "load_config", lambda: {})  # no channel configured
