@@ -295,9 +295,10 @@
                                 <label for="file_model_type">Model Type</label>
                                 <select id="file_model_type" onchange="updateFileModelTypeUI()">
                                     <option value="whisper">Whisper (OpenAI)</option>
+                                    <option value="faster_whisper">Faster Whisper (4-10x faster)</option>
                                     <option value="downloaded">Downloaded Models</option>
                                 </select>
-                                <small>Choose between Whisper models or custom downloaded models</small>
+                                <small>Choose between Whisper, Faster Whisper, or custom downloaded models</small>
                             </div>
 
                             <!-- Whisper-specific settings -->
@@ -308,6 +309,17 @@
                                         <option value="">Loading available models...</option>
                                     </select>
                                     <small>Only downloaded Whisper models are shown</small>
+                                </div>
+                            </div>
+
+                            <!-- Faster Whisper-specific settings -->
+                            <div id="file_faster_whisper_config" style="display: none;">
+                                <div class="form-group" style="margin-bottom: 12px;">
+                                    <label for="file_faster_whisper_model_select">Faster Whisper Model</label>
+                                    <select id="file_faster_whisper_model_select">
+                                        <option value="">Loading available models...</option>
+                                    </select>
+                                    <small>Only downloaded Faster Whisper models are shown</small>
                                 </div>
                             </div>
 
@@ -1789,15 +1801,21 @@ ${segmentsHtml}
         function updateFileModelTypeUI() {
             const modelType = document.getElementById('file_model_type').value;
             const whisperConfig = document.getElementById('file_whisper_config');
+            const fasterWhisperConfig = document.getElementById('file_faster_whisper_config');
             const downloadedConfig = document.getElementById('file_downloaded_config');
+
+            whisperConfig.style.display = 'none';
+            fasterWhisperConfig.style.display = 'none';
+            downloadedConfig.style.display = 'none';
 
             if (modelType === 'whisper') {
                 whisperConfig.style.display = 'block';
-                downloadedConfig.style.display = 'none';
                 // Load available Whisper models
                 loadAvailableWhisperModels();
+            } else if (modelType === 'faster_whisper') {
+                fasterWhisperConfig.style.display = 'block';
+                loadAvailableFasterWhisperModels();
             } else if (modelType === 'downloaded') {
-                whisperConfig.style.display = 'none';
                 downloadedConfig.style.display = 'block';
                 // Load available downloaded models
                 loadAvailableDownloadedModels();
@@ -1870,6 +1888,41 @@ ${segmentsHtml}
         }
 
         /**
+         * Load available downloaded Faster Whisper models for the dropdown
+         */
+        async function loadAvailableFasterWhisperModels() {
+            try {
+                const response = await fetch('/api/models/faster-whisper/list');
+                const data = await response.json();
+
+                const select = document.getElementById('file_faster_whisper_model_select');
+                select.innerHTML = '';
+
+                if (data.success && data.models) {
+                    // Filter to only show downloaded models
+                    const downloadedModels = data.models.filter(m => m.downloaded);
+
+                    if (downloadedModels.length > 0) {
+                        downloadedModels.forEach(model => {
+                            const option = document.createElement('option');
+                            option.value = model.name;
+                            option.textContent = `${model.name} (${model.params} - ${model.size})`;
+                            select.appendChild(option);
+                        });
+                    } else {
+                        select.innerHTML = '<option value="">No Faster Whisper models downloaded</option>';
+                    }
+                } else {
+                    select.innerHTML = '<option value="">Error loading models</option>';
+                }
+            } catch (error) {
+                console.error('Error loading Faster Whisper models:', error);
+                document.getElementById('file_faster_whisper_model_select').innerHTML =
+                    '<option value="">Error loading models</option>';
+            }
+        }
+
+        /**
          * Load current file model configuration from server
          */
         async function loadFileModelConfig() {
@@ -1880,17 +1933,32 @@ ${segmentsHtml}
                 if (data.success) {
                     const fileModel = data.file_transcription_model;
 
-                    // Set model type
-                    document.getElementById('file_model_type').value = fileModel.type || 'whisper';
+                    // Determine model type from type + backend
+                    let modelType;
+                    if (fileModel.type === 'huggingface' || fileModel.type === 'custom') {
+                        modelType = 'downloaded';
+                    } else if (fileModel.type === 'whisper' && fileModel.backend === 'faster-whisper') {
+                        modelType = 'faster_whisper';
+                    } else {
+                        modelType = 'whisper';
+                    }
+                    document.getElementById('file_model_type').value = modelType;
 
                     // Set whisper-specific settings
-                    if (fileModel.type === 'whisper') {
+                    if (modelType === 'whisper') {
                         document.getElementById('file_whisper_model_select').value =
                             fileModel.whisper?.model || 'base';
                     }
 
+                    // Set faster-whisper-specific settings
+                    if (modelType === 'faster_whisper') {
+                        await loadAvailableFasterWhisperModels();
+                        document.getElementById('file_faster_whisper_model_select').value =
+                            fileModel.whisper?.model || '';
+                    }
+
                     // Set downloaded model settings
-                    if (fileModel.type === 'huggingface' || fileModel.type === 'custom') {
+                    if (modelType === 'downloaded') {
                         const downloadedPath = fileModel.huggingface?.model_id ||
                                              fileModel.custom?.model_path || '';
                         document.getElementById('file_downloaded_model_select').value = downloadedPath;
@@ -1916,8 +1984,16 @@ ${segmentsHtml}
             };
 
             if (modelType === 'whisper') {
+                fileModel.backend = 'whisper';
                 fileModel.whisper = {
                     model: document.getElementById('file_whisper_model_select').value
+                };
+            } else if (modelType === 'faster_whisper') {
+                // Faster Whisper uses whisper type with backend flag
+                fileModel.type = 'whisper';
+                fileModel.backend = 'faster-whisper';
+                fileModel.whisper = {
+                    model: document.getElementById('file_faster_whisper_model_select').value
                 };
             } else if (modelType === 'downloaded') {
                 const downloadedPath = document.getElementById('file_downloaded_model_select').value;
