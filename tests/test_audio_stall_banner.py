@@ -87,7 +87,9 @@ def run_banner(state, preset_display="flex"):
         "  title: ELS['audio-status-text'].title,"
         "  classes: ELS['audio-status-dot'].classes}));"
     )
-    out = subprocess.run(["node", "-e", script], capture_output=True, text=True, timeout=20)
+    # node spawn is slow and contended on Windows under `-n auto`; a 20s budget for
+    # a single cold start was tight enough to flake under a full parallel run.
+    out = subprocess.run(["node", "-e", script], capture_output=True, text=True, timeout=60)
     assert out.returncode == 0, out.stderr
     return json.loads(out.stdout)
 
