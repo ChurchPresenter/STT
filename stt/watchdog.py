@@ -2343,11 +2343,14 @@ class AutoUpdater:
                         try:
                             _fresh_provisioner(lambda m: logging.info(f"[AU] {m}")).install_deps_only()
                         except Exception as e2:
-                            logging.warning(f"[AU] Dep reinstall after rollback also failed: {e2}")
+                            _log_grouped(logging.WARNING,
+                                         f"[AU] Dep reinstall after rollback also failed: {e2}",
+                                         _dep_failure_fingerprint("repair", str(e2)))
                     result = f"Update to {remote} failed (deps); rolled back: {e}"
                 else:
                     result = f"Update to {remote} failed (deps): {e}"
-                logging.error(f"[AU] {result}")
+                _log_grouped(logging.ERROR, f"[AU] {result}",
+                             _dep_failure_fingerprint("update", str(e)))
                 self.state.set(last_update_result=result)
                 return
 
@@ -3773,6 +3776,32 @@ def _provision_fingerprint(exc):
     command = message.split(" — last output:")[0].strip()
     kind = "permanent" if _is_permanent_dep_failure(message) else "transient"
     return ["provisioning", type(exc).__name__, command, kind]
+
+
+def _dep_failure_fingerprint(stage, message):
+    """Grouping key for an auto-update dependency failure.
+
+    The logged message ends in uv's last output, which names a per-run temporary
+    build directory, so grouping on it minted one Sentry issue per retry. Keep
+    the command and whether a retry can fix it, as _provision_fingerprint does."""
+    command = redact_home_paths(message).split(" — last output:")[0].strip()
+    kind = "permanent" if _is_permanent_dep_failure(message) else "transient"
+    return ["auto-update", stage, command, kind]
+
+
+def _log_grouped(level, message, fingerprint):
+    """logging.log with a Sentry fingerprint on the event the record becomes."""
+    try:
+        import sentry_sdk
+        scope_cm = sentry_sdk.new_scope()
+    except Exception:
+        scope_cm = None
+    if scope_cm is None:
+        logging.log(level, message)
+        return
+    with scope_cm as scope:
+        scope.fingerprint = fingerprint
+        logging.log(level, message)
 
 
 def _sentry_capture(exc, fingerprint=None):

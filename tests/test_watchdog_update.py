@@ -682,3 +682,26 @@ def test_resolution_failures_are_recognised(message):
 ])
 def test_other_failures_are_not_mistaken_for_resolution_failures(message):
     assert not watchdog._is_resolution_failure(message)
+
+
+def test_dep_failure_fingerprint_ignores_the_per_run_temp_dir():
+    """uv's last output names a fresh build directory each run; grouping on the
+    message minted one Sentry issue per retry of the same failure."""
+    head = "command failed (1): uv pip install -r requirements.txt"
+    a = f"{head} — last output: /cache/builds-v0/.tmpAAAAAA/bin/python returned non-zero exit status 1"
+    b = f"{head} — last output: /cache/builds-v0/.tmpBBBBBB/bin/python returned non-zero exit status 1"
+    assert watchdog._dep_failure_fingerprint("update", a) == watchdog._dep_failure_fingerprint("update", b)
+
+
+def test_dep_failure_fingerprint_separates_stage_and_kind():
+    permanent = "command failed (1): uv — last output: returned non-zero exit status 1"
+    transient = "command failed (1): uv — last output: connection reset"
+    assert watchdog._dep_failure_fingerprint("update", permanent) != watchdog._dep_failure_fingerprint("repair", permanent)
+    assert watchdog._dep_failure_fingerprint("update", permanent) != watchdog._dep_failure_fingerprint("update", transient)
+
+
+def test_log_grouped_still_logs_without_the_sdk(caplog, monkeypatch):
+    monkeypatch.setitem(sys.modules, "sentry_sdk", None)
+    with caplog.at_level("WARNING"):
+        watchdog._log_grouped(30, "[AU] boom", ["k"])
+    assert "[AU] boom" in caplog.text
