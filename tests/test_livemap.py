@@ -55,6 +55,14 @@ class TestNumericVersion:
         assert numeric_version("", "26.1.22") == "26.1.22"
         assert numeric_version(None, "26.1.22") == "26.1.22"
 
+    def test_a_bare_commit_hash_is_not_a_version(self):
+        # `git describe --tags --always` yields just the hash when no tag is reachable
+        # (a shallow or tagless checkout). The collector stores that as "unknown", so the
+        # install vanished from every version count; the VERSION file is the honest floor.
+        assert numeric_version("a585ff0", "26.3.16") == "26.3.16"
+        assert numeric_version("1234567", "26.3.16") == "26.3.16"
+        assert numeric_version("a585ff0", "") == "unknown"
+
     def test_with_nothing_at_all_the_ping_is_still_worth_sending(self):
         assert numeric_version("", "") == "unknown"
         assert numeric_version(None, None) == "unknown"

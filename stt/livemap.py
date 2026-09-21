@@ -25,6 +25,7 @@ but a printed line.
 
 from __future__ import annotations
 
+import re
 import urllib.parse
 from typing import Any, Callable, Dict, Mapping, MutableMapping, Optional, Tuple
 
@@ -39,6 +40,8 @@ EVENT_TRANSCRIPTION_START = "transcription_start"
 _OS_NAMES = {"darwin": "macos", "win32": "windows", "linux": "linux"}
 
 _UNKNOWN_VERSION = "unknown"
+# What the collector accepts as a version (its VERSION_RE); anything else is stored as "unknown".
+_DOTTED_NUMERIC = re.compile(r"\d+(?:\.\d+)+")
 
 # Ceilings for the free-text descriptive fields. A GPU name or a distro string is short
 # in every sane case; the cap is there so a machine reporting something absurd sends a
@@ -203,7 +206,7 @@ def numeric_version(display_version: Optional[str],
     since the map is counting installs rather than releases.
     """
     text = (display_version or "").split("-", 1)[0].strip()
-    if text:
+    if _DOTTED_NUMERIC.fullmatch(text):
         return text
     return (fallback or "").strip() or _UNKNOWN_VERSION
 
