@@ -21602,10 +21602,15 @@ def thread1_function(ts, cq, cfq, cal_state, cal_data, cal_step1, asq):
                             print("[CHECK] Checking for available audio devices...")
                             if platform.startswith('win'):
                                 # Windows: use PowerShell to check for audio devices
+                                # PowerShell writes a pipe in the OEM codepage, and the
+                                # worker runs in UTF-8 mode, so a localized device name
+                                # ("Микрофон") killed the reader thread (STT-2C).
                                 result = subprocess.run(
                                     ["powershell", "-Command", "Get-WmiObject Win32_SoundDevice | Select-Object Name"],
                                     capture_output=True,
                                     text=True,
+                                    encoding="oem",
+                                    errors="replace",
                                     timeout=5,
                                     creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
                                 )
