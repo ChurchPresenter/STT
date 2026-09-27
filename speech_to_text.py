@@ -84,6 +84,7 @@ from stt import pair_tokens as _pair_tokens_mod
 # rather than replaced.
 from stt import worker_crash as _worker_crash
 from stt import shutdown_channel as _shutdown_channel
+from stt import fd_limit as _fd_limit
 # What may appear in an operator's support report, by allowlist.
 from stt import diagnostics as _diagnostics
 from stt import model_disk as _model_disk
@@ -8167,6 +8168,8 @@ def get_health():
                 sysres.get("swap_used_bytes"), sysres.get("swap_total_bytes"),
                 degraded_above=0.25, error_above=0.6),
             "proc_rss_bytes": sysres.get("proc_rss_bytes"),
+            "proc_open_fds": _fd_limit.open_fd_count(),
+            "proc_fd_limit": _fd_limit.current_nofile_limit(),
             "apple_silicon": hw.get("apple_silicon", False),
         }
 
@@ -13531,6 +13534,8 @@ def get_diagnostic_report():
             "gpu": hw.get("gpu_name") or "none detected",
             "vram_gb": round(vram_bytes / (1024 ** 3), 1) if vram_bytes else 0,
             "has_cuda": bool(hw.get("has_cuda")),
+            "open_fds": _fd_limit.open_fd_count(),
+            "fd_limit": _fd_limit.current_nofile_limit(),
         },
         config=load_config(),
         models=_diagnostic_model_health(),
@@ -23995,6 +24000,10 @@ def _self_update_loop():
 if __name__ == "__main__":
     multiprocessing.freeze_support()
     install_crash_diagnostics("main")
+    # Covers launches that skip the watchdog; a no-op when it already raised it.
+    _fds = _fd_limit.raise_nofile_limit()
+    if _fds and _fds[0] != _fds[1]:
+        print(f"[FDLIMIT] soft open-file limit {_fds[0]} -> {_fds[1]}")
     # Single-instance guard: bail out immediately if another server owns this
     # machine, before spawning the worker/threads or doing any startup work.
     # This makes "only one server at a time" hold regardless of launcher

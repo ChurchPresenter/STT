@@ -34,6 +34,11 @@ cat > "$PLIST" << PLIST_EOF
         <string>/Applications/STT.app/Contents/MacOS/STT</string>
         <string>--headless</string>
     </array>
+    <key>SoftResourceLimits</key>
+    <dict>
+        <key>NumberOfFiles</key>
+        <integer>10240</integer>
+    </dict>
     <key>RunAtLoad</key>
     <true/>
     <key>KeepAlive</key>

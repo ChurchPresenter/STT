@@ -18,6 +18,15 @@
     <key>WorkingDirectory</key>
     <string>INSTALL_DIR</string>
 
+    <!-- launchd's default soft maxfiles is 256, which the server exhausted
+         in the field (STT-2D/STT-2E). Soft only: a HardResourceLimits entry
+         would lower the hard limit from unlimited. -->
+    <key>SoftResourceLimits</key>
+    <dict>
+        <key>NumberOfFiles</key>
+        <integer>10240</integer>
+    </dict>
+
     <key>RunAtLoad</key>
     <true/>
 

@@ -88,6 +88,7 @@ module = [
     "stt.session_edit",
     "stt.shutdown_channel",
     "stt.win_job",
+    "stt.fd_limit",
 ]
 disallow_untyped_defs = true
 

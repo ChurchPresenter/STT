@@ -41,6 +41,7 @@ import zipfile
 from typing import ClassVar, Optional
 
 try:
+    from stt import fd_limit as _fd_limit
     from stt import win_job as _win_job
     from stt.crash_reports import redact_home_paths, scrub_event
     from stt.wheel_policy import only_binary_args
@@ -49,6 +50,7 @@ except ImportError:  # pragma: no cover - depends on how the process was started
     # plain script, so sys.path[0] is stt/ and the package is not importable.
     # crash_reports is stdlib-only, which is what lets the bootstrapper use it.
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    from stt import fd_limit as _fd_limit
     from stt import win_job as _win_job
     from stt.crash_reports import redact_home_paths, scrub_event
     from stt.wheel_policy import only_binary_args
@@ -3583,6 +3585,12 @@ def main():
     multiprocessing.freeze_support()
 
     setup_logging()
+
+    # launchd starts an agent with a soft maxfiles of 256, which the server and
+    # worker inherit and have exhausted in the field; see stt/fd_limit.py.
+    _fds = _fd_limit.raise_nofile_limit()
+    if _fds and _fds[0] != _fds[1]:
+        logging.info(f"[FDLIMIT] soft open-file limit {_fds[0]} -> {_fds[1]}")
 
     parser = argparse.ArgumentParser(description="STT Watchdog")
     grp = parser.add_mutually_exclusive_group()
