@@ -2,7 +2,7 @@
   "_comment": "How the detector NAMES the blocks it finds. The structure it finds — songs, speaking, quiet — comes from audio and is not configured here; this file only decides what to call each part. Copy any rule into config/service_phases.json to change it for this installation; that file is yours and is never overwritten by an update. Rules are tried in order and the first one that matches wins, so put the specific ones above the general ones.",
   "_baseline_comment": "These defaults are deliberately plain. They describe a service with songs, one or more sermons, and an optional communion — not any particular congregation's running order. The numbers below are starting points, not measurements of your church: correct a few services on /service-phase and let the learner propose values from what you actually do.",
 
-  "_match_comment": "A match clause may test: kind ('M' music, 'S' speaking, '_' quiet) or kinds (a list), min_minutes / max_minutes (both inclusive), cues ({group: minimum total hits}), cue_fragments ({group: minimum number of DIFFERENT fragments seen}), before_first / after_first (a phase name, for ordering), and is_last_named (the final block that can carry a name).",
+  "_match_comment": "A match clause may test: kind ('M' music, 'S' speaking, '_' quiet) or kinds (a list), min_minutes / max_minutes (both inclusive), cues ({group: minimum total hits}), cue_fragments ({group: minimum number of DIFFERENT fragments seen}), before_first (a phase name, or a list closing at whichever comes first) / after_first (a phase name), for ordering, and is_last_named (the final block that can carry a name).",
   "_service_comment": "Numbers this kind of service is judged by, overriding the same keys in config.json's service_phase block for sessions using this profile. Shipped empty on purpose: how long a sermon runs and how long a closing may be are facts about one congregation, and a figure shipped here would be wrong for every other installation without its operator ever seeing it. Add what your services actually do, or correct a few on /service-phase and let the learner propose them.",
   "service": {},
 
@@ -40,10 +40,11 @@
       "match": { "kind": "S", "min_minutes": 8 }
     },
     {
+      "_comment": "Naming Opening itself in before_first makes this match once. Without it, a long block that earned some other name first (a sermon on the bread of life, read as communion) left the window open and a short talk later in the service became a second Opening.",
       "name": "Opening",
       "confidence": 0.5,
       "ongoing_confidence_max": 0.3,
-      "match": { "kind": "S", "before_first": "Sermon" }
+      "match": { "kind": "S", "before_first": ["Sermon", "Opening"] }
     },
     {
       "name": "Closing",

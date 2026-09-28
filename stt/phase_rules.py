@@ -271,9 +271,15 @@ def apply_rules(blocks: Sequence[Any], rules: Sequence[Rule], *,
 
 
 def _blocked_by_order(rule: Rule, seen: Dict[str, bool]) -> bool:
-    """Positional conditions: 'only before the first Sermon', 'only after one'."""
+    """Positional conditions: 'only before the first Sermon', 'only after one'.
+
+    ``before_first`` may name several phases and closes at whichever is seen first. Naming
+    the rule's own phase is how a rule matches once: an Opening that only had to precede the
+    first Sermon was handed out again whenever a long block got some other name first.
+    """
     before = rule.match.get("before_first")
-    if isinstance(before, str) and seen.get(before):
+    names = [before] if isinstance(before, str) else before if isinstance(before, list) else []
+    if any(isinstance(n, str) and seen.get(n) for n in names):
         return True
     after = rule.match.get("after_first")
     if isinstance(after, str) and not seen.get(after):

@@ -121,6 +121,32 @@ class TestMatching:
         assert speech[0] == "Opening"
         assert "Opening" not in speech[1:]
 
+    def test_opening_is_named_once_even_when_no_sermon_precedes_the_next_talk(self):
+        # A service whose first long talk dwelt on bread scored as communion by volume, so no
+        # Sermon had been seen when the short talk after it arrived.
+        cues = compile_cues({"communion": [r"хлеб\w*"]})
+        spec = "S" * 2 + "M" * 8 + "S" * 30 + "M" * 2 + "S" * 2 + "M" * 19 + "S" * 12
+        b = bin_rows(rows(spec, text="хлеб хлеб"), cues=cues)
+        blocks = track_blocks([classify_bin(x) for x in b], b)
+        for block in blocks:
+            block.cues = sum_cues(b, block)
+        apply_rules(blocks, shipped_rules())
+        speech = [x.label for x in blocks if x.kind == SPEECH]
+        assert speech[0] == "Opening"
+        assert speech.count("Opening") == 1
+        assert speech[2] == "Speaking"
+
+    def test_before_first_accepts_a_list_and_closes_at_the_first_seen(self):
+        rules = parse_rules({"phases": [
+            {"name": "Sermon", "match": {"kind": "S", "min_minutes": 8}},
+            {"name": "Welcome", "match": {"kind": "S", "before_first": ["Sermon", "Welcome"]}},
+            {"name": "Speaking", "match": {"kind": "S"}},
+            {"name": "Music", "match": {"kind": "M"}},
+        ]})
+        blocks, _ = blocks_for("S" * 2 + "M" * 4 + "S" * 2 + "M" * 4 + "S" * 12 + "M" * 4 + "S" * 2)
+        apply_rules(blocks, rules)
+        assert [x.label for x in blocks if x.kind == SPEECH] == ["Welcome", "Speaking", "Sermon", "Speaking"]
+
     def test_an_ongoing_block_does_not_commit_to_a_confident_name(self):
         blocks, _ = blocks_for("S" * 4)
         blocks[-1].ongoing = True
