@@ -25,6 +25,15 @@ names those. A logger filter using it runs in ``Logger.filter()``, before
 suppresses the crash report as well as the console line — and does it without
 silencing the werkzeug logger wholesale.
 
+**A browser holding a session the server has already closed.** engine.io
+logs that at ERROR the first time per process — ``'Session is disconnected'
+<sid>``, ``'Session not found' <sid>`` or ``Invalid session <sid>`` — and at
+INFO after, because it is the normal aftermath of a restart or a laptop lid:
+the client's next poll carries the old sid, is refused, and the client opens a
+fresh session. The sid in the message made every process start a new Sentry
+issue. ``is_stale_session_message`` names them so the filter can log them at
+INFO from the first one, the level engine.io itself uses for the rest.
+
 Stdlib-only and free of runtime config, per the stt/ module conventions.
 """
 
@@ -84,3 +93,18 @@ def is_benign_wsgi_message(message: str) -> bool:
     a timestamp, and http.server appends the offending bytes.
     """
     return any(benign in message for benign in BENIGN_WSGI_MESSAGES)
+
+
+#: How engine.io's server words a request carrying a sid it no longer holds
+#: (engineio/server.py, all under its "bad-sid" key). Anchored at the start: the
+#: sid follows, and an unrelated message merely containing the phrase is kept.
+STALE_SESSION_PREFIXES: Tuple[str, ...] = (
+    "'Session is disconnected' ",
+    "'Session not found' ",
+    "Invalid session ",
+)
+
+
+def is_stale_session_message(message: str) -> bool:
+    """True when an engine.io record reports a client reusing a closed session."""
+    return message.startswith(STALE_SESSION_PREFIXES)

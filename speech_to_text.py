@@ -5174,7 +5174,7 @@ socket_io_logger = logging.getLogger("socketio")
 # Polled endpoints that log an unchanging value would otherwise ship the same
 # record every minute forever (Sentry Logs are unsampled). Gate them on the
 # value actually changing.
-from stt.log_gate import ChangeGate, is_benign_wsgi_message  # noqa: E402
+from stt.log_gate import ChangeGate, is_benign_wsgi_message, is_stale_session_message  # noqa: E402
 
 _poll_log_gate = ChangeGate()
 
@@ -5204,6 +5204,26 @@ class _SuppressBenignWSGINoise(logging.Filter):
 
 
 log.addFilter(_SuppressBenignWSGINoise())
+
+
+class _StaleSessionAtInfo(logging.Filter):
+    """Log a browser reusing a closed Socket.IO session at INFO, not ERROR.
+
+    engine.io already does that for every occurrence after the first; the first
+    carries the sid in its message, so each server start filed a fresh Sentry
+    issue for a client doing the right thing. See stt/log_gate.py."""
+
+    def filter(self, record):
+        try:
+            message = record.getMessage()
+        except Exception:
+            return True
+        if record.levelno > logging.INFO and is_stale_session_message(message):
+            record.levelno, record.levelname = logging.INFO, "INFO"
+        return True
+
+
+logging.getLogger("engineio.server").addFilter(_StaleSessionAtInfo())
 
 # Password-based authentication sessions
 # Format: {session_token: {"ip": client_ip, "expires": datetime}}

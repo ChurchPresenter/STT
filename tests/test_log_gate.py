@@ -2,7 +2,7 @@
 
 import threading
 
-from stt.log_gate import ChangeGate
+from stt.log_gate import ChangeGate, is_stale_session_message
 
 
 def test_first_value_for_a_key_is_always_a_change():
@@ -88,3 +88,23 @@ def test_concurrent_callers_see_exactly_one_change_per_value():
         assert not t.is_alive()
 
     assert sum(changes) == 1
+
+
+class TestStaleSessionMessage:
+    """engine.io's first "bad-sid" record per process, as it reached Sentry."""
+
+    SUFFIX = " (further occurrences of this error will be logged with level INFO)"
+
+    def test_a_disconnected_session_is_stale(self):
+        assert is_stale_session_message("'Session is disconnected' AbCdEf0123456789xyzA" + self.SUFFIX)
+
+    def test_an_unknown_session_is_stale(self):
+        assert is_stale_session_message("'Session not found' AbCdEf0123456789xyzA" + self.SUFFIX)
+        assert is_stale_session_message("Invalid session AbCdEf0123456789xyzA" + self.SUFFIX)
+
+    def test_other_engineio_errors_are_kept(self):
+        assert not is_stale_session_message("Invalid transport" + self.SUFFIX)
+        assert not is_stale_session_message("Invalid websocket upgrade" + self.SUFFIX)
+
+    def test_the_phrase_elsewhere_in_a_message_is_kept(self):
+        assert not is_stale_session_message("peer said 'Session is disconnected' x")
