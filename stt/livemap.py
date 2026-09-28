@@ -215,7 +215,7 @@ def build_ping_url(endpoint: Optional[str], *, event: str, os_name: str, version
                    transcribe_lang: str = "", translate_lang: str = "",
                    commit: str = "", os_version: str = "", arch: str = "", gpu: str = "",
                    stt_model: str = "", mt_model: str = "", src: str = "",
-                   offloaded: bool = False) -> Optional[str]:
+                   offloaded: bool = False, as_root: bool = False) -> Optional[str]:
     """The URL for one ping, or None when pinging is switched off.
 
     None is the kill switch: a blank ``analytics.endpoint`` means the operator (or a
@@ -239,6 +239,10 @@ def build_ping_url(endpoint: Optional[str], *, event: str, os_name: str, version
     the map can leave it out of a count of real installs. It is omitted when blank, and
     the collector treats anything other than "dev" as a normal install, so an omitted
     value and an unrecognised one mean the same thing.
+
+    ``as_root`` (``root=1``, omitted otherwise) counts the Linux installs whose service
+    still runs as root, from an install.sh older than 2026-09-27 — the ones
+    stt/owner_exec.py exists for, and the only way to learn how many are left.
     """
     base = (endpoint or "").strip()
     if not base:
@@ -256,6 +260,8 @@ def build_ping_url(endpoint: Optional[str], *, event: str, os_name: str, version
             params.append((name, value))
     if offloaded:
         params.append(("offloaded", "1"))
+    if as_root:
+        params.append(("root", "1"))
     params.append(("event", event))
     return base + "?" + urllib.parse.urlencode(params, quote_via=urllib.parse.quote)
 

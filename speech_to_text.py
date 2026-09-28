@@ -4953,6 +4953,7 @@ def _send_livemap_ping(event, **fields):
             # A trial is not an install. The collector filters on this, so a demo
             # that failed to say so would be counted as a church running the app.
             src="demo" if DEMO else ("dev" if SERVER_IS_DEV else ""),
+            as_root=getattr(os, "geteuid", None) is not None and os.geteuid() == 0,
             **_livemap.install_fields_from_config(config, remote_model=_remote_model,
                                                   remote_method=_remote_method),
             **fields)

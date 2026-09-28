@@ -89,6 +89,15 @@ class TestBuildPingUrl:
                       "&commit=c588d29&offloaded=1")
         assert url == historical + "&event=transcription_start"
 
+    def test_root_is_sent_only_when_true_and_before_event(self):
+        # Counts the pre-2026-09-27 Linux installs still running their service as root.
+        plain = build_ping_url(ENDPOINT, event=EVENT_TRANSCRIPTION_START,
+                               os_name="linux", version="26.1.22")
+        assert "root=" not in plain
+        url = build_ping_url(ENDPOINT, event=EVENT_TRANSCRIPTION_START,
+                             os_name="linux", version="26.1.22", offloaded=True, as_root=True)
+        assert url.endswith("&offloaded=1&root=1&event=transcription_start")
+
     def test_the_descriptive_fields_sit_between_commit_and_offloaded(self):
         url = build_ping_url(ENDPOINT, event=EVENT_TRANSCRIPTION_START,
                              os_name="linux", version="26.1.22", commit="c588d29",
