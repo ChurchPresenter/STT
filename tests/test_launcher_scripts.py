@@ -315,3 +315,10 @@ class TestWindowsParsing:
         smi = [ln for ln in block.splitlines() if "--query-gpu=name" in ln]
         assert smi and smi[0].rstrip().endswith("|")
         assert "Write-Host" in block.split("--query-gpu=name")[1].splitlines()[1]
+
+
+def test_windows_scripts_check_out_with_crlf():
+    # cmd can fail to find a goto label in an LF-only batch file (restart_server.bat's
+    # wait loop), and a zip download or core.autocrlf=false would otherwise give it one.
+    attrs = read(".gitattributes").splitlines()
+    assert "*.bat text eol=crlf" in attrs and "*.ps1 text eol=crlf" in attrs

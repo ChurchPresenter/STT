@@ -1,0 +1,5 @@
+# Windows scripts check out with CRLF everywhere, including in the source archive the
+# watchdog updates from. cmd mis-finds goto labels in LF-only batch files, and a zip
+# download or a machine with core.autocrlf=false would otherwise hand it LF.
+*.bat text eol=crlf
+*.ps1 text eol=crlf
