@@ -49,6 +49,21 @@ def restart_script(bundle_dir: str, *, windows: bool) -> Optional[str]:
     return path if os.path.isfile(path) else None
 
 
+def detached_script_command(script: str) -> str:
+    """The Windows command line that runs ``script`` outside this server's process tree.
+
+    restart_server.bat stops the server with ``taskkill /T``, which walks the tree by
+    parent PID — and a script the server started is in that tree, so it killed itself
+    mid-restart and the server never came back. ``start`` launches the script from an
+    intermediate cmd that exits at once, leaving the script's parent a dead process, so
+    no tree walk from the server reaches it. ``/b`` keeps it on the hidden console the
+    server gives it rather than opening a window.
+
+    A string, not a list: subprocess would escape the empty ``""`` title into ``\"\"``.
+    """
+    return 'cmd.exe /c start "" /b cmd.exe /c "%s"' % script
+
+
 def relaunch_argv(executable: str, script: str, argv: Sequence[str], *,
                   frozen: bool) -> List[str]:
     """The command line that starts this same server again, independent of the cwd.

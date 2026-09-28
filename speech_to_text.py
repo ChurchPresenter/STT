@@ -11323,8 +11323,10 @@ def perform_server_restart():
         restart_bat = _server_restart.restart_script(BUNDLE_DIR, windows=True)
         if restart_bat:
             print("[RESTART] Calling restart_server.bat...")
+            # Outside our process tree: the script stops the server with taskkill /T,
+            # which would otherwise take the script down with it (stt/server_restart.py).
             subprocess.Popen(
-                ["cmd.exe", "/c", restart_bat],
+                _server_restart.detached_script_command(restart_bat),
                 cwd=script_dir,
                 # NEW_PROCESS_GROUP: survive this process's exit. NO_WINDOW: the
                 # server runs windowless — cmd would flash a console otherwise.

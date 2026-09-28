@@ -12,6 +12,7 @@ import pytest
 from stt import watchdog
 from stt.server_restart import (
     RESTART_EXIT_CODE,
+    detached_script_command,
     is_watchdog_managed,
     relaunch_argv,
     restart_script,
@@ -30,6 +31,19 @@ class TestRestartScript:
     def test_the_repo_ships_both(self):
         repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         assert restart_script(repo, windows=True) and restart_script(repo, windows=False)
+
+
+class TestDetachedScriptCommand:
+    """The script must not be the server's descendant, or taskkill /T kills it too."""
+
+    def test_launched_through_start_so_its_parent_is_gone(self):
+        cmd = detached_script_command(r"C:\STT\restart_server.bat")
+        assert cmd.startswith('cmd.exe /c start "" /b cmd.exe /c ')
+        assert cmd.endswith(r'"C:\STT\restart_server.bat"')
+
+    def test_a_path_with_spaces_stays_one_argument(self):
+        cmd = detached_script_command(r"C:\Program Files\STT\restart_server.bat")
+        assert r'/c "C:\Program Files\STT\restart_server.bat"' in cmd
 
 
 class TestRelaunchArgv:
