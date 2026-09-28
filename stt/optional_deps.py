@@ -37,6 +37,7 @@ import time
 from typing import (Any, Callable, List, Mapping, NamedTuple, Optional, Sequence, Set,
                     Tuple)
 
+from stt import owner_exec as _owner_exec
 from stt.llm_translate import uses_local_llm
 
 # The server runs windowless on Windows; without this the uv child would flash a
@@ -305,7 +306,9 @@ def ensure(repo_dir: str,
             continue
         echo(f"[DEPS] {dep.setting} needs {dep.spec}, which is not installed. Installing...")
         try:
-            r = subprocess.run(install_command(uv, python_bin, dep.spec),
+            # As the checkout's owner when the server runs as root: stt/owner_exec.
+            r = _owner_exec.run(install_command(uv, python_bin, dep.spec),
+                               owned_by=repo_dir, reclaim_dirs=(repo_dir,),
                                cwd=repo_dir, capture_output=True, text=True,
                                timeout=timeout, check=False,
                                creationflags=_CREATE_NO_WINDOW)

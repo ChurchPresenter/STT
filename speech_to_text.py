@@ -25,6 +25,16 @@ if _data_override:
 else:
     APP_DIR = os.path.join(os.path.expanduser("~"), ".stt")
 
+# Root running a checkout somebody else owns (a User=root service from an older
+# install.sh) must not leave root-owned __pycache__ in it; stt/owner_exec.py has the
+# rest of that story. Before the first stt import, or that import writes the first one.
+if not _is_frozen and getattr(os, "geteuid", None) is not None and os.geteuid() == 0:
+    try:
+        if os.stat(BUNDLE_DIR).st_uid != 0:
+            sys.dont_write_bytecode = True
+    except OSError:
+        pass
+
 # A demo replays a recorded service instead of transcribing one: no worker process,
 # no models, no microphone. Its data root is chosen (and wiped) before anything is
 # created, so a demo can never write into a real install. See stt/demo_mode.py.
@@ -23743,6 +23753,25 @@ def cleanup_old_partials():
         print(f"[PARTIALS] Retention cleanup failed: {_cleanup_err}", flush=True)
 
 
+def _reclaim_data_dir():
+    """Give a user's data dir back to them when this server runs as root.
+
+    A User=root service with the user's HOME writes config, sessions and models as root,
+    and a later start as the user cannot save its config or repair a model. Only what
+    earlier runs left is fixed; this run's own files are handed back next start. A no-op
+    for a non-root server and for a data dir root owns. See stt/owner_exec.py.
+    """
+    if DEMO:
+        return
+    try:
+        from stt import owner_exec as _owner_exec
+        owner = _owner_exec.foreign_owner(APP_DIR, via_parent=True)
+        if owner is not None:
+            _owner_exec.reclaim(APP_DIR, owner)
+    except Exception as e:  # never let housekeeping take the server down
+        print(f"[OWNER] Could not reclaim the data dir: {e}", flush=True)
+
+
 def thread2_function():
     try:
         # Get web server config
@@ -23756,6 +23785,9 @@ def thread2_function():
 
         # Housekeeping off the boot path: strip expired partial rows from old sessions
         threading.Thread(target=cleanup_old_partials, daemon=True).start()
+
+        # Hand back what an earlier root run left root-owned in a user's data dir.
+        threading.Thread(target=_reclaim_data_dir, daemon=True).start()
 
         # Retire sidecars the previous run could not: a process stopped
         # mid-session never reaches the worker's end-of-session checkpoint.

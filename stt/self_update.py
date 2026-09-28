@@ -27,6 +27,7 @@ import tempfile
 from datetime import datetime, timedelta
 from typing import Sequence, Tuple
 
+from stt import owner_exec as _owner_exec
 from stt.wheel_policy import only_binary_args
 
 log = logging.getLogger(__name__)
@@ -45,8 +46,11 @@ def _git(repo_dir: str, *args: str, timeout: int = _GIT_TIMEOUT) -> "subprocess.
     Never raises on a non-zero exit (``check=False``); callers inspect
     ``returncode``/``stdout`` themselves.
     """
-    return subprocess.run(
+    # As the checkout's owner when this server runs as root: see stt/owner_exec.
+    return _owner_exec.run(
         ["git", "-C", repo_dir, *args],
+        owned_by=repo_dir,
+        reclaim_dirs=(repo_dir,),
         capture_output=True,
         text=True,
         timeout=timeout,
@@ -254,8 +258,10 @@ def _sync_deps(repo_dir: str) -> bool:
         log.warning("[self-update] could not prepare requirements: %s", e)
         return False
     try:
-        r = subprocess.run(
+        r = _owner_exec.run(
             [uv, "pip", "install", "-r", req_path, *only_binary_args()],
+            owned_by=repo_dir,
+            reclaim_dirs=(repo_dir,),
             cwd=repo_dir,
             capture_output=True,
             text=True,

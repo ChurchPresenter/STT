@@ -40,12 +40,23 @@ import webbrowser
 import zipfile
 from typing import ClassVar, Optional
 
+# Root running from a checkout somebody else owns must not leave root-owned
+# __pycache__ in it (see stt/owner_exec.py). Before the stt imports below.
+if not getattr(sys, "frozen", False) and getattr(os, "geteuid", None) is not None \
+        and os.geteuid() == 0:
+    try:
+        if os.stat(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))).st_uid != 0:
+            sys.dont_write_bytecode = True
+    except OSError:
+        pass
+
 try:
     from stt import fd_limit as _fd_limit
     from stt import win_job as _win_job
     from stt.crash_reports import redact_home_paths, scrub_event
     from stt.wheel_policy import only_binary_args
     from stt.server_port import DEFAULT_PORT
+    from stt import owner_exec as _owner_exec
 except ImportError:  # pragma: no cover - depends on how the process was started
     # deploy/stt-watchdog.service and com.stt.watchdog.plist run this file as a
     # plain script, so sys.path[0] is stt/ and the package is not importable.
@@ -56,6 +67,7 @@ except ImportError:  # pragma: no cover - depends on how the process was started
     from stt.crash_reports import redact_home_paths, scrub_event
     from stt.wheel_policy import only_binary_args
     from stt.server_port import DEFAULT_PORT
+    from stt import owner_exec as _owner_exec
 
 try:
     import certifi
@@ -1140,13 +1152,33 @@ class Provisioner:
     # -- process helper ------------------------------------------------------
 
     def _run(self, cmd, desc=None, check=True, timeout=3600, extra_env=None):
-        """Run a subprocess, streaming stdout to the log callback."""
+        """Run a subprocess, streaming stdout to the log callback.
+
+        git and uv act on the checkout, so under a root service they run as its owner
+        first and as root only if that fails (stt/owner_exec). Everything else — sudo,
+        brew, winget, installers — runs as this process always has.
+        """
         if desc:
             self.log(f"  $ {desc}")
         env = dict(os.environ)
         env["PATH"] = _augmented_path()
         if extra_env:
             env.update(extra_env)
+        tool = os.path.basename(str(cmd[0])).lower()
+        owner = (_owner_exec.foreign_owner(SOURCE_DIR)
+                 if tool in ("git", "uv") and os.path.isdir(SOURCE_DIR) else None)
+        if owner is not None:
+            _owner_exec.reclaim(SOURCE_DIR, owner)
+            code = self._run_once(cmd, False, timeout, env, _owner_exec.owner_popen_kwargs(owner, env))
+            if code == 0:
+                return 0
+            self.log(f"  [WARN] {tool} failed as {owner.name}; retrying as root")
+        return self._run_once(cmd, check, timeout, env, {})
+
+    def _run_once(self, cmd, check, timeout, env, as_user):
+        """One attempt of _run; ``as_user`` carries user=/group=/env= for a dropped child."""
+        env = as_user.pop("env", env) if as_user else env
+        as_user = as_user or {}
         # Windows resolves a bare program name against *this* process's PATH,
         # not the env passed to the child — so a tool installed moments ago
         # (winget git, MinGit, static ffmpeg) is visible to _which() yet not
@@ -1160,7 +1192,7 @@ class Provisioner:
                 # (cp1252 on Windows) is strict and dies on bytes like 0x81 —
                 # e.g. a Cyrillic username in a path echoed by uv.
                 text=True, encoding="utf-8", errors="replace", bufsize=1, env=env,
-                creationflags=_CREATE_NO_WINDOW,
+                creationflags=_CREATE_NO_WINDOW, **as_user,
             )
         except OSError as e:
             # FileNotFoundError means the tool is absent; PermissionError
@@ -2218,9 +2250,15 @@ class AutoUpdater:
     def _git(self, *args, check=True):
         # _which: bare 'git' won't spawn when git was installed (MinGit,
         # winget) after this process started — see _run for the semantics.
-        return subprocess.run([_which("git") or "git", "-C", SOURCE_DIR, *args],
-                              capture_output=True, text=True,
-                              check=check, creationflags=_CREATE_NO_WINDOW)
+        # As the checkout's owner under a root service (stt/owner_exec); check= is
+        # applied here, after any fallback to root, so the retry is not cut short.
+        r = _owner_exec.run([_which("git") or "git", "-C", SOURCE_DIR, *args],
+                            owned_by=SOURCE_DIR, reclaim_dirs=(SOURCE_DIR,),
+                            capture_output=True, text=True,
+                            check=False, creationflags=_CREATE_NO_WINDOW)
+        if check:
+            r.check_returncode()
+        return r
 
     def _resolve_target(self, remote):
         """Fetch, then resolve `remote` to (git ref, commit sha) for the reset."""

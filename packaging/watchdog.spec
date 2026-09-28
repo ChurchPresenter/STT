@@ -74,6 +74,7 @@ a = Analysis(
         "stt.win_job",
         "stt.fd_limit",
         "stt.server_port",
+        "stt.owner_exec",
         "stt.coercion",
     ],
     hookspath=[],

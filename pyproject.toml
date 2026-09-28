@@ -44,6 +44,7 @@ module = [
     "stt.paths",
     "stt.self_update",
     "stt.server_port",
+    "stt.owner_exec",
     "stt.model_disk",
     "stt.model_files",
     "stt.model_catalog",
