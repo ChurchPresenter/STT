@@ -26,11 +26,12 @@
       }
     },
     {
-      "_comment": "The older, weaker communion signal, kept for services where the formula is not read aloud or the phrase list has not caught up with the words used. Volume rather than position: a sermon can discuss communion at length without being one, so this needs a lot of hits in a single block.",
+      "_comment": "The older, weaker communion signal, kept for services where the formula is not read aloud or the phrase list has not caught up with the words used. Volume rather than position: a sermon can discuss communion at length without being one, so this needs a lot of hits in a single block. Volume also grows with length, which is why not_when holds it to blocks shorter than a sermon: a 31-minute sermon on manna and daily bread scored 18 here while a real communion, found by its verse, scored 9.",
       "name": "Communion",
       "confidence": 0.6,
       "confidence_first_sunday": 0.8,
-      "match": { "kind": "S", "cues": { "communion": 12 } }
+      "match": { "kind": "S", "cues": { "communion": 12 } },
+      "not_when": { "kind": "S", "min_minutes": 8 }
     },
     {
       "_comment": "A speaking block long enough to be the address. Everything shorter that comes before the first one is the opening, and everything shorter after it is either the closing or just speaking — so this threshold is the only length the speaking rules need.",

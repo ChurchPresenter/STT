@@ -122,19 +122,14 @@ class TestMatching:
         assert "Opening" not in speech[1:]
 
     def test_opening_is_named_once_even_when_no_sermon_precedes_the_next_talk(self):
-        # A service whose first long talk dwelt on bread scored as communion by volume, so no
-        # Sermon had been seen when the short talk after it arrived.
-        cues = compile_cues({"communion": [r"хлеб\w*"]})
-        spec = "S" * 2 + "M" * 8 + "S" * 30 + "M" * 2 + "S" * 2 + "M" * 19 + "S" * 12
-        b = bin_rows(rows(spec, text="хлеб хлеб"), cues=cues)
-        blocks = track_blocks([classify_bin(x) for x in b], b)
-        for block in blocks:
-            block.cues = sum_cues(b, block)
-        apply_rules(blocks, shipped_rules())
+        # The shape a Sermon limit produces: the long talk after the opening songs is demoted
+        # and handed back to the rules with Sermon barred, so no Sermon has been seen when
+        # the short talk after it arrives.
+        blocks, _ = blocks_for("S" * 2 + "M" * 8 + "S" * 12 + "M" * 3 + "S" * 2 + "M" * 19 + "S" * 12)
+        speech_at = [i for i, x in enumerate(blocks) if x.kind == SPEECH]
+        apply_rules(blocks, shipped_rules(), barred={speech_at[1]: {"Sermon"}})
         speech = [x.label for x in blocks if x.kind == SPEECH]
-        assert speech[0] == "Opening"
-        assert speech.count("Opening") == 1
-        assert speech[2] == "Speaking"
+        assert speech == ["Opening", "Speaking", "Speaking", "Sermon 1"]
 
     def test_before_first_accepts_a_list_and_closes_at_the_first_seen(self):
         rules = parse_rules({"phases": [
@@ -153,13 +148,21 @@ class TestMatching:
         apply_rules(blocks, shipped_rules())
         assert blocks[-1].label == "Opening" and blocks[-1].confidence == 0.3
 
+    def test_a_sermon_long_on_communion_words_stays_a_sermon(self):
+        # A sermon on manna and daily bread outscored a real communion on keyword volume
+        # alone; length is what tells a talk about the bread from the table itself.
+        cues = compile_cues({"communion": [r"хлеб\w*"]})
+        blocks, _ = blocks_for("S" * 30, text="хлеб хлеб", cues=cues)
+        apply_rules(blocks, shipped_rules())
+        assert blocks[0].label == "Sermon 1"
+
     def test_first_sunday_raises_communion_confidence_only(self):
         cues = compile_cues({"communion": [r"причасти\w*"]})
-        blocks, _ = blocks_for("S" * 12, text="причастие причастие", cues=cues)
+        blocks, _ = blocks_for("S" * 5, text="причастие причастие причастие", cues=cues)
         apply_rules(blocks, shipped_rules(), first_sunday=True)
         assert blocks[0].label == "Communion" and blocks[0].confidence == 0.8
 
-        blocks2, _ = blocks_for("S" * 12, text="причастие причастие", cues=cues)
+        blocks2, _ = blocks_for("S" * 5, text="причастие причастие причастие", cues=cues)
         apply_rules(blocks2, shipped_rules(), first_sunday=False)
         assert blocks2[0].confidence == 0.6
 
