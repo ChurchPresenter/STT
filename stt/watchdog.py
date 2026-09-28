@@ -750,6 +750,29 @@ def _dep_failure_marker():
 
 
 _FFMPEG_BIN_DIR = os.path.join(DATA_DIR, "bin")
+# Static ffmpeg sources, tried in order. BtbN's GitHub builds back up the two
+# single-host mirrors; _extract_ffmpeg takes the binaries by basename, so their
+# bin/ layout needs nothing special.
+_STATIC_FFMPEG_URLS = {
+    "linux": (
+        "https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz",
+        "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-linux64-gpl.tar.xz",
+    ),
+    "darwin": ("https://evermeet.cx/ffmpeg/getrelease/ffmpeg/zip",),
+    "win32": (
+        "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip",
+        "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip",
+    ),
+}
+
+
+def _static_ffmpeg_platform():
+    """The _STATIC_FFMPEG_URLS key for this machine ('' when there is none)."""
+    if sys.platform.startswith("linux"):
+        return "linux"
+    if sys.platform == "darwin":
+        return "darwin"
+    return "win32" if IS_WINDOWS else ""
 # Portable MinGit install (Windows fallback when winget is absent/blocked —
 # clean installs often ship without a working winget). git.exe lands in
 # _MINGIT_DIR\cmd, which _augmented_path() lists.
@@ -1568,24 +1591,33 @@ class Provisioner:
         self._install_static_ffmpeg()
 
     def _install_static_ffmpeg(self):
+        import tarfile
         os.makedirs(_FFMPEG_BIN_DIR, exist_ok=True)
-        if sys.platform.startswith("linux"):
-            url = "https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz"
-        elif sys.platform == "darwin":
-            url = "https://evermeet.cx/ffmpeg/getrelease/ffmpeg/zip"
-        elif IS_WINDOWS:
-            url = "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip"
-        else:
+        urls = _STATIC_FFMPEG_URLS.get(_static_ffmpeg_platform())
+        if not urls:
             raise ProvisionError("no static ffmpeg source for this platform")
-        self.log(f"  downloading static ffmpeg from {url}")
-        archive = os.path.join(tempfile.gettempdir(), os.path.basename(url.split("?")[0]) or "ffmpeg.pkg")
-        self._download_file(url, archive)
-        self._extract_ffmpeg(archive, _FFMPEG_BIN_DIR)
-        if not _which("ffmpeg"):
-            raise ProvisionError(
-                "ffmpeg could not be provisioned; install it manually and re-run setup."
-            )
-        self.log(f"  static ffmpeg installed to {_FFMPEG_BIN_DIR}")
+        # One mirror down (gyan.dev answered a Windows setup with 503) is not a
+        # reason to fail setup while another one serves the same thing.
+        failures = []
+        for url in urls:
+            self.log(f"  downloading static ffmpeg from {url}")
+            archive = os.path.join(tempfile.gettempdir(), os.path.basename(url.split("?")[0]) or "ffmpeg.pkg")
+            try:
+                self._download_file(url, archive)
+                self._extract_ffmpeg(archive, _FFMPEG_BIN_DIR)
+            except (OSError, zipfile.BadZipFile, tarfile.TarError) as e:
+                # OSError covers urllib's HTTPError/URLError and socket timeouts.
+                self.log(f"  [WARN] {url} failed: {e}")
+                failures.append(f"{url}: {e}")
+                continue
+            if _which("ffmpeg"):
+                self.log(f"  static ffmpeg installed to {_FFMPEG_BIN_DIR}")
+                return
+            failures.append(f"{url}: archive held no runnable ffmpeg")
+        raise ProvisionError(
+            "ffmpeg could not be provisioned; install it manually and re-run setup. "
+            + "; ".join(failures)
+        )
 
     def _extract_ffmpeg(self, archive, dest):
         """Extract just the ffmpeg (+ffprobe) binaries from a static archive into dest."""
@@ -1820,10 +1852,21 @@ class Provisioner:
             return resp.read().decode("utf-8", "replace")
 
     def _download_file(self, url, dest):
+        # Staged: an interrupted transfer must not leave a file at `dest` that
+        # the next attempt takes for a whole archive.
+        part = dest + ".part"
         req = urllib.request.Request(url, headers={"User-Agent": "STT-Bootstrapper"})
-        with urllib.request.urlopen(req, timeout=120, context=_SSL_CTX) as resp, \
-                open(dest, "wb") as out:
-            shutil.copyfileobj(resp, out)
+        try:
+            with urllib.request.urlopen(req, timeout=120, context=_SSL_CTX) as resp, \
+                    open(part, "wb") as out:
+                shutil.copyfileobj(resp, out)
+            os.replace(part, dest)
+        finally:
+            if os.path.exists(part):
+                try:
+                    os.remove(part)
+                except OSError:
+                    pass
 
 
 # ---------------------------------------------------------------------------

@@ -10,6 +10,8 @@ stubbed, and the assertions are about which branch was taken and what it was
 asked to run.
 """
 
+import io
+
 import pytest
 
 from stt import watchdog
@@ -645,3 +647,90 @@ class TestProvisionFingerprint:
         message = "cannot run here"
         assert watchdog._provision_fingerprint(watchdog.ProvisionError(message)) != \
             watchdog._provision_fingerprint(watchdog.UnsupportedPlatformError(message))
+
+
+class TestStaticFfmpegMirrors:
+    """gyan.dev answered a Windows first run with 503 and setup failed, though
+    BtbN's GitHub build of the same thing was up."""
+
+    def provisioner(self, monkeypatch, tmp_path, *, failing=()):
+        p = make_provisioner(monkeypatch)
+        monkeypatch.setattr(watchdog, "IS_WINDOWS", True)
+        monkeypatch.setattr(watchdog.sys, "platform", "win32")
+        monkeypatch.setattr(watchdog, "_FFMPEG_BIN_DIR", str(tmp_path / "bin"))
+        p.installed = False
+
+        def download(url, dest):
+            p.downloaded.append(url)
+            if url in failing:
+                raise watchdog.urllib.error.HTTPError(url, 503, "Service Unavailable", None, None)
+
+        p._download_file = download
+        p._extract_ffmpeg = lambda archive, dest: setattr(p, "installed", True)
+        monkeypatch.setattr(watchdog, "_which", lambda name: "ffmpeg.exe" if p.installed else None)
+        return p
+
+    def test_a_mirror_answering_503_falls_through_to_the_next(self, monkeypatch, tmp_path):
+        first, second = watchdog._STATIC_FFMPEG_URLS["win32"]
+        p = self.provisioner(monkeypatch, tmp_path, failing={first})
+
+        p._install_static_ffmpeg()
+
+        assert p.downloaded == [first, second]
+        assert p.installed
+        assert any("503" in m for m in p.logs)
+
+    def test_the_first_mirror_is_enough_when_it_works(self, monkeypatch, tmp_path):
+        p = self.provisioner(monkeypatch, tmp_path)
+
+        p._install_static_ffmpeg()
+
+        assert p.downloaded == [watchdog._STATIC_FFMPEG_URLS["win32"][0]]
+
+    def test_every_mirror_down_is_one_provision_error_naming_them(self, monkeypatch, tmp_path):
+        urls = watchdog._STATIC_FFMPEG_URLS["win32"]
+        p = self.provisioner(monkeypatch, tmp_path, failing=set(urls))
+
+        with pytest.raises(watchdog.ProvisionError) as info:
+            p._install_static_ffmpeg()
+
+        assert all(url in str(info.value) for url in urls)
+
+    def test_every_platform_with_a_source_has_a_backup_but_macos(self):
+        assert len(watchdog._STATIC_FFMPEG_URLS["linux"]) >= 2
+        assert len(watchdog._STATIC_FFMPEG_URLS["win32"]) >= 2
+        assert watchdog._STATIC_FFMPEG_URLS["darwin"]
+
+
+class TestStagedDownload:
+    """A transfer that dies midway must not leave `dest` looking complete."""
+
+    class _Body(io.BytesIO):
+        """A response that hands over its bytes, or drops the connection."""
+
+        def __init__(self, fail):
+            super().__init__(b"archive-bytes")
+            self.fail = fail
+
+        def read(self, *args):
+            if self.fail:
+                raise OSError("connection reset")
+            return super().read(*args)
+
+    def run(self, monkeypatch, tmp_path, *, fail):
+        body = self._Body(fail)
+        monkeypatch.setattr(watchdog.urllib.request, "urlopen", lambda *a, **k: body)
+        p = make_provisioner(monkeypatch)
+        dest = tmp_path / "ffmpeg.zip"
+        watchdog.Provisioner._download_file(p, "https://example.invalid/ffmpeg.zip", str(dest))
+        return dest
+
+    def test_a_complete_transfer_lands_at_dest(self, monkeypatch, tmp_path):
+        dest = self.run(monkeypatch, tmp_path, fail=False)
+        assert dest.read_bytes() == b"archive-bytes"
+        assert not (tmp_path / "ffmpeg.zip.part").exists()
+
+    def test_an_interrupted_transfer_leaves_nothing(self, monkeypatch, tmp_path):
+        with pytest.raises(OSError):
+            self.run(monkeypatch, tmp_path, fail=True)
+        assert list(tmp_path.iterdir()) == []
