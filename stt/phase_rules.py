@@ -30,7 +30,8 @@ class Rule:
     """One named phase and the conditions under which a block earns that name."""
 
     __slots__ = ("confidence", "confidence_first_sunday", "match", "name", "not_when",
-                 "number", "number_from", "ongoing_confidence_max", "span")
+                 "number", "number_after_quiet_minutes", "number_from",
+                 "ongoing_confidence_max", "span")
 
     def __init__(self, name: str, *, match: Dict[str, Any],
                  confidence: float = 0.5, number: bool = False,
@@ -38,12 +39,16 @@ class Rule:
                  not_when: Optional[Dict[str, Any]] = None,
                  span: Optional[Dict[str, Any]] = None,
                  confidence_first_sunday: Optional[float] = None,
-                 ongoing_confidence_max: Optional[float] = None) -> None:
+                 ongoing_confidence_max: Optional[float] = None,
+                 number_after_quiet_minutes: Optional[float] = None) -> None:
         self.name = name
         self.match = match
         self.confidence = confidence
         self.number = number
         self.number_from = number_from
+        # When number_from's phase never appears: restart the count after the last quiet
+        # stretch this long that comes before anyone speaks. See _renumber.
+        self.number_after_quiet_minutes = number_after_quiet_minutes
         self.not_when = not_when
         self.span = span
         # Communion's usual slot is the first Sunday, so the same evidence is worth more
@@ -120,6 +125,7 @@ def parse_rules(raw: Optional[Dict[str, Any]]) -> List[Rule]:
             not_when=not_when, span=span,
             confidence_first_sunday=_opt_num(item.get("confidence_first_sunday")),
             ongoing_confidence_max=_opt_num(item.get("ongoing_confidence_max")),
+            number_after_quiet_minutes=_opt_num(item.get("number_after_quiet_minutes")),
         ))
     return out
 
@@ -294,12 +300,15 @@ def _renumber(blocks: Sequence[Any], rules: Sequence[Rule], spans: Sequence[Span
     room, and numbering it put Songs 1 half an hour before anyone arrived. Which phase the
     count starts at is a rule-file decision, not a fact about music.
     """
-    anchors = {r.name: r.number_from for r in rules if r.number and r.number_from}
-    if not anchors:
+    anchored = [r for r in rules if r.number and r.number_from]
+    if not anchored:
         return
     inside = {j for s in spans for j in range(s.start_index, s.end_index + 1)}
-    for name, anchor in anchors.items():
-        at = _index_of(blocks, anchor, spans)
+    for rule in anchored:
+        name = rule.name
+        at = _index_of(blocks, rule.number_from or "", spans)
+        if at is None and rule.number_after_quiet_minutes is not None:
+            at = _after_leading_quiet(blocks, rule.number_after_quiet_minutes)
         if at is None:
             continue
         n = 0
@@ -311,6 +320,24 @@ def _renumber(blocks: Sequence[Any], rules: Sequence[Rule], spans: Sequence[Span
             else:
                 n += 1
                 b.label = "%s %d" % (name, n)
+
+
+def _after_leading_quiet(blocks: Sequence[Any], minutes: float) -> Optional[int]:
+    """The block after the last quiet stretch of ``minutes`` or more before anyone speaks.
+
+    The fallback for a service whose opening was never named — its greeting was spoken
+    into the first sermon block, say. Music, then half an hour of silence, then the
+    service: the music was the band rehearsing, and numbering it made it Songs 1. Only
+    silence *before the first speaking block* counts, so a long pause mid-service can
+    never un-number the songs before it.
+    """
+    found: Optional[int] = None
+    for i, b in enumerate(blocks):
+        if b.kind == SPEECH:
+            break
+        if b.kind == QUIET and b.minutes >= minutes:
+            found = i + 1
+    return found if found is not None and found < len(blocks) else None
 
 
 def _index_of(blocks: Sequence[Any], label: str, spans: Sequence[Span]) -> Optional[int]:

@@ -290,3 +290,51 @@ class TestOrdinalRestart:
         blocks, _ = blocks_for("M" * 5 + "S" * 12 + "M" * 5)
         apply_rules(blocks, shipped_rules())
         assert [b.label for b in blocks if b.kind == MUSIC] == ["Songs 1", "Songs 2"]
+
+
+class TestRehearsalGap:
+    """No Opening named: a long silence before anyone speaks marks where the service starts."""
+
+    SPEC = "M" * 6 + "_" * 26 + "M" * 5 + "S" * 30 + "M" * 7 + "S" * 12
+
+    def rules(self, gap):
+        return parse_rules({"phases": [
+            {"name": "Sermon", "number": True, "match": {"kind": "S", "min_minutes": 8}},
+            {"name": "Opening", "match": {"kind": "S", "before_first": ["Sermon", "Opening"], "max_minutes": 5}},
+            {"name": "Songs", "number": True, "number_from": "Opening",
+             "number_after_quiet_minutes": gap, "match": {"kind": "M", "min_minutes": 3}},
+            {"name": "Music", "match": {"kind": "M"}},
+        ]})
+
+    def test_music_before_a_long_silence_is_not_the_first_song(self):
+        # Shaped on a service where the greeting was spoken into the first sermon block:
+        # six minutes of band, twenty-six of an empty room, then the service.
+        blocks, _ = blocks_for(self.SPEC)
+        apply_rules(blocks, self.rules(10))
+        assert [b.label for b in blocks if b.kind == MUSIC] == ["Music", "Songs 1", "Songs 2"]
+
+    def test_without_the_option_the_count_starts_at_the_first_block(self):
+        blocks, _ = blocks_for(self.SPEC)
+        apply_rules(blocks, self.rules(None))
+        assert [b.label for b in blocks if b.kind == MUSIC] == ["Songs 1", "Songs 2", "Songs 3"]
+
+    def test_a_short_silence_is_not_a_rehearsal(self):
+        blocks, _ = blocks_for("M" * 6 + "_" * 4 + "M" * 5 + "S" * 30)
+        apply_rules(blocks, self.rules(10))
+        assert [b.label for b in blocks if b.kind == MUSIC] == ["Songs 1", "Songs 2"]
+
+    def test_silence_after_someone_speaks_never_counts(self):
+        # A long pause mid-service must not un-number the songs before it.
+        blocks, _ = blocks_for("M" * 6 + "S" * 12 + "_" * 20 + "M" * 5 + "S" * 12)
+        apply_rules(blocks, self.rules(10))
+        assert [b.label for b in blocks if b.kind == MUSIC] == ["Songs 1", "Songs 2"]
+
+    def test_a_named_opening_still_wins(self):
+        blocks, _ = blocks_for("M" * 6 + "_" * 26 + "M" * 5 + "S" * 3 + "M" * 4 + "S" * 12)
+        apply_rules(blocks, self.rules(10))
+        assert [b.label for b in blocks if b.kind == MUSIC] == ["Music", "Music", "Songs 1"]
+
+    def test_the_shipped_songs_rule_carries_it(self):
+        songs = [r for r in shipped_rules() if r.name == "Songs"][0]
+        assert songs.number_after_quiet_minutes == 10
+

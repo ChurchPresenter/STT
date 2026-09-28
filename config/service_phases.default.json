@@ -59,10 +59,11 @@
       "match": { "kind": "S" }
     },
     {
-      "_comment": "number_from restarts the count at the named phase, so music before the service opens — a band rehearsing to an empty room — is not counted as the first song set. Music before that point falls back to the plain 'Music' name below.",
+      "_comment": "number_from restarts the count at the named phase, so music before the service opens — a band rehearsing to an empty room — is not counted as the first song set. Music before that point falls back to the plain 'Music' name below. When no Opening is named, number_after_quiet_minutes restarts the count after the last silence at least that long before anyone speaks: music, a long quiet room, then the service.",
       "name": "Songs",
       "number": true,
       "number_from": "Opening",
+      "number_after_quiet_minutes": 10,
       "confidence": 0.7,
       "match": { "kind": "M", "min_minutes": 3 }
     },
