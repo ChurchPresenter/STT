@@ -1,6 +1,7 @@
 """What crash reports carry off the machine, and which ones never leave."""
 
 from stt.crash_reports import (
+    is_orphaned_spawn,
     is_websocket_handover,
     redact_home_paths,
     scrub_event,
@@ -26,6 +27,54 @@ def _handover_event(exc_type="ConnectionError", filename="engineio/async_drivers
         },
         "request": {"url": "http://127.0.0.1:8080/socket.io/", "method": "GET"},
     }
+
+
+def _spawn_event(exc_type="PermissionError", detach=True, sep="\\"):
+    """The event a Windows child sends when its server exited while it was starting:
+    spawn unpickles the child, which duplicates the parent's pipe handle out of a
+    process that is no longer there. Frame names as Sentry reported them."""
+    mp = f"multiprocessing{sep}"
+    frames = [
+        {"function": "<module>", "filename": "<string>"},
+        {"function": "spawn_main", "module": "multiprocessing.spawn", "filename": f"{mp}spawn.py"},
+        {"function": "_main", "module": "multiprocessing.spawn", "filename": f"{mp}spawn.py"},
+        {"function": "rebuild_pipe_connection", "module": "multiprocessing.connection",
+         "filename": f"{mp}connection.py"},
+    ]
+    if detach:
+        frames.append({"function": "detach", "filename": f"{mp}reduction.py"})
+    return {"exception": {"values": [{
+        "type": exc_type, "value": "[WinError 5] Access is denied",
+        "stacktrace": {"frames": frames},
+    }]}}
+
+
+def test_a_child_whose_server_already_exited_is_dropped():
+    assert is_orphaned_spawn(_spawn_event())
+    assert scrub_event(_spawn_event(), None) is None
+
+
+def test_the_orphaned_spawn_match_accepts_posix_separators():
+    assert is_orphaned_spawn(_spawn_event(sep="/"))
+
+
+def test_a_permission_error_outside_handle_duplication_is_kept():
+    assert not is_orphaned_spawn(_spawn_event(detach=False))
+    assert scrub_event(_spawn_event(detach=False), None) is not None
+
+
+def test_another_error_during_spawn_is_kept():
+    assert not is_orphaned_spawn(_spawn_event(exc_type="EOFError"))
+
+
+def test_a_permission_error_in_our_own_code_is_kept():
+    event = {"exception": {"values": [{
+        "type": "PermissionError", "value": "[WinError 5] Access is denied",
+        "stacktrace": {"frames": [{"function": "detach", "module": "stt.file_mover",
+                                   "filename": "stt/file_mover.py"}]},
+    }]}}
+    assert not is_orphaned_spawn(event)
+    assert not is_orphaned_spawn({})
 
 
 def test_websocket_upgrade_signal_is_dropped():

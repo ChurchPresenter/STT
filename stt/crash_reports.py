@@ -1,6 +1,6 @@
 """What leaves the machine in a crash report, and what never should.
 
-Three jobs, all running inside Sentry's ``before_send`` hook:
+Four jobs, all running inside Sentry's ``before_send`` hook:
 
 **Scrubbing.** The UI promises that no transcription content is sent. Request
 bodies carry transcript text (``/api/translate``), glossary and dictionary
@@ -29,6 +29,15 @@ an unhandled error. Every browser that opens the live-transcription page
 produces one. They are indistinguishable, by type alone, from a real
 ``ConnectionError`` in our own network code, so the match is anchored to the
 engineio frame that does the raising rather than to the exception type.
+
+**Dropping a child that outlived its parent's start.** A Windows
+multiprocessing child rebuilds its parent's pipe handles while it unpickles
+itself, by ``DuplicateHandle`` out of the parent process. If the server exited
+in that window (a restart, a stop) the call fails with ``[WinError 5] Access is
+denied`` and the child dies before any of our code runs. There is no parent
+left to serve and nothing to fix, but the child has already imported the
+server module, so Sentry is up and reports it as an unhandled crash. Anchored
+to spawn's bootstrap frame *and* the handle duplication, like the handover.
 
 Stdlib-only: events come in as the plain dicts Sentry hands to the hook.
 """
@@ -132,12 +141,40 @@ def is_websocket_handover(event: Dict[str, Any]) -> bool:
     return any(_frame_is_websocket_handover(f) for f in frames)
 
 
+def _frame_is(frame: Dict[str, Any], path: str, module: str, function: str) -> bool:
+    """True if ``frame`` is ``function`` in the stdlib file ``path``/``module``."""
+    if frame.get("function") != function:
+        return False
+    if (frame.get("module") or "") == module:
+        return True
+    return any((frame.get(k) or "").replace("\\", "/").endswith(path) for k in ("filename", "abs_path"))
+
+
+def is_orphaned_spawn(event: Dict[str, Any]) -> bool:
+    """True if ``event`` is a spawned child failing to reach a parent that has exited.
+
+    Needs a ``PermissionError`` raised from multiprocessing's handle duplication
+    (``reduction.detach``) while spawn is still bootstrapping the child
+    (``spawn._main``). The same error anywhere else is reported.
+    """
+    values = ((event.get("exception") or {}).get("values")) or ()
+    if not values:
+        return False
+    raised = values[-1]
+    if raised.get("type") != "PermissionError":
+        return False
+    frames = ((raised.get("stacktrace") or {}).get("frames")) or ()
+    in_spawn = any(_frame_is(f, "multiprocessing/spawn.py", "multiprocessing.spawn", "_main") for f in frames)
+    in_detach = any(_frame_is(f, "multiprocessing/reduction.py", "multiprocessing.reduction", "detach") for f in frames)
+    return in_spawn and in_detach
+
+
 def scrub_event(event: Dict[str, Any], hint: Any = None) -> Optional[Dict[str, Any]]:
     """Sentry ``before_send``/``before_send_transaction`` hook.
 
     Returns the event with user content removed, or ``None`` to drop it.
     """
-    if is_websocket_handover(event):
+    if is_websocket_handover(event) or is_orphaned_spawn(event):
         return None
 
     request = event.get("request")
