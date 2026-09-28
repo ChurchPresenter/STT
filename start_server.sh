@@ -38,9 +38,10 @@ fi
 
 # The config the server reads, and the port it binds, from stt/server_port.py — the
 # invoking user's under sudo, never root's (see restart_server.sh).
-DATA_DIR=$(PYTHONPATH="$SCRIPT_DIR" "$PYTHON_BIN" -m stt.server_port --data-dir 2>/dev/null)
+# -B: run as root, a helper must not leave root-owned __pycache__ in the checkout.
+DATA_DIR=$(PYTHONPATH="$SCRIPT_DIR" "$PYTHON_BIN" -B -m stt.server_port --data-dir 2>/dev/null)
 [ -n "$DATA_DIR" ] || DATA_DIR="${STT_DATA_DIR:-$HOME/.stt}"
-PORT=$(STT_DATA_DIR="$DATA_DIR" PYTHONPATH="$SCRIPT_DIR" "$PYTHON_BIN" -m stt.server_port 2>/dev/null || echo 8080)
+PORT=$(STT_DATA_DIR="$DATA_DIR" PYTHONPATH="$SCRIPT_DIR" "$PYTHON_BIN" -B -m stt.server_port 2>/dev/null || echo 8080)
 
 # Claim a port only once the server answers on it, rather than the one this script guessed.
 report_started() {
@@ -85,7 +86,7 @@ fi
 # feature, a start script that refuses to start degrades everything.
 # Set STT_SKIP_DEP_CHECK=1 to skip it.
 if [ -z "$STT_SKIP_DEP_CHECK" ] && [ -f "$VENV_PYTHON" ]; then
-    PYTHONPATH="$SCRIPT_DIR" "$VENV_PYTHON" -m stt.optional_deps --repo-dir "$SCRIPT_DIR" --data-dir "$DATA_DIR" 2>&1
+    PYTHONPATH="$SCRIPT_DIR" "$VENV_PYTHON" -B -m stt.optional_deps --repo-dir "$SCRIPT_DIR" --data-dir "$DATA_DIR" 2>&1
 fi
 
 OS=$(uname -s)

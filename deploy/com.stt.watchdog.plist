@@ -39,10 +39,14 @@
         <string>1</string>
     </dict>
 
+    <!-- LOG_DIR is the data dir's logs/ (install.sh substitutes and creates it). Not
+         INSTALL_DIR/logs, which a fresh clone does not have, so launchd could not open
+         the file and never started the job. And not watchdog.log, which the watchdog
+         writes itself: stdout there doubled every line. -->
     <key>StandardOutPath</key>
-    <string>INSTALL_DIR/logs/watchdog.log</string>
+    <string>LOG_DIR/watchdog.stdout.log</string>
 
     <key>StandardErrorPath</key>
-    <string>INSTALL_DIR/logs/watchdog.log</string>
+    <string>LOG_DIR/watchdog.stdout.log</string>
 </dict>
 </plist>

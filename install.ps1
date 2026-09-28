@@ -319,7 +319,10 @@ function Setup-TaskScheduler {
         -WorkingDirectory $INSTALL_DIR
 
     $taskTrigger = New-ScheduledTaskTrigger -AtLogOn
+    # ExecutionTimeLimit zero = no limit. The default is 72 hours, after which Task
+    # Scheduler kills the task: a server left running over a long weekend just stopped.
     $taskSettings = New-ScheduledTaskSettingsSet `
+        -ExecutionTimeLimit ([TimeSpan]::Zero) `
         -AllowStartIfOnBatteries `
         -DontStopIfGoingOnBatteries `
         -RestartCount 3 `

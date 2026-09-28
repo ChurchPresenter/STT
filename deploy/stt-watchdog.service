@@ -4,7 +4,12 @@ After=network.target
 
 [Service]
 Type=simple
-User=root
+# The user who owns the checkout, not root: a root service leaves root-owned files in
+# the checkout and ~/.stt that the in-app updater, running as that user, cannot touch.
+# The capability is what root was for: binding port 80.
+User=ai
+Group=ai
+AmbientCapabilities=CAP_NET_BIND_SERVICE
 
 # ── Compiled binary install ────────────────────────────────────────────────
 # ExecStart=/opt/STT/STT-Watchdog --headless

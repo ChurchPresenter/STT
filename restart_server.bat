@@ -69,10 +69,12 @@ for /f "delims=" %%p in ('"!PYTHON_BIN!" -m stt.server_port 2^>nul') do set "POR
 if not defined PORT set "PORT=8080"
 
 REM ─── Verify started ───────────────────────────────────────────────
-timeout /t 3 /nobreak >nul
-tasklist /FI "IMAGENAME eq python.exe" /FO CSV 2>nul | findstr /I "python" >nul 2>&1
-if %errorlevel% equ 0 (
+REM Success means something answers on the port. The old check passed whenever any
+REM python.exe was running at all, so it reported success for a server that had died.
+set "ANSWERED=0"
+for /f %%r in ('powershell -NoProfile -Command "for ($i = 0; $i -lt 30; $i++) { try { $c = New-Object Net.Sockets.TcpClient; $c.Connect('127.0.0.1', !PORT!); $c.Close(); 'yes'; exit } catch { Start-Sleep -Seconds 1 } }; 'no'" 2^>nul') do if "%%r"=="yes" set "ANSWERED=1"
+if "!ANSWERED!"=="1" (
     echo [RESTART] Server started successfully on port !PORT!.
 ) else (
-    echo [RESTART] WARNING: Server may not have started. Check for errors.
+    echo [RESTART] WARNING: nothing answered on port !PORT! after 30s. Check for errors.
 )

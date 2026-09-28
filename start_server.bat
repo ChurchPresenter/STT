@@ -11,9 +11,12 @@ git rev-parse --git-dir >nul 2>&1 && (
     for /f %%b in ('git rev-list --count HEAD..@{u} 2^>nul') do if not "%%b"=="0" echo [GIT] Update available: %%b commit^(s^) behind -- applied on startup
 )
 
-REM Check if already running
-tasklist /FI "IMAGENAME eq python.exe" /FO CSV 2>nul | findstr /I "speech_to_text" >nul 2>&1
-if %errorlevel% equ 0 (
+REM Check if already running. tasklist never shows command lines, so the old
+REM `tasklist | findstr speech_to_text` could not match and a second server was started
+REM to fight the first for the port. Same command-line lookup stop_server.bat uses.
+set "RUNNING=0"
+for /f %%c in ('powershell -NoProfile -Command "@(Get-CimInstance Win32_Process ^| Where-Object { $_.Name -eq 'python.exe' -and $_.CommandLine -like '*speech_to_text*' }).Count" 2^>nul') do set "RUNNING=%%c"
+if not "%RUNNING%"=="0" (
     echo [WARNING] Server is already running.
     echo Use restart_server.bat to restart or stop_server.bat to stop.
     pause

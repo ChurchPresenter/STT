@@ -502,7 +502,12 @@ After=network.target
 
 [Service]
 Type=simple
-User=root
+# The installing user, not root: a root service writes root-owned files into this
+# user's checkout and ~/.stt, after which the in-app updater (running as the user)
+# cannot touch them. The capability is the one thing root was for: binding port 80.
+User=$USER
+Group=$(id -gn)
+AmbientCapabilities=CAP_NET_BIND_SERVICE
 WorkingDirectory=$INSTALL_DIR
 Environment="PYTHONUNBUFFERED=1"
 Environment="HOME=$HOME"
@@ -562,8 +567,11 @@ setup_watchdog_launchd() {
 
     mkdir -p "$HOME/Library/LaunchAgents"
 
-    # Substitute INSTALL_DIR placeholder in the plist template
-    sed "s|INSTALL_DIR|$INSTALL_DIR|g" "$PLIST_SRC" > "$PLIST_DST"
+    # Substitute the plist template's placeholders. launchd will not create the log
+    # directory, and a job whose StandardOutPath cannot be opened never starts.
+    local LOG_DIR="$HOME/.stt/logs"
+    mkdir -p "$LOG_DIR"
+    sed -e "s|INSTALL_DIR|$INSTALL_DIR|g" -e "s|LOG_DIR|$LOG_DIR|g" "$PLIST_SRC" > "$PLIST_DST"
 
     # Retire the old bare-server LaunchAgent so two supervisors don't both start
     # a server. Unloading alone isn't enough — the plist auto-loads again at the
@@ -583,8 +591,8 @@ setup_watchdog_launchd() {
     print_status "  launchctl start $PLIST_LABEL   - Start watchdog + STT"
     print_status "  launchctl stop $PLIST_LABEL    - Stop watchdog + STT"
     print_status "  launchctl unload $PLIST_DST    - Remove watchdog service"
-    print_status "  tail -f $INSTALL_DIR/logs/watchdog.log  - Watchdog log"
-    print_status "  tail -f $INSTALL_DIR/logs/stt.log       - STT app log"
+    print_status "  tail -f $LOG_DIR/watchdog.log  - Watchdog log"
+    print_status "  tail -f $LOG_DIR/stt.log       - STT app log"
 }
 
 setup_watchdog_systemd() {
@@ -609,7 +617,12 @@ After=network.target
 
 [Service]
 Type=simple
-User=root
+# The installing user, not root: a root service writes root-owned files into this
+# user's checkout and ~/.stt, after which the in-app updater (running as the user)
+# cannot touch them. The capability is the one thing root was for: binding port 80.
+User=$USER
+Group=$(id -gn)
+AmbientCapabilities=CAP_NET_BIND_SERVICE
 WorkingDirectory=$INSTALL_DIR
 Environment="PYTHONUNBUFFERED=1"
 Environment="HOME=$HOME"

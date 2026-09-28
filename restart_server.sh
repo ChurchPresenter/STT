@@ -42,9 +42,10 @@ PYTHON_BIN=$([ -f "$VENV_PYTHON" ] && echo "$VENV_PYTHON" || echo "python3")
 # The config the server reads, and the port it binds. Both come from stt/server_port.py:
 # this script must be root on Linux, so ~ here is /root, and reading ~/.stt reported (and
 # port-killed) 8080 on a box whose server, running as the invoking user, serves port 80.
-DATA_DIR=$(PYTHONPATH="$SCRIPT_DIR" "$PYTHON_BIN" -m stt.server_port --data-dir 2>/dev/null)
+# -B: run as root, a helper must not leave root-owned __pycache__ in the checkout.
+DATA_DIR=$(PYTHONPATH="$SCRIPT_DIR" "$PYTHON_BIN" -B -m stt.server_port --data-dir 2>/dev/null)
 [ -n "$DATA_DIR" ] || DATA_DIR="${STT_DATA_DIR:-$HOME/.stt}"
-PORT=$(STT_DATA_DIR="$DATA_DIR" PYTHONPATH="$SCRIPT_DIR" "$PYTHON_BIN" -m stt.server_port 2>/dev/null || echo 8080)
+PORT=$(STT_DATA_DIR="$DATA_DIR" PYTHONPATH="$SCRIPT_DIR" "$PYTHON_BIN" -B -m stt.server_port 2>/dev/null || echo 8080)
 
 # A server run as root writes root-owned files into the invoking user's data dir, and the
 # next non-root start cannot rewrite its own config. Hand them back once it has stopped.
@@ -85,7 +86,7 @@ report_started() {
 # feature, a start script that refuses to start degrades everything.
 # Set STT_SKIP_DEP_CHECK=1 to skip it.
 if [ -z "$STT_SKIP_DEP_CHECK" ] && [ -f "$VENV_PYTHON" ]; then
-    PYTHONPATH="$SCRIPT_DIR" "$VENV_PYTHON" -m stt.optional_deps --repo-dir "$SCRIPT_DIR" --data-dir "$DATA_DIR" 2>&1
+    PYTHONPATH="$SCRIPT_DIR" "$VENV_PYTHON" -B -m stt.optional_deps --repo-dir "$SCRIPT_DIR" --data-dir "$DATA_DIR" 2>&1
 fi
 
 # ─── Fast path: launchd KeepAlive supervisor (macOS) ────────────────

@@ -28,6 +28,11 @@ def read(name):
     return (REPO / name).read_text(encoding="utf-8")
 
 
+def code_lines(name):
+    """The executable lines of a .bat: comments may name what was removed and why."""
+    return [ln for ln in read(name).splitlines() if not ln.strip().lower().startswith("rem")]
+
+
 LAUNCHERS = ["start_server.bat", "restart_server.bat", "start_server.sh",
              "restart_server.sh", "stop_server.sh"]
 
@@ -175,3 +180,80 @@ class TestInstallShRefusesIntelMacs:
     def test_the_message_names_the_supported_hardware(self):
         body = read("install.sh")
         assert "Apple Silicon Mac (M1 or newer)" in body
+
+
+class TestRootNeverOwnsTheCheckout:
+    """A root-run update or service leaves root-owned files the user's updater cannot touch."""
+
+    def test_update_pulls_and_syncs_as_the_checkout_owner(self):
+        body = read("update_server.sh")
+        assert "as_owner git -C" in body
+        assert 'as_owner "$uv_bin" pip install' in body
+        assert 'sudo -u "$CHECKOUT_OWNER"' in body
+
+    @pytest.mark.parametrize("name", ["start_server.sh", "restart_server.sh", "stop_server.sh"])
+    def test_root_run_helpers_write_no_bytecode(self, name):
+        body = read(name)
+        helpers = [ln for ln in body.splitlines() if " -m stt." in ln and not ln.lstrip().startswith("#")]
+        assert helpers and all(" -B -m stt." in ln for ln in helpers), helpers
+
+    @pytest.mark.parametrize("name", ["install.sh", "deploy/stt-watchdog.service"])
+    def test_services_run_as_a_user_with_the_bind_capability(self, name):
+        body = read(name)
+        assert "User=root" not in body
+        assert "AmbientCapabilities=CAP_NET_BIND_SERVICE" in body
+
+
+class TestWindowsLaunchers:
+    def test_update_runs_from_a_copy(self):
+        # cmd reads a .bat by byte offset; git pull rewriting it mid-run executes garbage.
+        code = code_lines("update_server.bat")
+        first_copy = next(i for i, ln in enumerate(code) if "--from-copy" in ln)
+        first_pull = next(i for i, ln in enumerate(code) if ln.strip().startswith("git pull"))
+        assert first_copy < first_pull
+
+    def test_start_detects_a_running_server_by_command_line(self):
+        code = code_lines("start_server.bat")
+        assert not any("tasklist" in ln for ln in code)
+        assert any("CommandLine -like '*speech_to_text*'" in ln for ln in code)
+
+    def test_restart_success_means_the_port_answers(self):
+        body = read("restart_server.bat")
+        verify = body.split("Verify started")[1]
+        assert "TcpClient" in verify and "findstr /I \"python\"" not in verify
+
+    def test_watchdog_bat_expands_python_at_run_time(self):
+        body = read("start_watchdog.bat")
+        assert "EnableDelayedExpansion" in body
+        assert '"!PYTHON_BIN!"' in body and '"%PYTHON_BIN%"' not in body
+
+    def test_scheduled_task_has_no_time_limit(self):
+        # The default ExecutionTimeLimit is 72h: the server was killed after three days.
+        assert "-ExecutionTimeLimit ([TimeSpan]::Zero)" in read("install.ps1")
+
+
+class TestWatchdogLogs:
+    """The watchdog writes watchdog.log itself, in ~/.stt/logs, in every mode."""
+
+    @pytest.mark.parametrize("name", ["start_watchdog.sh", "start_watchdog.bat", "start_watchdog.ps1"])
+    def test_logs_are_pointed_at_the_data_dir(self, name):
+        body = read(name)
+        assert ".stt" in body
+        assert "$SCRIPT_DIR/logs" not in body and "%SCRIPT_DIR%logs" not in body
+        assert "Join-Path $ScriptDir \"logs\"" not in body
+
+    def test_stdout_does_not_duplicate_the_log_file(self):
+        body = read("start_watchdog.sh")
+        assert '>> "$LOG_DIR/watchdog.log"' not in body
+        assert "watchdog.stdout.log" in body
+
+    def test_double_start_check_does_not_need_nc(self):
+        body = read("start_watchdog.sh")
+        assert "nc -z" not in body and "connect_ex(('127.0.0.1',57337))" in body
+
+    def test_plist_logs_to_a_directory_the_installer_creates(self):
+        plist = read("deploy/com.stt.watchdog.plist")
+        assert "INSTALL_DIR/logs" not in plist.split("-->")[-1]
+        assert "LOG_DIR/watchdog.stdout.log" in plist
+        install = read("install.sh")
+        assert 'mkdir -p "$LOG_DIR"' in install and 's|LOG_DIR|$LOG_DIR|g' in install

@@ -24,9 +24,10 @@ PYTHON_BIN=$([ -f "$VENV_PYTHON" ] && echo "$VENV_PYTHON" || echo "python3")
 # The config the server reads, and the port it binds, from stt/server_port.py. This
 # script must be root on Linux, so ~ here is /root: reading ~/.stt killed port 8080 on a
 # box whose server, running as the invoking user, serves port 80.
-DATA_DIR=$(PYTHONPATH="$SCRIPT_DIR" "$PYTHON_BIN" -m stt.server_port --data-dir 2>/dev/null)
+# -B: run as root, a helper must not leave root-owned __pycache__ in the checkout.
+DATA_DIR=$(PYTHONPATH="$SCRIPT_DIR" "$PYTHON_BIN" -B -m stt.server_port --data-dir 2>/dev/null)
 [ -n "$DATA_DIR" ] || DATA_DIR="${STT_DATA_DIR:-$HOME/.stt}"
-PORT=$(STT_DATA_DIR="$DATA_DIR" PYTHONPATH="$SCRIPT_DIR" "$PYTHON_BIN" -m stt.server_port 2>/dev/null || echo 8080)
+PORT=$(STT_DATA_DIR="$DATA_DIR" PYTHONPATH="$SCRIPT_DIR" "$PYTHON_BIN" -B -m stt.server_port 2>/dev/null || echo 8080)
 
 # ─── Stop managed services ──────────────────────────────────────────
 if [ "$OS" = "Linux" ]; then

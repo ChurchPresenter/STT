@@ -19,9 +19,23 @@ RED='\033[0;31m'
 YELLOW='\033[1;33m'
 NC='\033[0m'
 
+# On systemd Linux this runs under sudo (restart_server.sh must be root), and a root
+# `git pull` leaves root-owned refs and objects in the checkout. The in-process
+# auto-updater runs as the checkout's owner, and once root has created a directory under
+# .git/objects it can no longer add any object that hashes into it. .62 had 1,831
+# root-owned files this way. So git and uv run as whoever owns the checkout.
+CHECKOUT_OWNER=$(stat -c %U "$SCRIPT_DIR/.git" 2>/dev/null || stat -f %Su "$SCRIPT_DIR/.git" 2>/dev/null)
+as_owner() {
+    if [ "$EUID" -eq 0 ] && [ -n "$CHECKOUT_OWNER" ] && [ "$CHECKOUT_OWNER" != "root" ]; then
+        sudo -u "$CHECKOUT_OWNER" -H "$@"
+    else
+        "$@"
+    fi
+}
+
 if [ "$STT_UPDATE_PHASE" != "post" ]; then
     echo "[UPDATE] Pulling latest code (git pull --ff-only)..."
-    if ! git -C "$SCRIPT_DIR" pull --ff-only; then
+    if ! as_owner git -C "$SCRIPT_DIR" pull --ff-only; then
         echo -e "${RED}[ERROR]${NC} git pull --ff-only failed."
         echo "  The working tree is probably dirty or the branch has diverged/unpushed"
         echo "  commits. Commit/stash your changes (or push) and try again — nothing was"
@@ -63,6 +77,12 @@ sync_deps() {
     local uv_bin
     uv_bin="$(command -v uv || true)"
     [ -z "$uv_bin" ] && [ -x "$HOME/.local/bin/uv" ] && uv_bin="$HOME/.local/bin/uv"
+    # Under sudo $HOME is root's; install.sh put uv in the owner's ~/.local/bin.
+    if [ -z "$uv_bin" ] && [ -n "$CHECKOUT_OWNER" ]; then
+        local owner_uv
+        owner_uv="$(python3 -c "import pwd,sys; print(pwd.getpwnam(sys.argv[1]).pw_dir)" "$CHECKOUT_OWNER" 2>/dev/null)/.local/bin/uv"
+        [ -x "$owner_uv" ] && uv_bin="$owner_uv"
+    fi
     [ -z "$uv_bin" ] && [ -x "$SCRIPT_DIR/.venv/bin/uv" ] && uv_bin="$SCRIPT_DIR/.venv/bin/uv"
     if [ -z "$uv_bin" ]; then
         echo -e "${YELLOW}[UPDATE]${NC} uv not found; skipping dependency sync (run install.sh to update deps)."
@@ -70,12 +90,13 @@ sync_deps() {
     fi
 
     echo "[UPDATE] requirements.txt changed — syncing dependencies..."
-    if "$uv_bin" pip install --python "$SCRIPT_DIR/.venv/bin/python3" -r "$req"; then
+    if as_owner "$uv_bin" pip install --python "$SCRIPT_DIR/.venv/bin/python3" -r "$req"; then
         # Temp file + mv, not a direct redirect: a marker left behind by a
         # sudo-run install is owned by root and `>` fails with EACCES, which
         # would re-sync every deps on every update forever. mv only needs the
         # directory to be writable. Matches stt/self_update.py:_write_marker.
         if echo "$sha" > "$marker.tmp.$$" 2>/dev/null && mv -f "$marker.tmp.$$" "$marker" 2>/dev/null; then
+            [ "$EUID" -eq 0 ] && [ -n "$CHECKOUT_OWNER" ] && chown "$CHECKOUT_OWNER" "$marker" 2>/dev/null
             echo -e "${GREEN}[UPDATE]${NC} Dependencies synced."
         else
             rm -f "$marker.tmp.$$" 2>/dev/null || true
