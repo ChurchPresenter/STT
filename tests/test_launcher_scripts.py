@@ -48,9 +48,52 @@ class TestPortComesFromTheDataDir:
         assert "open('config/config.json')" not in read(name)
 
     @pytest.mark.parametrize("name", LAUNCHERS)
-    def test_the_port_is_still_read_from_the_right_key(self, name):
-        # It was never the key that was wrong, only the path — don't "fix" that too.
-        assert "'web_server'" in read(name)
+    def test_the_port_comes_from_the_shared_module(self, name):
+        # stt/server_port.py reads web_server.port; a private one-liner per script is how
+        # five copies each got the sudo case wrong in the same way.
+        assert "-m stt.server_port" in read(name)
+
+    @pytest.mark.parametrize("name", LAUNCHERS)
+    def test_home_is_not_guessed_inline(self, name):
+        # expanduser('~') under sudo is /root: a box serving port 80 as its own user was
+        # reported, and port-killed, as 8080.
+        assert "expanduser('~')" not in read(name)
+
+
+class TestSudo:
+    """The Linux scripts run as root; the server they manage usually does not."""
+
+    def test_a_sudo_started_server_keeps_the_users_data_dir(self):
+        body = read("start_server.sh")
+        sudo_lines = [ln for ln in body.splitlines() if ln.strip().startswith("sudo ") and "speech_to_text.py" in ln]
+        assert sudo_lines and all('STT_DATA_DIR="$DATA_DIR"' in ln for ln in sudo_lines)
+
+    def test_a_root_fallback_start_keeps_the_users_data_dir(self):
+        starts = [ln for ln in read("restart_server.sh").splitlines()
+                  if "nohup" in ln and "speech_to_text.py" in ln]
+        assert starts and all('STT_DATA_DIR="$DATA_DIR"' in ln for ln in starts)
+
+    @pytest.mark.parametrize("name", ["restart_server.sh", "stop_server.sh"])
+    def test_root_owned_files_are_handed_back(self, name):
+        body = read(name)
+        assert 'chown -R "$SUDO_USER' in body
+        # Only inside the invoking user's home — never a chown of an arbitrary override.
+        assert "pw_dir" in body
+
+    @pytest.mark.parametrize("name", ["start_server.sh", "restart_server.sh"])
+    def test_the_dependency_check_reads_the_same_config(self, name):
+        assert '--data-dir "$DATA_DIR"' in read(name)
+
+
+class TestStartedMessage:
+    @pytest.mark.parametrize("name", ["start_server.sh", "restart_server.sh"])
+    def test_the_port_is_claimed_only_once_it_answers(self, name):
+        body = read(name)
+        ok = [ln for ln in body.splitlines() if "[OK]" in ln and "Server started" in ln]
+        # The only [OK] lines left are the two inside report_started, after its probe.
+        assert len(ok) == 2, ok
+        probe = body.index('curl -s -o /dev/null --max-time 2 "http://127.0.0.1:$PORT/"')
+        assert all(body.index(ln) > probe or "expected on port" in ln for ln in ok)
 
 
 class TestStopServerBat:

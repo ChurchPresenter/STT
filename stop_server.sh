@@ -19,13 +19,14 @@ fi
 
 echo "Stopping server..."
 
-# Read port from config.json
 VENV_PYTHON="$SCRIPT_DIR/.venv/bin/python3"
 PYTHON_BIN=$([ -f "$VENV_PYTHON" ] && echo "$VENV_PYTHON" || echo "python3")
-# The live config lives in the data dir (STT_DATA_DIR, else ~/.stt), not in the
-# checkout — config/ here holds only the shipped template, so reading it always threw
-# and always fell back to 8080 regardless of the port the server is bound to.
-PORT=$("$PYTHON_BIN" -c "import os,json; d=os.environ.get('STT_DATA_DIR') or os.path.join(os.path.expanduser('~'),'.stt'); print(json.load(open(os.path.join(d,'config','config.json'))).get('web_server',{}).get('port',8080))" 2>/dev/null || echo 8080)
+# The config the server reads, and the port it binds, from stt/server_port.py. This
+# script must be root on Linux, so ~ here is /root: reading ~/.stt killed port 8080 on a
+# box whose server, running as the invoking user, serves port 80.
+DATA_DIR=$(PYTHONPATH="$SCRIPT_DIR" "$PYTHON_BIN" -m stt.server_port --data-dir 2>/dev/null)
+[ -n "$DATA_DIR" ] || DATA_DIR="${STT_DATA_DIR:-$HOME/.stt}"
+PORT=$(STT_DATA_DIR="$DATA_DIR" PYTHONPATH="$SCRIPT_DIR" "$PYTHON_BIN" -m stt.server_port 2>/dev/null || echo 8080)
 
 # ─── Stop managed services ──────────────────────────────────────────
 if [ "$OS" = "Linux" ]; then
@@ -63,6 +64,16 @@ elif [ "$OS" = "Darwin" ]; then
     pkill -TERM -f "ffmpeg.*avfoundation" 2>/dev/null
     sleep 1
     pkill -9 -f "ffmpeg.*avfoundation" 2>/dev/null
+fi
+
+# ─── Hand the data dir back ─────────────────────────────────────────
+# A server run as root leaves root-owned files in the invoking user's data dir, and the
+# next non-root start cannot rewrite its own config.
+if [ "$EUID" -eq 0 ] && [ -n "$SUDO_USER" ] && [ "$SUDO_USER" != "root" ] && [ -d "$DATA_DIR" ]; then
+    USER_HOME=$("$PYTHON_BIN" -c "import pwd,sys; print(pwd.getpwnam(sys.argv[1]).pw_dir)" "$SUDO_USER" 2>/dev/null)
+    case "$DATA_DIR" in
+        "$USER_HOME"/*) [ -n "$USER_HOME" ] && chown -R "$SUDO_USER:$(id -gn "$SUDO_USER")" "$DATA_DIR" 2>/dev/null ;;
+    esac
 fi
 
 # ─── Verify ──────────────────────────────────────────────────────────

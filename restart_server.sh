@@ -39,11 +39,40 @@ fi
 VENV_PYTHON="$SCRIPT_DIR/.venv/bin/python3"
 PYTHON_BIN=$([ -f "$VENV_PYTHON" ] && echo "$VENV_PYTHON" || echo "python3")
 
-# Read port from config.json
-# The live config lives in the data dir (STT_DATA_DIR, else ~/.stt), not in the
-# checkout — config/ here holds only the shipped template, so reading it always threw
-# and always fell back to 8080 regardless of the port the server is bound to.
-PORT=$("$PYTHON_BIN" -c "import os,json; d=os.environ.get('STT_DATA_DIR') or os.path.join(os.path.expanduser('~'),'.stt'); print(json.load(open(os.path.join(d,'config','config.json'))).get('web_server',{}).get('port',8080))" 2>/dev/null || echo 8080)
+# The config the server reads, and the port it binds. Both come from stt/server_port.py:
+# this script must be root on Linux, so ~ here is /root, and reading ~/.stt reported (and
+# port-killed) 8080 on a box whose server, running as the invoking user, serves port 80.
+DATA_DIR=$(PYTHONPATH="$SCRIPT_DIR" "$PYTHON_BIN" -m stt.server_port --data-dir 2>/dev/null)
+[ -n "$DATA_DIR" ] || DATA_DIR="${STT_DATA_DIR:-$HOME/.stt}"
+PORT=$(STT_DATA_DIR="$DATA_DIR" PYTHONPATH="$SCRIPT_DIR" "$PYTHON_BIN" -m stt.server_port 2>/dev/null || echo 8080)
+
+# A server run as root writes root-owned files into the invoking user's data dir, and the
+# next non-root start cannot rewrite its own config. Hand them back once it has stopped.
+return_data_dir() {
+    [ "$EUID" -eq 0 ] && [ -n "$SUDO_USER" ] && [ "$SUDO_USER" != "root" ] && [ -d "$DATA_DIR" ] || return 0
+    local user_home
+    user_home=$("$PYTHON_BIN" -c "import pwd,sys; print(pwd.getpwnam(sys.argv[1]).pw_dir)" "$SUDO_USER" 2>/dev/null) || return 0
+    case "$DATA_DIR" in
+        "$user_home"/*) chown -R "$SUDO_USER:$(id -gn "$SUDO_USER")" "$DATA_DIR" 2>/dev/null ;;
+    esac
+}
+
+# Claim a port only once the server answers on it. Every branch below used to print the
+# port it had guessed, whether or not anything was listening there.
+report_started() {
+    if command -v curl >/dev/null 2>&1; then
+        for _ in $(seq 1 30); do
+            if curl -s -o /dev/null --max-time 2 "http://127.0.0.1:$PORT/" 2>/dev/null; then
+                echo -e "${GREEN}[OK]${NC} Server started ($1) on port $PORT"
+                return 0
+            fi
+            sleep 1
+        done
+        echo -e "${YELLOW}[WARNING]${NC} Server started ($1), but nothing answered on port $PORT yet — check the log"
+        return 0
+    fi
+    echo -e "${GREEN}[OK]${NC} Server started ($1); expected on port $PORT"
+}
 
 # ─── Optional dependency preflight ──────────────────────────────────
 # requirements.txt deliberately omits a few large, rarely-used packages (see the
@@ -56,7 +85,7 @@ PORT=$("$PYTHON_BIN" -c "import os,json; d=os.environ.get('STT_DATA_DIR') or os.
 # feature, a start script that refuses to start degrades everything.
 # Set STT_SKIP_DEP_CHECK=1 to skip it.
 if [ -z "$STT_SKIP_DEP_CHECK" ] && [ -f "$VENV_PYTHON" ]; then
-    PYTHONPATH="$SCRIPT_DIR" "$VENV_PYTHON" -m stt.optional_deps --repo-dir "$SCRIPT_DIR" 2>&1
+    PYTHONPATH="$SCRIPT_DIR" "$VENV_PYTHON" -m stt.optional_deps --repo-dir "$SCRIPT_DIR" --data-dir "$DATA_DIR" 2>&1
 fi
 
 # ─── Fast path: launchd KeepAlive supervisor (macOS) ────────────────
@@ -73,7 +102,7 @@ if [ "$OS" = "Darwin" ] && { [ -f /Library/LaunchDaemons/com.stt.server.plist ] 
     sleep 4
     for _ in $(seq 1 15); do
         if pgrep -f "speech_to_text\.py" >/dev/null 2>&1; then
-            echo -e "${GREEN}[OK]${NC} Server respawned by launchd (port $PORT)"
+            report_started "launchd respawn"
             exit 0
         fi
         sleep 1
@@ -134,6 +163,7 @@ while pgrep -f "speech_to_text\.py" > /dev/null 2>&1; do
     fi
 done
 echo "All server processes stopped"
+return_data_dir
 sleep 2
 
 # ─── Start server ───────────────────────────────────────────────────
@@ -145,7 +175,7 @@ if [ "$OS" = "Linux" ]; then
             systemctl start "$service_name"
             sleep 3
             if systemctl is-active --quiet "$service_name" 2>/dev/null; then
-                echo -e "${GREEN}[OK]${NC} Server started ($service_name) on port $PORT"
+                report_started "$service_name"
                 exit 0
             fi
         fi
@@ -156,7 +186,7 @@ elif [ "$OS" = "Darwin" ]; then
         echo "Starting via launchd..."
         launchctl start com.stt.server
         sleep 3
-        echo -e "${GREEN}[OK]${NC} Server started (launchd) on port $PORT"
+        report_started "launchd"
         exit 0
     fi
 fi
@@ -169,12 +199,14 @@ else
     PYTHON_BIN="python3"
 fi
 
-nohup "$PYTHON_BIN" "$SCRIPT_DIR/speech_to_text.py" > "$SCRIPT_DIR/server.log" 2>&1 &
+# STT_DATA_DIR: as root the server would otherwise read /root/.stt — a different config,
+# models and sessions from the ones this script just resolved.
+STT_DATA_DIR="$DATA_DIR" nohup "$PYTHON_BIN" "$SCRIPT_DIR/speech_to_text.py" > "$SCRIPT_DIR/server.log" 2>&1 &
 
 # ─── Verify ──────────────────────────────────────────────────────────
 sleep 3
 if pgrep -f "speech_to_text\.py" > /dev/null; then
-    echo -e "${GREEN}[OK]${NC} Server started successfully on port $PORT"
+    report_started "manual"
 else
     echo -e "${RED}[ERROR]${NC} Failed to start server. Check server.log or journalctl -u stt-server"
     exit 1

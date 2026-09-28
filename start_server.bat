@@ -37,7 +37,9 @@ REM Read the port from the live config, which lives in the data dir (STT_DATA_DI
 REM ~/.stt) — not in the checkout. config/ here holds only the shipped template, so the
 REM old lookup always threw and always printed 8080, whatever the server was bound to.
 set "PORT="
-for /f "delims=" %%p in ('"%PYTHON_BIN%" -c "import os,json;d=os.environ.get('STT_DATA_DIR') or os.path.join(os.path.expanduser('~'),'.stt');print(json.load(open(os.path.join(d,'config','config.json'))).get('web_server',{}).get('port',8080))" 2^>nul') do set "PORT=%%p"
+REM stt\server_port.py is the one answer every launcher and the watchdog share; run from
+REM the checkout (cd above), so -m finds the package without PYTHONPATH.
+for /f "delims=" %%p in ('"%PYTHON_BIN%" -m stt.server_port 2^>nul') do set "PORT=%%p"
 if not defined PORT set "PORT=8080"
 
 echo Open your browser to http://localhost:%PORT%

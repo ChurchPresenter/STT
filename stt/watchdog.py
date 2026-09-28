@@ -45,6 +45,7 @@ try:
     from stt import win_job as _win_job
     from stt.crash_reports import redact_home_paths, scrub_event
     from stt.wheel_policy import only_binary_args
+    from stt.server_port import DEFAULT_PORT
 except ImportError:  # pragma: no cover - depends on how the process was started
     # deploy/stt-watchdog.service and com.stt.watchdog.plist run this file as a
     # plain script, so sys.path[0] is stt/ and the package is not importable.
@@ -54,6 +55,7 @@ except ImportError:  # pragma: no cover - depends on how the process was started
     from stt import win_job as _win_job
     from stt.crash_reports import redact_home_paths, scrub_event
     from stt.wheel_policy import only_binary_args
+    from stt.server_port import DEFAULT_PORT
 
 try:
     import certifi
@@ -2041,7 +2043,7 @@ class AutoUpdater:
         stalled-start check moves it to "error" first."""
         try:
             cfg = load_config()
-            port = cfg.get("web_server", {}).get("port", 8080)
+            port = cfg.get("web_server", {}).get("port", DEFAULT_PORT)
             with urllib.request.urlopen(
                 f"http://127.0.0.1:{port}/api/transcription/status", timeout=2
             ) as r:
@@ -2849,7 +2851,7 @@ class GuiWindow:
 
     def _reload_config(self):
         cfg = load_config()
-        self._port_var.set(str(cfg.get("web_server", {}).get("port", 80)))
+        self._port_var.set(str(cfg.get("web_server", {}).get("port", DEFAULT_PORT)))
         self._pass_var.set(
             cfg.get("web_server", {})
                .get("password_auth", {})
@@ -2861,7 +2863,7 @@ class GuiWindow:
 
     def _poll(self):
         cfg = load_config()
-        port = cfg.get("web_server", {}).get("port", 8080)
+        port = cfg.get("web_server", {}).get("port", DEFAULT_PORT)
         # Is the web server actually serving yet?
         web_ok = False
         try:
@@ -2912,7 +2914,7 @@ class GuiWindow:
             try:
                 import urllib.request, json as _json
                 cfg = load_config()
-                port = cfg.get("web_server", {}).get("port", 8080)
+                port = cfg.get("web_server", {}).get("port", DEFAULT_PORT)
                 with urllib.request.urlopen(
                     f"http://127.0.0.1:{port}/api/transcription/status", timeout=1
                 ) as r:
@@ -2998,7 +3000,7 @@ class GuiWindow:
     def _on_toggle_transcription(self):
         import urllib.request, urllib.error
         cfg = load_config()
-        port = cfg.get("web_server", {}).get("port", 8080)
+        port = cfg.get("web_server", {}).get("port", DEFAULT_PORT)
         action = "stop" if self._transcription_running else "start"
         def _call():
             try:
@@ -3018,7 +3020,7 @@ class GuiWindow:
         if getattr(self, "_mic_fetching", False):
             return
         self._mic_fetching = True
-        port = load_config().get("web_server", {}).get("port", 8080)
+        port = load_config().get("web_server", {}).get("port", DEFAULT_PORT)
         def _work():
             labels, mapping, current = [], {}, "default"
             try:
@@ -3054,7 +3056,7 @@ class GuiWindow:
         """Save the picked mic via /api/config (sets the flag + hot-reloads)."""
         self._mic_var.set(label)
         device_id = self._mic_map.get(label, "default")
-        port = load_config().get("web_server", {}).get("port", 8080)
+        port = load_config().get("web_server", {}).get("port", DEFAULT_PORT)
         def _work():
             try:
                 import urllib.request, json as _json
@@ -3185,7 +3187,7 @@ class GuiWindow:
 
     def _on_open_browser(self, path="/"):
         cfg = load_config()
-        port = cfg.get("web_server", {}).get("port", 8080)
+        port = cfg.get("web_server", {}).get("port", DEFAULT_PORT)
         webbrowser.open(f"http://127.0.0.1:{port}{path}")
 
     def mainloop(self):
@@ -3660,7 +3662,7 @@ def main():
             gui.mainloop()
         except Exception as e:
             logging.warning(f"[MONITOR] GUI unavailable ({e}); opening browser instead.")
-            port = cfg.get("web_server", {}).get("port", 8080)
+            port = cfg.get("web_server", {}).get("port", DEFAULT_PORT)
             webbrowser.open(f"http://127.0.0.1:{port}")
         return
 
@@ -3679,7 +3681,7 @@ def main():
             gui.mainloop()
         except Exception:
             cfg = load_config()
-            port = cfg.get("web_server", {}).get("port", 8080)
+            port = cfg.get("web_server", {}).get("port", DEFAULT_PORT)
             webbrowser.open(f"http://127.0.0.1:{port}")
         return
 

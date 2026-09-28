@@ -79,6 +79,7 @@ for _mig_name in ("config.json", "custom_dictionary.json", "word_highlighting.js
 from stt import paths as _paths
 from stt.paths import safe_model_path  # noqa: F401
 from stt.coercion import coerce_bool, coerce_float, coerce_int
+from stt.server_port import DEFAULT_PORT as _DEFAULT_PORT
 from stt import pair_tokens as _pair_tokens_mod
 # How a dying worker process reports itself, and why excepthooks are chained
 # rather than replaced.
@@ -8695,7 +8696,7 @@ def _remote_heartbeat_loop():
             # to us and would have to guess port 80.
             _peer_request("POST", ep, "/api/translate/heartbeat",
                           json={"port": coerce_int(config.get("web_server", {}).get("port"),
-                                                   8080, lo=1, hi=65535)},
+                                                   _DEFAULT_PORT, lo=1, hi=65535)},
                           timeout=5)
         except Exception:
             pass  # best-effort; never let the heartbeat crash
@@ -10314,7 +10315,7 @@ def proxy_pair_request():
         # here means "not paired yet", not "our token went stale".
         r = _peer_request("POST", endpoint, "/api/translate/pair/request", self_heal=False,
                           json={"port": coerce_int(config.get("web_server", {}).get("port"),
-                                                   8080, lo=1, hi=65535)}, timeout=10)
+                                                   _DEFAULT_PORT, lo=1, hi=65535)}, timeout=10)
         try:
             data = r.json()
         except ValueError:
@@ -10341,7 +10342,7 @@ def proxy_pair_confirm():
         # can link back to us without waiting for a session to start.
         _body = dict(request.get_json() or {})
         _body.setdefault("port", coerce_int(config.get("web_server", {}).get("port"),
-                                            8080, lo=1, hi=65535))
+                                            _DEFAULT_PORT, lo=1, hi=65535))
         r = _peer_request("POST", endpoint, "/api/translate/pair/confirm", self_heal=False,
                           json=_body, timeout=10)
         try:
@@ -11529,7 +11530,7 @@ def tunnel_start():
     if not check_ip_whitelist():
         return jsonify({"success": False, "error": "Access Denied"}), 403
 
-    port = coerce_int(config.get("web_server", {}).get("port"), 8080, lo=1, hi=65535)
+    port = coerce_int(config.get("web_server", {}).get("port"), _DEFAULT_PORT, lo=1, hi=65535)
     tunnel = _get_tunnel()
 
     if tunnel.is_running():
@@ -23747,7 +23748,9 @@ def thread2_function():
         # Get web server config
         web_config = config.get("web_server", {})
         host = web_config.get("host", "0.0.0.0")
-        port = web_config.get("port", 80)
+        # _DEFAULT_PORT, not 80: config.default.json ships 8080 and load_config patches it
+        # in, so 80 here only ever disagreed with what the launch scripts reported.
+        port = web_config.get("port", _DEFAULT_PORT)
 
         print(f"Starting web server on {host}:{port}")
 

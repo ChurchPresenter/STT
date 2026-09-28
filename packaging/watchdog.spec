@@ -73,6 +73,8 @@ a = Analysis(
         "stt.wheel_policy",
         "stt.win_job",
         "stt.fd_limit",
+        "stt.server_port",
+        "stt.coercion",
     ],
     hookspath=[],
     hooksconfig={},

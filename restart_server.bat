@@ -63,7 +63,9 @@ start "STT Server" "!PYTHON_BIN!" speech_to_text.py
 REM ─── Read port from the live config in the data dir ─────────────────
 REM STT_DATA_DIR, else ~/.stt — the checkout's config/ holds only the template.
 set "PORT="
-for /f "delims=" %%p in ('"!PYTHON_BIN!" -c "import os,json;d=os.environ.get('STT_DATA_DIR') or os.path.join(os.path.expanduser('~'),'.stt');print(json.load(open(os.path.join(d,'config','config.json'))).get('web_server',{}).get('port',8080))" 2^>nul') do set "PORT=%%p"
+REM stt\server_port.py is the one answer every launcher and the watchdog share; run from
+REM the checkout (cd above), so -m finds the package without PYTHONPATH.
+for /f "delims=" %%p in ('"!PYTHON_BIN!" -m stt.server_port 2^>nul') do set "PORT=%%p"
 if not defined PORT set "PORT=8080"
 
 REM ─── Verify started ───────────────────────────────────────────────
