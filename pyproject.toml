@@ -45,6 +45,7 @@ module = [
     "stt.self_update",
     "stt.server_port",
     "stt.owner_exec",
+    "stt.server_restart",
     "stt.model_disk",
     "stt.model_files",
     "stt.model_catalog",

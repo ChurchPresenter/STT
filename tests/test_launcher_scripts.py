@@ -72,11 +72,14 @@ class TestSudo:
         body = read("start_server.sh")
         sudo_lines = [ln for ln in body.splitlines() if ln.strip().startswith("sudo ") and "speech_to_text.py" in ln]
         assert sudo_lines and all('STT_DATA_DIR="$DATA_DIR"' in ln for ln in sudo_lines)
+        # STT_DATA_DIR alone means "watchdog-managed" to the server, which would switch
+        # off its self-update and make Restart exit for a watchdog that is not there.
+        assert all("STT_MANAGED=0" in ln for ln in sudo_lines)
 
     def test_a_root_fallback_start_keeps_the_users_data_dir(self):
         starts = [ln for ln in read("restart_server.sh").splitlines()
                   if "nohup" in ln and "speech_to_text.py" in ln]
-        assert starts and all('STT_DATA_DIR="$DATA_DIR"' in ln for ln in starts)
+        assert starts and all('STT_DATA_DIR="$DATA_DIR"' in ln and "STT_MANAGED=0" in ln for ln in starts)
 
     @pytest.mark.parametrize("name", ["restart_server.sh", "stop_server.sh"])
     def test_root_owned_files_are_handed_back(self, name):

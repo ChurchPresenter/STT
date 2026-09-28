@@ -202,7 +202,7 @@ fi
 
 # STT_DATA_DIR: as root the server would otherwise read /root/.stt — a different config,
 # models and sessions from the ones this script just resolved.
-STT_DATA_DIR="$DATA_DIR" nohup "$PYTHON_BIN" "$SCRIPT_DIR/speech_to_text.py" > "$SCRIPT_DIR/server.log" 2>&1 &
+STT_DATA_DIR="$DATA_DIR" STT_MANAGED=0 nohup "$PYTHON_BIN" "$SCRIPT_DIR/speech_to_text.py" > "$SCRIPT_DIR/server.log" 2>&1 &
 
 # ─── Verify ──────────────────────────────────────────────────────────
 sleep 3

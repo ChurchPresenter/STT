@@ -90,6 +90,7 @@ from stt import paths as _paths
 from stt.paths import safe_model_path  # noqa: F401
 from stt.coercion import coerce_bool, coerce_float, coerce_int
 from stt.server_port import DEFAULT_PORT as _DEFAULT_PORT
+from stt import server_restart as _server_restart
 from stt import pair_tokens as _pair_tokens_mod
 # How a dying worker process reports itself, and why excepthooks are chained
 # rather than replaced.
@@ -11299,11 +11300,22 @@ def perform_server_restart():
     except Exception as e:
         print(f"[TUNNEL] Could not stop tunnel before restart: {e}")
 
+    # Under the watchdog, restarting is the watchdog's job: a restart script here would
+    # start a second, unmanaged server beside the one it respawns. Exit with the code
+    # that asks it to start us again at once (stt/server_restart.py).
+    if _is_watchdog_managed():
+        print(f"[RESTART] Managed by the watchdog; exiting {_server_restart.RESTART_EXIT_CODE} for it to restart us")
+        _terminate_child_processes()
+        sys.stdout.flush()
+        sys.stderr.flush()
+        os._exit(_server_restart.RESTART_EXIT_CODE)
+
+    # The scripts live in the checkout (BUNDLE_DIR), never the data dir: looking in
+    # APP_DIR is what made the Restart button stop the server and never start it.
+    script_dir = BUNDLE_DIR
     if sys.platform.startswith('win'):
-        # Windows: use restart_server.bat to cleanly stop and restart
-        script_dir = APP_DIR
-        restart_bat = os.path.join(script_dir, "restart_server.bat")
-        if os.path.exists(restart_bat):
+        restart_bat = _server_restart.restart_script(BUNDLE_DIR, windows=True)
+        if restart_bat:
             print("[RESTART] Calling restart_server.bat...")
             subprocess.Popen(
                 ["cmd.exe", "/c", restart_bat],
@@ -11313,10 +11325,12 @@ def perform_server_restart():
                 creationflags=subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW,
             )
         else:
-            # Fallback: spawn new process directly
+            # No script (a frozen build): start this same server again directly, by
+            # absolute path — argv[0] is relative to wherever it was first started.
             print("[RESTART] restart_server.bat not found, spawning directly...")
             subprocess.Popen(
-                [sys.executable, *sys.argv],
+                _server_restart.relaunch_argv(sys.executable, os.path.abspath(__file__),
+                                              sys.argv, frozen=_is_frozen),
                 cwd=script_dir,
                 creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,
             )
@@ -11359,10 +11373,9 @@ def perform_server_restart():
     # Not under systemd: prefer restart_server.sh, which fully replaces the
     # process tree. Under systemd we must NOT use it — it would spawn a server
     # systemd doesn't manage — so an in-place execv keeps the unit's PID lineage.
-    script_dir = APP_DIR
-    restart_script = os.path.join(script_dir, "restart_server.sh")
+    restart_script = _server_restart.restart_script(BUNDLE_DIR, windows=False)
 
-    if not under_systemd and os.path.exists(restart_script):
+    if not under_systemd and restart_script:
         print("[RESTART] Calling restart_server.sh...")
         subprocess.Popen(
             ["bash", restart_script],
@@ -11391,7 +11404,8 @@ def perform_server_restart():
         except Exception:
             maxfd = 65536
         os.closerange(3, maxfd)
-        os.execv(sys.executable, [sys.executable, *sys.argv])
+        os.execv(sys.executable, _server_restart.relaunch_argv(
+            sys.executable, os.path.abspath(__file__), sys.argv, frozen=_is_frozen))
 
 
 # =============================================================================
@@ -23925,7 +23939,7 @@ def _is_watchdog_managed():
     The watchdog sets STT_MANAGED=1 (and STT_DATA_DIR); either signals managed
     mode, so a direct-run git-pull doesn't double up with the watchdog's updates.
     """
-    return bool(os.environ.get("STT_MANAGED") or os.environ.get("STT_DATA_DIR"))
+    return _server_restart.is_watchdog_managed(os.environ)
 
 
 def _self_update_enabled():

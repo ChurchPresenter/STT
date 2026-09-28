@@ -57,6 +57,7 @@ try:
     from stt.wheel_policy import only_binary_args
     from stt.server_port import DEFAULT_PORT
     from stt import owner_exec as _owner_exec
+    from stt.server_restart import RESTART_EXIT_CODE
 except ImportError:  # pragma: no cover - depends on how the process was started
     # deploy/stt-watchdog.service and com.stt.watchdog.plist run this file as a
     # plain script, so sys.path[0] is stt/ and the package is not importable.
@@ -68,6 +69,7 @@ except ImportError:  # pragma: no cover - depends on how the process was started
     from stt.wheel_policy import only_binary_args
     from stt.server_port import DEFAULT_PORT
     from stt import owner_exec as _owner_exec
+    from stt.server_restart import RESTART_EXIT_CODE
 
 try:
     import certifi
@@ -2015,6 +2017,13 @@ class CrashRecoveryThread(threading.Thread):
 
             # Intentional stop (pm.stop() sets _no_restart) or shutdown
             if self._no_restart.is_set() or self.state.get("stop_requested"):
+                continue
+
+            # The server asked to be restarted (the web UI's Restart button): start it
+            # again now — no backoff, no crash count, no crash report.
+            if returncode == RESTART_EXIT_CODE:
+                logging.info(f"[CR] STT asked to be restarted (code {returncode}); restarting now")
+                self.pm.start()
                 continue
 
             # Clean exit — don't restart

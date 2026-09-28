@@ -125,7 +125,7 @@ if [ "$PORT" -le 1024 ] && [ "$EUID" -ne 0 ]; then
     echo -e "${YELLOW}[WARNING]${NC} Port $PORT requires root. Running with sudo..."
     # STT_DATA_DIR: a root server would otherwise read /root/.stt — a different config,
     # models and sessions, and so possibly not the port printed above.
-    sudo env STT_DATA_DIR="$DATA_DIR" nohup "$PYTHON_BIN" "$SCRIPT_DIR/speech_to_text.py" > "$SCRIPT_DIR/server.log" 2>&1 &
+    sudo env STT_DATA_DIR="$DATA_DIR" STT_MANAGED=0 nohup "$PYTHON_BIN" "$SCRIPT_DIR/speech_to_text.py" > "$SCRIPT_DIR/server.log" 2>&1 &
 else
     nohup "$PYTHON_BIN" "$SCRIPT_DIR/speech_to_text.py" > "$SCRIPT_DIR/server.log" 2>&1 &
 fi
