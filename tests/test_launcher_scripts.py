@@ -257,3 +257,61 @@ class TestWatchdogLogs:
         assert "LOG_DIR/watchdog.stdout.log" in plist
         install = read("install.sh")
         assert 'mkdir -p "$LOG_DIR"' in install and 's|LOG_DIR|$LOG_DIR|g' in install
+
+
+WINDOWS_SCRIPTS = sorted(p.name for p in REPO.glob("*.bat")) + sorted(p.name for p in REPO.glob("*.ps1"))
+BATCH = sorted(p.name for p in REPO.glob("*.bat"))
+
+
+class TestWindowsParsing:
+    """Found on a fresh Windows 11 PC: three ways a script died before doing anything."""
+
+    @pytest.mark.parametrize("name", WINDOWS_SCRIPTS)
+    def test_ascii_only(self, name):
+        # Windows PowerShell 5.1 reads a BOM-less .ps1 as cp1252: an em dash's last byte
+        # became a closing quote, install.ps1 failed to parse, and start_watchdog.ps1
+        # silently swallowed its else branch. cmd reads .bat in the OEM code page.
+        (REPO / name).read_bytes().decode("ascii")
+
+    @pytest.mark.parametrize("name", BATCH)
+    def test_no_unescaped_paren_inside_a_block(self, name):
+        # cmd parses a whole if (...) block first, so a bare ")" in an echo or rem line
+        # ends it early and the script dies at startup, whichever branch would have run.
+        depth, bad = 0, []
+        for n, line in enumerate(read(name).splitlines(), 1):
+            t = line.strip()
+            low = t.lower()
+            if depth > 0 and (low.startswith("echo") or low.startswith("rem")):
+                body = t.replace("^(", "").replace("^)", "")
+                if "(" in body or ")" in body:
+                    bad.append(f"{n}: {t}")
+            opens = 1 if t.endswith("(") and not low.startswith("rem") else 0
+            if t.startswith(")"):
+                depth -= 1
+            depth += opens
+        assert not bad, bad
+
+    @pytest.mark.parametrize("name", BATCH)
+    def test_no_caret_pipe_inside_a_quoted_powershell_command(self, name):
+        # Inside the double quotes cmd already leaves | alone, so ^| reached PowerShell
+        # as a literal caret; 2^>nul hid the error and every process lookup returned 0.
+        bad = [ln for ln in code_lines(name) if '-Command "' in ln and "^|" in ln]
+        assert not bad, bad
+
+    @pytest.mark.parametrize("name", BATCH)
+    def test_no_timeout(self, name):
+        # timeout exits at once with redirected stdin, as when the server's restart
+        # button runs restart_server.bat, so every wait was skipped.
+        assert not any("timeout /t" in ln.lower() for ln in code_lines(name))
+
+    def test_restart_probe_is_bounded_by_the_clock(self):
+        verify = read("restart_server.bat").split("Verify started")[1]
+        assert "Stopwatch" in verify and "TotalSeconds -lt 30" in verify
+
+    def test_the_gpu_name_is_printed_not_returned(self):
+        body = read("install.ps1")
+        start = body.index("function Detect-Gpu")
+        block = body[start:body.index("\n}", start)]
+        smi = [ln for ln in block.splitlines() if "--query-gpu=name" in ln]
+        assert smi and smi[0].rstrip().endswith("|")
+        assert "Write-Host" in block.split("--query-gpu=name")[1].splitlines()[1]

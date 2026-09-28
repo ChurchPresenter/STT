@@ -10,33 +10,33 @@ $SERVICE_NAME = "stt-server"
 $PYTHON_BIN = ""
 $VENV_DIR = Join-Path $INSTALL_DIR ".venv"
 
-# ─── Output helpers ──────────────────────────────────────────────────
+# --- Output helpers --------------------------------------------------
 function Print-Status  { param($msg) Write-Host "[INFO] "    -ForegroundColor Blue   -NoNewline; Write-Host $msg }
 function Print-Success { param($msg) Write-Host "[OK] "      -ForegroundColor Green  -NoNewline; Write-Host $msg }
 function Print-Error   { param($msg) Write-Host "[ERROR] "   -ForegroundColor Red    -NoNewline; Write-Host $msg }
 function Print-Warning { param($msg) Write-Host "[WARNING] " -ForegroundColor Yellow -NoNewline; Write-Host $msg }
 
-# ─── Check admin ─────────────────────────────────────────────────────
+# --- Check admin -----------------------------------------------------
 function Test-Admin {
     $identity  = [Security.Principal.WindowsIdentity]::GetCurrent()
     $principal = New-Object Security.Principal.WindowsPrincipal($identity)
     return $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 }
 
-# ─── Refresh PATH from registry (picks up new installs without restart) ──
+# --- Refresh PATH from registry (picks up new installs without restart) --
 function Refresh-Path {
     $machinePath = [Environment]::GetEnvironmentVariable("Path", "Machine")
     $userPath    = [Environment]::GetEnvironmentVariable("Path", "User")
     $env:Path    = "$machinePath;$userPath"
 }
 
-# ─── Check if a command exists ───────────────────────────────────────
+# --- Check if a command exists ---------------------------------------
 function Test-Command {
     param($Name)
     return [bool](Get-Command $Name -ErrorAction SilentlyContinue)
 }
 
-# ─── Install winget packages ────────────────────────────────────────
+# --- Install winget packages ----------------------------------------
 function Install-SystemDeps {
     Print-Status "Checking system dependencies..."
 
@@ -101,7 +101,7 @@ function Install-SystemDeps {
     Print-Success "System dependency check complete"
 }
 
-# ─── Install uv ──────────────────────────────────────────────────────
+# --- Install uv ------------------------------------------------------
 function Install-Uv {
     Print-Status "Installing uv package manager..."
 
@@ -134,7 +134,7 @@ function Install-Uv {
     }
 }
 
-# ─── Create virtual environment ──────────────────────────────────────
+# --- Create virtual environment --------------------------------------
 function Create-Venv {
     Print-Status "Creating Python virtual environment..."
 
@@ -155,13 +155,16 @@ function Create-Venv {
     Print-Success "Virtual environment created at $VENV_DIR"
 }
 
-# ─── Detect GPU ──────────────────────────────────────────────────────
+# --- Detect GPU ------------------------------------------------------
 function Detect-Gpu {
     Print-Status "Detecting GPU..."
 
     if (Test-Command "nvidia-smi") {
         Print-Success "NVIDIA GPU detected:"
-        & nvidia-smi --query-gpu=name,memory.total --format=csv,noheader 2>$null
+        # To the host, not the pipeline: a bare command's output becomes part of the
+        # function's return value, so the name never printed and callers got an array.
+        & nvidia-smi --query-gpu=name,memory.total --format=csv,noheader 2>$null |
+            ForEach-Object { Write-Host "  $_" }
 
         $cudaLine = & nvidia-smi 2>$null | Select-String "CUDA Version"
         if ($cudaLine) {
@@ -176,10 +179,10 @@ function Detect-Gpu {
     }
 }
 
-# ─── Pick the torch wheel index this GPU can actually run ───────────
+# --- Pick the torch wheel index this GPU can actually run -----------
 # cu128 dropped the pre-Volta architectures. On a Pascal card (GTX 10-series, sm_61)
 # a cu128 install still reports cuda.is_available() True and then fails every kernel
-# launch with "no kernel image is available for execution on the device" — so the
+# launch with "no kernel image is available for execution on the device" -- so the
 # index is chosen by compute capability, not by the presence of nvidia-smi.
 # Mirrors stt/cuda_index.py, which carries the tests; keep the two in step.
 function Get-TorchIndexUrl {
@@ -195,11 +198,11 @@ function Get-TorchIndexUrl {
         # Unreadable capability: install the default wheel rather than guess. A CPU
         # build is slow and obvious; a CUDA build with no kernels for the card looks
         # perfect until the first service.
-        Print-Warning "Could not read GPU compute capability — installing default wheels"
+        Print-Warning "Could not read GPU compute capability -- installing default wheels"
         return $null
     }
     if ($lowest -ge 7.0) { return "https://download.pytorch.org/whl/cu128" }
-    Print-Status "GPU compute capability $lowest is pre-Volta — using the cu126 wheels"
+    Print-Status "GPU compute capability $lowest is pre-Volta -- using the cu126 wheels"
     return "https://download.pytorch.org/whl/cu126"
 }
 
@@ -210,7 +213,7 @@ function Get-TorchIndexUrl {
 # stt/wheel_policy.py, which is the source of truth and carries the tests.
 $ONLY_BINARY = "llvmlite,numba,numpy,scikit-learn,scipy,soxr"
 
-# ─── Install Python packages ────────────────────────────────────────
+# --- Install Python packages ----------------------------------------
 function Install-PythonDeps {
     Print-Status "Installing Python dependencies from requirements.txt..."
 
@@ -246,7 +249,7 @@ function Install-PythonDeps {
     }
 }
 
-# ─── Verify installation ────────────────────────────────────────────
+# --- Verify installation --------------------------------------------
 function Verify-PythonDeps {
     Print-Status "Verifying Python installation..."
 
@@ -286,7 +289,7 @@ else:
     }
 }
 
-# ─── Verify scripts exist ────────────────────────────────────────────
+# --- Verify scripts exist --------------------------------------------
 function Verify-Scripts {
     Print-Status "Checking server management scripts..."
 
@@ -296,12 +299,12 @@ function Verify-Scripts {
         if (Test-Path $path) {
             Print-Success "$s found"
         } else {
-            Print-Warning "$s not found — download it from the repository"
+            Print-Warning "$s not found -- download it from the repository"
         }
     }
 }
 
-# ─── Optional: Task Scheduler auto-start ─────────────────────────────
+# --- Optional: Task Scheduler auto-start -----------------------------
 function Setup-TaskScheduler {
     Write-Host ""
     $reply = Read-Host "Would you like to set up auto-start on login via Task Scheduler? (y/N)"
@@ -345,7 +348,7 @@ function Setup-TaskScheduler {
     Print-Status "  schtasks /Delete /TN $SERVICE_NAME - Remove"
 }
 
-# ─── Final instructions ─────────────────────────────────────────────
+# --- Final instructions ---------------------------------------------
 function Show-FinalInstructions {
     Write-Host ""
     Write-Host "========================================"
@@ -379,7 +382,7 @@ function Show-FinalInstructions {
     }
 }
 
-# ─── Main ────────────────────────────────────────────────────────────
+# --- Main ------------------------------------------------------------
 function Main {
     Write-Host ""
     Write-Host "========================================"

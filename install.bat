@@ -11,7 +11,7 @@ REM Check if running as admin
 net session >nul 2>&1
 if %errorLevel% neq 0 (
     echo [WARNING] Not running as Administrator.
-    echo [WARNING] Some features (port 80, ffmpeg install) may require admin rights.
+    echo [WARNING] Some features ^(port 80, ffmpeg install^) may require admin rights.
     echo [WARNING] Right-click this file and select "Run as administrator" if needed.
     echo.
 )

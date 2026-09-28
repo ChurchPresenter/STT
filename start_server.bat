@@ -3,7 +3,7 @@ REM Speech-to-Text Start Script (Windows)
 
 cd /d "%~dp0"
 
-REM Show current version + update status (git) — like update_server
+REM Show current version + update status (git) -- like update_server
 git rev-parse --git-dir >nul 2>&1 && (
     echo [GIT] Current version:
     git log --oneline -1
@@ -15,7 +15,7 @@ REM Check if already running. tasklist never shows command lines, so the old
 REM `tasklist | findstr speech_to_text` could not match and a second server was started
 REM to fight the first for the port. Same command-line lookup stop_server.bat uses.
 set "RUNNING=0"
-for /f %%c in ('powershell -NoProfile -Command "@(Get-CimInstance Win32_Process ^| Where-Object { $_.Name -eq 'python.exe' -and $_.CommandLine -like '*speech_to_text*' }).Count" 2^>nul') do set "RUNNING=%%c"
+for /f %%c in ('powershell -NoProfile -Command "@(Get-CimInstance Win32_Process | Where-Object { $_.Name -eq 'python.exe' -and $_.CommandLine -like '*speech_to_text*' }).Count" 2^>nul') do set "RUNNING=%%c"
 if not "%RUNNING%"=="0" (
     echo [WARNING] Server is already running.
     echo Use restart_server.bat to restart or stop_server.bat to stop.
@@ -37,7 +37,7 @@ start "STT Server" "%PYTHON_BIN%" speech_to_text.py
 echo [OK] Server starting...
 
 REM Read the port from the live config, which lives in the data dir (STT_DATA_DIR, or
-REM ~/.stt) — not in the checkout. config/ here holds only the shipped template, so the
+REM ~/.stt) -- not in the checkout. config/ here holds only the shipped template, so the
 REM old lookup always threw and always printed 8080, whatever the server was bound to.
 set "PORT="
 REM stt\server_port.py is the one answer every launcher and the watchdog share; run from
@@ -46,4 +46,6 @@ for /f "delims=" %%p in ('"%PYTHON_BIN%" -m stt.server_port 2^>nul') do set "POR
 if not defined PORT set "PORT=8080"
 
 echo Open your browser to http://localhost:%PORT%
-timeout /t 3 >nul
+REM ping, not timeout: timeout quits at once when stdin is redirected, e.g. when another
+REM program or a scheduled task runs this script.
+ping -n 4 127.0.0.1 >nul

@@ -16,7 +16,7 @@ cd /d "%~dp0"
 echo Stopping Speech-to-Text server...
 
 set "KILLED=0"
-for /f %%c in ('powershell -NoProfile -Command "$p = @(Get-CimInstance Win32_Process ^| Where-Object { $_.Name -eq 'python.exe' -and $_.CommandLine -like '*speech_to_text*' }); $p ^| ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }; $p.Count" 2^>nul') do set "KILLED=%%c"
+for /f %%c in ('powershell -NoProfile -Command "$p = @(Get-CimInstance Win32_Process | Where-Object { $_.Name -eq 'python.exe' -and $_.CommandLine -like '*speech_to_text*' }); $p | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }; $p.Count" 2^>nul') do set "KILLED=%%c"
 
 REM Fallback for a server started from a console window by start_server.bat, which
 REM titles the window "STT Server" for exactly this purpose.
@@ -25,7 +25,7 @@ taskkill /F /FI "WINDOWTITLE eq STT Server*" >nul 2>&1
 REM Orphaned ffmpeg from audio capture. One session spawns one ffmpeg, but a stream
 REM that stalls is respawned, so a torn-down session can leave one behind.
 set "FFKILLED=0"
-for /f %%c in ('powershell -NoProfile -Command "$p = @(Get-CimInstance Win32_Process ^| Where-Object { $_.Name -eq 'ffmpeg.exe' -and ($_.CommandLine -like '*dshow*' -or $_.CommandLine -like '*wasapi*' -or $_.CommandLine -like '*pipe:*') }); $p ^| ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }; $p.Count" 2^>nul') do set "FFKILLED=%%c"
+for /f %%c in ('powershell -NoProfile -Command "$p = @(Get-CimInstance Win32_Process | Where-Object { $_.Name -eq 'ffmpeg.exe' -and ($_.CommandLine -like '*dshow*' -or $_.CommandLine -like '*wasapi*' -or $_.CommandLine -like '*pipe:*') }); $p | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }; $p.Count" 2^>nul') do set "FFKILLED=%%c"
 
 if "!KILLED!"=="0" (
     echo [OK] No server process was running.
