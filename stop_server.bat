@@ -16,7 +16,10 @@ cd /d "%~dp0"
 echo Stopping Speech-to-Text server...
 
 set "KILLED=0"
-for /f %%c in ('powershell -NoProfile -Command "$p = @(Get-CimInstance Win32_Process | Where-Object { $_.Name -eq 'python.exe' -and $_.CommandLine -like '*speech_to_text*' }); $p | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }; $p.Count" 2^>nul') do set "KILLED=%%c"
+REM taskkill /T: the whole tree, not just the matched process. A server's
+REM multiprocessing workers never mention speech_to_text on their command line,
+REM so killing only the match left them running with the old console open.
+for /f %%c in ('powershell -NoProfile -Command "$p = @(Get-CimInstance Win32_Process | Where-Object { $_.Name -eq 'python.exe' -and $_.CommandLine -like '*speech_to_text*' }); $p | ForEach-Object { taskkill.exe /T /F /PID $_.ProcessId 2>&1 | Out-Null }; $p.Count" 2^>nul') do set "KILLED=%%c"
 
 REM Fallback for a server started from a console window by start_server.bat, which
 REM titles the window "STT Server" for exactly this purpose.

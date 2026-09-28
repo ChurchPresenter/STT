@@ -325,3 +325,13 @@ def test_windows_scripts_check_out_with_crlf():
     # wait loop), and a zip download or core.autocrlf=false would otherwise give it one.
     attrs = read(".gitattributes").splitlines()
     assert "*.bat text eol=crlf" in attrs and "*.ps1 text eol=crlf" in attrs
+
+
+@pytest.mark.parametrize("name", ["stop_server.bat", "restart_server.bat"])
+def test_server_lookups_kill_the_whole_tree(name):
+    # A server's multiprocessing workers never mention speech_to_text, so killing only
+    # the matched process left them running (seven built up on a test PC).
+    lookups = [ln for ln in code_lines(name) if "'python.exe'" in ln and "*speech_to_text*" in ln]
+    assert lookups and all("taskkill.exe /T /F /PID" in ln for ln in lookups)
+    assert not any("Stop-Process" in ln for ln in lookups)
+

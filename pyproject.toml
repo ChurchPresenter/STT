@@ -46,6 +46,7 @@ module = [
     "stt.server_port",
     "stt.owner_exec",
     "stt.server_restart",
+    "stt.parent_watch",
     "stt.model_disk",
     "stt.model_files",
     "stt.model_catalog",

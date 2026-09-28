@@ -3681,7 +3681,13 @@ if DEMO:
     control_queue = _demo_mode.local_queue()
     audio_stream_queue = _demo_mode.local_queue(maxsize=10)
 elif multiprocessing.current_process().name == 'MainProcess':
-    mp_manager = multiprocessing.Manager()
+    # multiprocessing.Manager() with an initializer: the Manager's own process watches for
+    # this one to disappear and exits with it, instead of outliving a killed server
+    # (stt/parent_watch.py). Manager() is exactly SyncManager(ctx=...).start().
+    from multiprocessing.managers import SyncManager as _SyncManager
+    from stt.parent_watch import watch_parent as _watch_parent
+    mp_manager = _SyncManager(ctx=multiprocessing.get_context())
+    mp_manager.start(initializer=_watch_parent)
 
     # Create multiprocessing Queue for config updates (hot-reload)
     config_queue = MPQueue()
@@ -11335,6 +11341,9 @@ def perform_server_restart():
                 creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,
             )
         sleep(1)
+        # End the worker and the Manager ourselves rather than leave it to their parent
+        # watch: os._exit runs no cleanup, and these outlived the server here before.
+        _terminate_child_processes()
         os._exit(0)
         return
 
@@ -21192,6 +21201,10 @@ def _report_worker_crash(exc, role="worker"):
 def thread1_function(ts, cq, cfq, cal_state, cal_data, cal_step1, asq):
     """Main transcription process with start/stop support"""
     install_crash_diagnostics("worker")
+    # Exit with the server, however it dies: a killed server used to leave this worker
+    # running, unfindable by the stop scripts (stt/parent_watch.py).
+    from stt.parent_watch import watch_parent as _watch_parent
+    _watch_parent()
     try:
         import sentry_sdk
         sentry_sdk.set_tag("process", "worker")  # init ran at module import if a DSN is configured

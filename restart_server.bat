@@ -18,7 +18,10 @@ echo [RESTART] Stopping server...
 REM --- Kill python processes running speech_to_text.py ---------------
 REM PowerShell rather than wmic: wmic is removed from Windows 11 24H2, where the old
 REM command-line lookup silently matched nothing and the server was never stopped.
-for /f %%c in ('powershell -NoProfile -Command "$p = @(Get-CimInstance Win32_Process | Where-Object { $_.Name -eq 'python.exe' -and $_.CommandLine -like '*speech_to_text*' }); $p | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }; $p.Count" 2^>nul') do echo Stopped %%c server process^(es^).
+REM taskkill /T: the whole tree, not just the matched process. A server's
+REM multiprocessing workers never mention speech_to_text on their command line,
+REM so killing only the match left them running with the old console open.
+for /f %%c in ('powershell -NoProfile -Command "$p = @(Get-CimInstance Win32_Process | Where-Object { $_.Name -eq 'python.exe' -and $_.CommandLine -like '*speech_to_text*' }); $p | ForEach-Object { taskkill.exe /T /F /PID $_.ProcessId 2>&1 | Out-Null }; $p.Count" 2^>nul') do echo Stopped %%c server process^(es^).
 
 REM Also kill by window title (start_server.bat / below title the window "STT Server")
 taskkill /F /FI "WINDOWTITLE eq STT Server*" >nul 2>&1
@@ -38,7 +41,7 @@ REM --- Verify stopped -----------------------------------------------
 set "RETRIES=0"
 :wait_loop
 set "STILL_RUNNING=0"
-for /f %%c in ('powershell -NoProfile -Command "$p = @(Get-CimInstance Win32_Process | Where-Object { $_.Name -eq 'python.exe' -and $_.CommandLine -like '*speech_to_text*' }); $p | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }; $p.Count" 2^>nul') do if not "%%c"=="0" set "STILL_RUNNING=1"
+for /f %%c in ('powershell -NoProfile -Command "$p = @(Get-CimInstance Win32_Process | Where-Object { $_.Name -eq 'python.exe' -and $_.CommandLine -like '*speech_to_text*' }); $p | ForEach-Object { taskkill.exe /T /F /PID $_.ProcessId 2>&1 | Out-Null }; $p.Count" 2^>nul') do if not "%%c"=="0" set "STILL_RUNNING=1"
 if "!STILL_RUNNING!"=="1" (
     set /a RETRIES+=1
     if !RETRIES! lss 10 (
