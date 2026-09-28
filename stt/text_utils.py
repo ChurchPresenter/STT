@@ -77,7 +77,10 @@ DEFAULT_WHISPER_HALLUCINATIONS = [
     "Subtitle Editor",
     "Subtitles by",
     "Subtitles created by",
-    "for watching",         # "thank you for watching", "thanks for watching", ...
+    # Whole phrases, not a "for watching" stem: that would also silence a translated
+    # "thank you, Lord, for watching over us".
+    "Thank you for watching",
+    "Thanks for watching",
     "Please subscribe",
     "Like and subscribe",
     "Don't forget to subscribe",

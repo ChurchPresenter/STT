@@ -335,6 +335,7 @@
     "enabled": true,
     "_enabled_comment": "Filter out known Whisper hallucinations (phantom subtitles from training data)",
     "phrases": [
+      "DimaTorzok",
       "Редактор субтитров",
       "Корректор субтитров",
       "Субтитры подогнал",

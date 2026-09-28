@@ -172,6 +172,9 @@ OBSERVED_HALLUCINATIONS = [
     "а а а а а а а а а а а а а Субтитры подогнал «Симон»",
     "Субтитры подогнал «Симон» слова песни, ещё слова песни, и снова слова песни,",
     "Субтитры создавал DimaTorzok Продолжение следует...",
+    # A verb no stem names, reaching the live preview as a partial on .62 — only the
+    # invented name catches it.
+    "Субтитры добавил DimaTorzok",
 ]
 
 # Ordinary speech from the same recording. These must survive: an over-broad stem that
@@ -234,6 +237,9 @@ class TestObservedHallucinationsAreCaught:
         assert not missed, f"shipped config would let these through: {missed}"
         caught = [t for t in LEGITIMATE_SPEECH if is_whisper_hallucination(t, phrases)]
         assert not caught, f"shipped config would silence real speech: {caught}"
+        # Behaviour on samples cannot see a stem that only one list has, which is how the
+        # shipped list lost "DimaTorzok" while the code kept it.
+        assert phrases == DEFAULT_WHISPER_HALLUCINATIONS
 
 
 class TestApplyProfanityFilter:
