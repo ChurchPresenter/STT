@@ -50,6 +50,45 @@ if not getattr(sys, "frozen", False) and getattr(os, "geteuid", None) is not Non
     except OSError:
         pass
 
+
+def _adopt_own_stt_package() -> None:
+    """Make ``stt`` mean the package this file sits in, not one already imported.
+
+    A frozen bootstrapper hands off by exec'ing the checkout's watchdog.py inside
+    its own process (``_maybe_handoff_to_source``), where ``stt`` is already in
+    sys.modules as the *bundled* package. ``from stt import x`` then searches the
+    bundle, which is whatever the installed binary was built with: every module
+    added since is missing, and the rest are old copies. Seen in the field as
+    "cannot import name 'fd_limit' from 'stt' (C:\\Program Files\\STT\\_internal\\
+    stt\\__init__.py)" the day fd_limit landed — the hand-off failed and the
+    machine stayed on bundled watchdog code, so no watchdog fix could reach it.
+
+    Evicts the other ``stt`` and loads this one explicitly, so its submodules are
+    searched for here. The objects the bundled code already holds are untouched.
+    """
+    pkg_dir = os.path.dirname(os.path.abspath(__file__))
+    loaded = sys.modules.get("stt")
+    if loaded is None:
+        return
+    own = os.path.normcase(pkg_dir)
+    if any(os.path.normcase(os.path.abspath(p)) == own for p in getattr(loaded, "__path__", ())):
+        return
+    import importlib
+    import importlib.util
+    for name in [n for n in sys.modules if n == "stt" or n.startswith("stt.")]:
+        del sys.modules[name]
+    spec = importlib.util.spec_from_file_location(
+        "stt", os.path.join(pkg_dir, "__init__.py"), submodule_search_locations=[pkg_dir])
+    if spec is None or spec.loader is None:
+        return
+    pkg = importlib.util.module_from_spec(spec)
+    sys.modules["stt"] = pkg
+    spec.loader.exec_module(pkg)
+    importlib.invalidate_caches()
+
+
+_adopt_own_stt_package()
+
 try:
     from stt import fd_limit as _fd_limit
     from stt import win_job as _win_job
@@ -336,6 +375,9 @@ def _maybe_handoff_to_source(args):
         logging.warning(f"[WATCHDOG] Source watchdog won't compile ({e}); staying on bundled code")
         return
     os.environ["STT_WD_FROMSOURCE"] = "1"  # so the source's own hand-off check no-ops (no re-entry)
+    # The source swaps in its own stt package (_adopt_own_stt_package); a failed
+    # hand-off puts the bundled one back for the code that carries on below.
+    bundled = {n: m for n, m in sys.modules.items() if n == "stt" or n.startswith("stt.")}
     try:
         import importlib.util
         spec = importlib.util.spec_from_file_location("stt_watchdog_source", WATCHDOG_SCRIPT)
@@ -351,6 +393,9 @@ def _maybe_handoff_to_source(args):
     except Exception as e:
         logging.error(f"[WATCHDOG] Source watchdog failed in-process ({e}); using bundled code")
         os.environ.pop("STT_WD_FROMSOURCE", None)
+        for name in [n for n in sys.modules if n == "stt" or n.startswith("stt.")]:
+            del sys.modules[name]
+        sys.modules.update(bundled)
         return  # fall through: frozen main() continues with the bundled code
 
 
