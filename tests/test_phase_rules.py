@@ -335,6 +335,6 @@ class TestRehearsalGap:
         assert [b.label for b in blocks if b.kind == MUSIC] == ["Music", "Music", "Songs 1"]
 
     def test_the_shipped_songs_rule_carries_it(self):
-        songs = [r for r in shipped_rules() if r.name == "Songs"][0]
+        songs = next(r for r in shipped_rules() if r.name == "Songs")
         assert songs.number_after_quiet_minutes == 10
 
