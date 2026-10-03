@@ -26,10 +26,9 @@ DEFAULT_PORT = 8080
 
 
 def _home_of(user: str) -> Optional[str]:
-    try:
-        import pwd
-    except ImportError:  # Windows: no sudo, no pwd
+    if sys.platform == "win32":  # no sudo, no pwd
         return None
+    import pwd
     try:
         return pwd.getpwnam(user).pw_dir
     except KeyError:

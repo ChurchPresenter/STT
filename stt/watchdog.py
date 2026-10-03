@@ -42,8 +42,7 @@ from typing import ClassVar, Optional
 
 # Root running from a checkout somebody else owns must not leave root-owned
 # __pycache__ in it (see stt/owner_exec.py). Before the stt imports below.
-if not getattr(sys, "frozen", False) and getattr(os, "geteuid", None) is not None \
-        and os.geteuid() == 0:
+if not getattr(sys, "frozen", False) and sys.platform != "win32" and os.geteuid() == 0:
     try:
         if os.stat(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))).st_uid != 0:
             sys.dont_write_bytecode = True

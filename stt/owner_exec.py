@@ -26,6 +26,7 @@ from __future__ import annotations
 import logging
 import os
 import subprocess
+import sys
 from typing import Any, Callable, Dict, Iterable, NamedTuple, Optional, Sequence, Set
 
 log = logging.getLogger(__name__)
@@ -44,10 +45,9 @@ def _euid() -> int:
 
 
 def _lookup(uid: int) -> Optional[Owner]:
-    try:
-        import pwd
-    except ImportError:  # Windows
+    if sys.platform == "win32":  # no pwd
         return None
+    import pwd
     try:
         entry = pwd.getpwuid(uid)
     except KeyError:
@@ -116,6 +116,8 @@ def reclaim(path: str, owner: Owner, *, once: bool = True) -> int:
     ``once`` walks each path a single time per process, since ``_git`` runs many times
     per update.
     """
+    if sys.platform == "win32":  # no ownership to give back, and no lchown
+        return 0
     key = os.path.abspath(path)
     if once and key in _reclaimed:
         return 0
