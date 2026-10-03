@@ -784,3 +784,44 @@ class TestUpdateWindowOpen:
     def test_custom_update_hour(self):
         assert watchdog._update_window_open(False, 3, update_hour=3) is True
         assert watchdog._update_window_open(False, 4, update_hour=3) is False
+
+
+class TestDeferredCatchup:
+    def test_never_due_unless_armed(self):
+        c = watchdog._DeferredCatchup(settle_s=600)
+        assert c.due(False, 0) is False
+        assert c.due(False, 10_000) is False
+
+    def test_due_after_continuous_idle(self):
+        c = watchdog._DeferredCatchup(settle_s=600)
+        c.arm()
+        assert c.due(True, 0) is False      # the service is still running
+        assert c.due(False, 100) is False   # idle starts here
+        assert c.due(False, 699) is False
+        assert c.due(False, 700) is True
+
+    def test_transcription_resuming_restarts_the_settle(self):
+        # An operator stopping between parts of a service is not done for the day.
+        c = watchdog._DeferredCatchup(settle_s=600)
+        c.arm()
+        assert c.due(False, 0) is False
+        assert c.due(True, 500) is False
+        assert c.due(False, 900) is False
+        assert c.due(False, 1499) is False
+        assert c.due(False, 1500) is True
+
+    def test_disarm_stops_it(self):
+        c = watchdog._DeferredCatchup(settle_s=600)
+        c.arm()
+        c.due(False, 0)
+        c.disarm()
+        assert c.armed is False
+        assert c.due(False, 10_000) is False
+
+    def test_rearming_forgets_earlier_idle(self):
+        c = watchdog._DeferredCatchup(settle_s=600)
+        c.arm()
+        c.due(False, 0)
+        c.arm()
+        assert c.due(False, 1000) is False
+        assert c.due(False, 1600) is True

@@ -222,6 +222,8 @@ BACKOFF = [5, 10, 30, 60]       # seconds between crash restarts; capped at last
 STABLE_RUN_THRESHOLD = 30        # seconds of uptime before resetting crash counter
 UPDATE_HOUR = 1                  # hour (24h) at which daily update check fires
 STARTUP_UPDATE_DELAY_S = 120     # grace after boot before a startup catch-up apply
+CATCHUP_IDLE_SETTLE_S = 600      # idle needed before a deferred catch-up applies
+CATCHUP_POLL_S = 60              # how often a deferred catch-up looks for idle
 
 # Files/dirs inside SOURCE never replaced wholesale by the zipball-fallback
 # update path. "config" is never swapped as a directory — live user settings
@@ -586,6 +588,46 @@ def _update_window_open(startup, hour, update_hour=UPDATE_HOUR):
     (catch-up for machines that were powered off at update_hour and would
     otherwise never update), otherwise only at update_hour."""
     return bool(startup) or hour == update_hour
+
+
+class _DeferredCatchup:
+    """A startup catch-up that found transcription running, still owed.
+
+    A machine switched on only for services boots, starts transcribing within
+    the startup grace, and is off again before 1am, so a catch-up that gives up
+    on its first deferral never applies anything there. Seen in the field: an
+    install logged a watchdog error for days after its fix was on main, because
+    it never got past the deferral to pull it.
+
+    Once armed, the catch-up applies after the server has been idle for
+    ``settle_s`` without a break. The settle is there because an operator
+    stopping between parts of a service is not done for the day, and the
+    restart that follows an update is not something to spring on them then.
+    """
+
+    def __init__(self, settle_s: float = CATCHUP_IDLE_SETTLE_S) -> None:
+        self.settle_s = settle_s
+        self.armed = False
+        self._idle_since: Optional[float] = None
+
+    def arm(self) -> None:
+        self.armed = True
+        self._idle_since = None
+
+    def disarm(self) -> None:
+        self.armed = False
+        self._idle_since = None
+
+    def due(self, active: bool, now: float) -> bool:
+        """Record one idle observation; True when the owed update should apply."""
+        if not self.armed:
+            return False
+        if active:
+            self._idle_since = None
+            return False
+        if self._idle_since is None:
+            self._idle_since = now
+        return now - self._idle_since >= self.settle_s
 
 
 def load_config():
@@ -2631,21 +2673,36 @@ class AutoUpdater:
             time.sleep(5)
 
         startup = True
+        catchup = _DeferredCatchup()
         while not self.state.get("stop_requested"):
             self.check_for_update()
             if _update_window_open(startup, datetime.datetime.now().hour) and self._pending_update:
                 if self._transcription_active():
-                    logging.info("[AU] Update pending but transcription active — deferring")
+                    if startup:
+                        catchup.arm()
+                        logging.info("[AU] Update pending but transcription active — "
+                                     "deferring until idle")
+                    else:
+                        logging.info("[AU] Update pending but transcription active — deferring")
                 else:
                     logging.info("[AU] %s auto-apply triggered",
                                  "startup catch-up" if startup else "1am")
                     self.apply_pending_update()
+                    catchup.disarm()
+            if not self._pending_update:
+                catchup.disarm()  # applied, or nothing newer on the channel
             startup = False
-            # Sleep one hour in 60s increments so stop_requested is checked promptly
-            for _ in range(60):
+            # Wait an hour for the next check, polling for idle while a deferred
+            # catch-up is owed; stop_requested is checked every poll either way.
+            for _ in range(3600 // CATCHUP_POLL_S):
                 if self.state.get("stop_requested"):
                     return
-                time.sleep(60)
+                time.sleep(CATCHUP_POLL_S)
+                if catchup.armed and self._pending_update and \
+                        catchup.due(self._transcription_active(), time.monotonic()):
+                    logging.info("[AU] deferred startup catch-up auto-apply triggered")
+                    self.apply_pending_update()
+                    catchup.disarm()
 
 
 # ---------------------------------------------------------------------------
