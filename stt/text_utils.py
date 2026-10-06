@@ -152,6 +152,55 @@ def is_whisper_hallucination(text: Optional[str], phrases: Sequence[str]) -> boo
     return False
 
 
+# A credit's invented name: CamelCase or digit-bearing handle, or a quoted name.
+_CREDIT_NAME = re.compile(r'\s*(?:«[^»]*»|"[^"]*"|\S*[a-zа-яё][A-ZА-ЯЁ]\S*|\S*\d\S*)')
+_CAPITALISED = re.compile(r'^\W*[A-ZА-ЯЁ]\w*\W*$')
+
+
+def _phrase_pattern(phrase: str) -> Optional["re.Pattern[str]"]:
+    words = normalize_for_hallucination_check(phrase).split()
+    if not words:
+        return None
+    # Apostrophes were dropped by the normaliser, so let them sit between any letters.
+    spelled = [r"['’‘]?".join(re.escape(ch) for ch in w) for w in words]
+    return re.compile(r'(?<!\w)' + r'[^\w]+'.join(spelled) + r'(?!\w)', re.IGNORECASE)
+
+
+def strip_hallucinations(text: Optional[str], phrases: Sequence[str]) -> str:
+    """``text`` with every known hallucination removed and the rest left alone.
+
+    Whisper glues its stock credit onto real speech ("Субтитры создавал DimaTorzok
+    Мир вам, дорогая церковь!"). Denying the whole sentence, which is what
+    ``is_whisper_hallucination`` supports, throws the speech away with it. This
+    cuts out only the matched phrase, the invented name that trails it when that
+    name is recognisable (CamelCase, digits, quotes) and a trailing run of two or
+    three capitalised words ("Игорь Негода"). A name that cannot be told from
+    speech is left in: a stray name is a smaller fault than a lost sentence.
+    Returns "" when nothing but the hallucination was there.
+    """
+    if not text or not phrases:
+        return text or ""
+    patterns = [p for p in (_phrase_pattern(ph) for ph in phrases) if p]
+    out = text
+    while True:
+        hits = [m for m in (p.search(out) for p in patterns) if m]
+        if not hits:
+            break
+        m = min(hits, key=lambda x: x.start())
+        end = m.end()
+        while True:
+            n = _CREDIT_NAME.match(out, end)
+            if not n or n.end() == end:
+                break
+            end = n.end()
+        tail = out[end:].split()
+        if 2 <= len(tail) <= 3 and all(_CAPITALISED.match(t) for t in tail):
+            end = len(out)
+        out = out[:m.start()] + " " + out[end:]
+    out = ' '.join(out.split()).lstrip(" ,;:!?.-–—").rstrip(" ,;:-–—")
+    return out if re.search(r'\w', out) else ""
+
+
 def classify_partial_row(text: Optional[str], phrases: Sequence[str]) -> Tuple[int, Optional[str]]:
     """The ``(denied, denied_reason)`` a partial (is_final=0) row should be stored with.
 

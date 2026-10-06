@@ -18,6 +18,21 @@ def panns_label_from_prob(smoothed_prob: float, audio_db: Optional[float], cfg: 
     return "Quiet" if (audio_db or -60) <= quiet_db_threshold else "Speaking"
 
 
+def effective_music_prob(music_prob: float, top_tag: Optional[str], cfg: dict) -> float:
+    """The music probability the Speaking/Music decision should smooth and compare.
+
+    ``music_prob`` is the larger of PANNs' Music and Singing scores, so speech over
+    quiet background music (a poem read over a pad, a reading under keyboards) scores
+    high and the segment used to be labelled Music and hidden. When the tagger's
+    dominant class is Speech the speech is what is being said, whatever sits under
+    it, so the probability counts as zero. Sung material is dominated by Music,
+    Singing or Choir and is unaffected. ``speech_overrides_music`` turns this off.
+    """
+    if cfg.get("speech_overrides_music", True) and top_tag == "Speech":
+        return 0.0
+    return music_prob
+
+
 def classify_audio_type(audio_db: Optional[float], cfg: dict) -> str:
     """Energy-based fallback label (no PANNs): audible => Speaking, else Quiet.
     We never claim Music without the PANNs detector.

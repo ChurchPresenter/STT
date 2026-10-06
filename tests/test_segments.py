@@ -5,6 +5,7 @@ import json
 from stt.segments import (
     attribute_words_to_sentences,
     classify_audio_type,
+    effective_music_prob,
     panns_label_from_prob,
     words_json_or_none,
     words_to_session_ms,
@@ -140,3 +141,23 @@ class TestWordsJsonOrNone:
 
     def test_unserializable_returns_none(self):
         assert words_json_or_none([{"w": object()}]) is None
+
+
+class TestEffectiveMusicProb:
+    def test_speech_dominant_ignores_background_music(self):
+        # A reading over quiet keyboards: Music scores 0.8 but Speech is the top tag
+        assert effective_music_prob(0.8, "Speech", {}) == 0.0
+
+    def test_music_dominant_keeps_probability(self):
+        assert effective_music_prob(0.8, "Music", {}) == 0.8
+        assert effective_music_prob(0.7, "Choir", {}) == 0.7
+
+    def test_unknown_tag_keeps_probability(self):
+        assert effective_music_prob(0.8, None, {}) == 0.8
+
+    def test_can_be_switched_off(self):
+        assert effective_music_prob(0.8, "Speech", {"speech_overrides_music": False}) == 0.8
+
+    def test_speech_over_music_is_labelled_speaking(self):
+        cfg = {}
+        assert panns_label_from_prob(effective_music_prob(0.83, "Speech", cfg), -20, cfg) == "Speaking"

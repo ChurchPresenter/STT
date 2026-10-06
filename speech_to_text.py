@@ -4055,6 +4055,7 @@ _wav_peaks_cache = _wav_edit.PeaksCache()
 
 from stt.segments import (  # noqa: E402, F401
     attribute_words_to_sentences,
+    effective_music_prob,
     panns_label_from_prob,
     words_json_or_none,
     words_to_session_ms,
@@ -4135,7 +4136,7 @@ class MusicDetector:
                     st["detection_mode"] = "energy"
                 continue
             window = max(1, int(cfg.get("smoothing_window", 4) or 1))
-            self._history.append(float(music_prob))
+            self._history.append(effective_music_prob(float(music_prob), tag, cfg))
             del self._history[:-window]
             smoothed = sum(self._history) / len(self._history)
             st = self.state
@@ -20788,6 +20789,12 @@ def is_whisper_hallucination(text):
     return _text_utils.is_whisper_hallucination(text, get_hallucination_phrases())
 
 
+def salvage_hallucination(text):
+    """The real speech left once known hallucinations are cut out of ``text``; "" if none."""
+    cleaned = _text_utils.strip_hallucinations(text, get_hallucination_phrases())
+    return "" if (not cleaned or is_whisper_hallucination(cleaned)) else cleaned
+
+
 def classify_partial_row(text):
     """The (denied, denied_reason) a partial snapshot row should be stored with."""
     return _text_utils.classify_partial_row(text, get_hallucination_phrases())
@@ -22943,7 +22950,14 @@ def thread1_function(ts, cq, cfq, cal_state, cal_data, cal_step1, asq):
 
                                                         _is_hallucination = is_whisper_hallucination(sentence)
                                                         if _is_hallucination:
-                                                            print(f"[HALLUCINATION→DENIED] '{sentence[:40]}'", flush=True)
+                                                            # Whisper glues its credit onto real speech: keep the speech, drop only the credit
+                                                            _salvaged = salvage_hallucination(sentence)
+                                                            if _salvaged:
+                                                                print(f"[HALLUCINATION→STRIPPED] kept '{_salvaged[:40]}'", flush=True)
+                                                                sentence = _salvaged
+                                                                _is_hallucination = False
+                                                            else:
+                                                                print(f"[HALLUCINATION→DENIED] '{sentence[:40]}'", flush=True)
 
                                                         _music_deny = (not _transcribe_music_enabled) and segment_speech_type == "Music"
                                                         if _music_deny and not (_is_hallucination or _cjk_deny):
@@ -23021,7 +23035,14 @@ def thread1_function(ts, cq, cfq, cal_state, cal_data, cal_step1, asq):
                                                                 remainder = _rem_stripped
                                                         _rem_is_hallucination = is_whisper_hallucination(remainder)
                                                         if _rem_is_hallucination:
-                                                            print(f"[HALLUCINATION REMAINDER→DENIED] '{remainder[:40]}'", flush=True)
+                                                            # Whisper glues its credit onto real speech: keep the speech, drop only the credit
+                                                            _salvaged = salvage_hallucination(remainder)
+                                                            if _salvaged:
+                                                                print(f"[HALLUCINATION→STRIPPED] kept '{_salvaged[:40]}'", flush=True)
+                                                                remainder = _salvaged
+                                                                _rem_is_hallucination = False
+                                                            else:
+                                                                print(f"[HALLUCINATION REMAINDER→DENIED] '{remainder[:40]}'", flush=True)
                                                         _rem_music_deny = (not _transcribe_music_enabled) and segment_speech_type == "Music"
                                                         if _rem_music_deny and not (_rem_is_hallucination or _rem_cjk_deny):
                                                             print(f"[MUSIC REMAINDER→DENIED] '{remainder[:40]}'", flush=True)
@@ -23207,7 +23228,14 @@ def thread1_function(ts, cq, cfq, cal_state, cal_data, cal_step1, asq):
 
                                                             _is_hallucination = is_whisper_hallucination(sentence)
                                                             if _is_hallucination:
-                                                                print(f"[HALLUCINATION→DENIED] '{sentence[:40]}'", flush=True)
+                                                                # Whisper glues its credit onto real speech: keep the speech, drop only the credit
+                                                                _salvaged = salvage_hallucination(sentence)
+                                                                if _salvaged:
+                                                                    print(f"[HALLUCINATION→STRIPPED] kept '{_salvaged[:40]}'", flush=True)
+                                                                    sentence = _salvaged
+                                                                    _is_hallucination = False
+                                                                else:
+                                                                    print(f"[HALLUCINATION→DENIED] '{sentence[:40]}'", flush=True)
 
                                                             _music_deny = (not _transcribe_music_enabled) and _phrase_speech_type == "Music"
                                                             if _music_deny and not (_is_hallucination or _cjk_deny):
@@ -23265,7 +23293,14 @@ def thread1_function(ts, cq, cfq, cal_state, cal_data, cal_step1, asq):
                                                                     remainder = _rem_stripped
                                                             _rem_is_hallucination = is_whisper_hallucination(remainder)
                                                             if _rem_is_hallucination:
-                                                                print(f"[HALLUCINATION REMAINDER→DENIED] '{remainder[:40]}'", flush=True)
+                                                                # Whisper glues its credit onto real speech: keep the speech, drop only the credit
+                                                                _salvaged = salvage_hallucination(remainder)
+                                                                if _salvaged:
+                                                                    print(f"[HALLUCINATION→STRIPPED] kept '{_salvaged[:40]}'", flush=True)
+                                                                    remainder = _salvaged
+                                                                    _rem_is_hallucination = False
+                                                                else:
+                                                                    print(f"[HALLUCINATION REMAINDER→DENIED] '{remainder[:40]}'", flush=True)
                                                             _rem_music_deny = (not _transcribe_music_enabled) and _phrase_speech_type == "Music"
                                                             if _rem_music_deny and not (_rem_is_hallucination or _rem_cjk_deny):
                                                                 print(f"[MUSIC REMAINDER→DENIED] '{remainder[:40]}'", flush=True)
@@ -23478,7 +23513,14 @@ def thread1_function(ts, cq, cfq, cal_state, cal_data, cal_step1, asq):
                                     pending_remainder = _flush_stripped
                             _flush_is_hallucination = is_whisper_hallucination(pending_remainder)
                             if _flush_is_hallucination:
-                                print(f"[HALLUCINATION STOP-FLUSH→DENIED] '{pending_remainder[:40]}'", flush=True)
+                                # Whisper glues its credit onto real speech: keep the speech, drop only the credit
+                                _salvaged = salvage_hallucination(pending_remainder)
+                                if _salvaged:
+                                    print(f"[HALLUCINATION→STRIPPED] kept '{_salvaged[:40]}'", flush=True)
+                                    pending_remainder = _salvaged
+                                    _flush_is_hallucination = False
+                                else:
+                                    print(f"[HALLUCINATION STOP-FLUSH→DENIED] '{pending_remainder[:40]}'", flush=True)
                             _flush_denied = 1 if (_flush_is_hallucination or _flush_cjk_deny) else 0
                             _flush_denied_reason = ('hallucination' if _flush_is_hallucination else 'cjk') if _flush_denied else None
                             _verbatim_flush = pending_remainder

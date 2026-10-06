@@ -12,6 +12,7 @@ from stt.text_utils import (
     is_fuzzy_duplicate,
     is_whisper_hallucination,
     normalize_for_hallucination_check,
+    strip_hallucinations,
     remove_overlapping_prefix,
     scope_whisper_translation,
     split_into_sentences,
@@ -402,3 +403,44 @@ class TestClassifyPartialRow:
 
     def test_disabled_filter_flags_nothing(self):
         assert classify_partial_row("Продолжение следует...", []) == (0, None)
+
+
+PHRASES = ["DimaTorzok", "Субтитры создавал", "Субтитры подогнал", "Продолжение следует", "Thank you for watching"]
+
+
+class TestStripHallucinations:
+    def test_credit_glued_before_speech_keeps_speech(self):
+        # Whisper's credit prefixed to the first words of a service
+        text = "Субтитры создавал DimaTorzok Мир вам, дорогая церковь!"
+        assert strip_hallucinations(text, PHRASES) == "Мир вам, дорогая церковь!"
+
+    def test_credit_glued_after_speech_keeps_speech(self):
+        text = "Все мои источники к Тебе, Ты моя опора, Субтитры подогнал"
+        assert strip_hallucinations(text, PHRASES) == "Все мои источники к Тебе, Ты моя опора"
+
+    def test_trailing_capitalised_name_is_removed(self):
+        text = "Радостью полны Субтитры подогнал Игорь Негода."
+        assert strip_hallucinations(text, PHRASES) == "Радостью полны"
+
+    def test_lone_capitalised_word_after_credit_is_speech(self):
+        assert strip_hallucinations("Субтитры создавал DimaTorzok Аминь.", PHRASES) == "Аминь."
+
+    def test_only_hallucination_returns_empty(self):
+        assert strip_hallucinations("Субтитры создавал DimaTorzok", PHRASES) == ""
+        assert strip_hallucinations("Субтитры создавал DimaTorzok Субтитры создавал DimaTorzok", PHRASES) == ""
+        assert strip_hallucinations("Продолжение следует...", PHRASES) == ""
+
+    def test_repeated_credit_between_speech(self):
+        text = "Слава Богу Субтитры создавал DimaTorzok аминь Продолжение следует"
+        assert strip_hallucinations(text, PHRASES) == "Слава Богу аминь"
+
+    def test_clean_text_is_untouched(self):
+        assert strip_hallucinations("Господи, благодарим Тебя", PHRASES) == "Господи, благодарим Тебя"
+
+    def test_case_and_punctuation_insensitive(self):
+        assert strip_hallucinations("thank YOU, for watching! Amen", PHRASES) == "Amen"
+
+    def test_no_phrases_or_empty(self):
+        assert strip_hallucinations("hello", []) == "hello"
+        assert strip_hallucinations("", PHRASES) == ""
+        assert strip_hallucinations(None, PHRASES) == ""
