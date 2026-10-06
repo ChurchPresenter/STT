@@ -236,9 +236,35 @@ def row_label_if_changed(current: str, baseline: str) -> Optional[str]:
     return None
 
 
+# A peer's reply is another machine's say-so, stored on every row it touches; bound it.
+_PEER_FIELD_MAX = 200
+
+
+def peer_provenance(reply: Any) -> Optional[Dict[str, str]]:
+    """What a paired machine says produced its answer, from its /api/translate reply.
+
+    The peer's status names the model it is *configured* with, which is the same
+    config-versus-reality gap the per-row columns exist to close: when the peer's LLM
+    declines a caption, its NMT model answers, and a label taken from status records
+    that row as the LLM's. Only the peer knows which leg ran, so it says so per reply
+    (``mt_engine`` / ``mt_model``). A peer predating that sends neither, and None
+    keeps the status-based label for it.
+    """
+    if not isinstance(reply, Mapping):
+        return None
+    engine = reply.get("mt_engine")
+    if not isinstance(engine, str) or not engine.strip():
+        return None
+    out = {"engine": engine.strip()[:_PEER_FIELD_MAX]}
+    model = reply.get("mt_model")
+    if isinstance(model, str) and model.strip():
+        out["model"] = model.strip()[:_PEER_FIELD_MAX]
+    return out
+
+
 def mt_row_label(lt_cfg: Optional[Mapping[str, Any]], engine: str,
                  *, remote_status: Optional[Mapping[str, Any]] = None,
-                 model: str = "") -> str:
+                 model: str = "", peer: Optional[Mapping[str, str]] = None) -> str:
     """What translated a row, named the way that engine identifies its model.
 
     ``engine`` is passed by the leg that ran rather than derived from config, which
@@ -252,12 +278,19 @@ def mt_row_label(lt_cfg: Optional[Mapping[str, Any]], engine: str,
     For a remote translation the label names the machine and, when its status has
     been seen, the model it reported — a paired box can be reconfigured without this
     one restarting, so local config is not evidence about what ran over there.
+    ``peer`` (from ``peer_provenance``) is better evidence still: which of the peer's
+    engines answered this particular caption.
     """
     lt = lt_cfg or {}
     if engine == MT_ENGINE_LLM:
         return llm_model_id(_section(lt, "llm"))
     if engine == MT_ENGINE_REMOTE:
         endpoint = _stringify(_section(lt, "remote").get("endpoint")).strip()
+        if peer and peer.get("engine"):
+            inner = peer["engine"]
+            if peer.get("model"):
+                inner = "%s: %s" % (inner, peer["model"])
+            return "%s (%s)" % (endpoint or MT_ENGINE_REMOTE, inner)
         remote_model = _stringify((remote_status or {}).get("model")).strip()
         if endpoint and remote_model:
             return "%s (%s)" % (endpoint, remote_model)

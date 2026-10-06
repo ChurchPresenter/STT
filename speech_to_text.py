@@ -1167,6 +1167,7 @@ from stt.session_meta import (
     write_session_meta as _write_session_meta,
     asr_row_label as _session_asr_row_label,
     mt_row_label as _session_mt_row_label,
+    peer_provenance as _session_peer_provenance,
     row_label_if_changed as _session_row_label_if_changed,
     MT_ENGINE_LLM,
     MT_ENGINE_NMT,
@@ -9143,7 +9144,8 @@ def translate_remote():
             _hit = get_server_text_cache().get(text, source_lang, target_lang, _num_beams, **_cache_kw)
             if _hit is not None:
                 return jsonify({"success": True, "translated_text": _hit.get("text", text),
-                                "confidence": None, "alternatives": []})
+                                "confidence": None, "alternatives": [],
+                                **_mt_reply_fields(_hit.get("mt_engine"), _hit.get("mt_model"))})
         except Exception:
             pass  # cache must never break translation
 
@@ -9155,6 +9157,10 @@ def translate_remote():
                                  num_alternatives=num_alternatives,
                                  generation_params=generation_params,
                                  local_only=True)
+    # Which leg answered, so the peer can record it per caption (see
+    # stt.session_meta.peer_provenance). Read on this thread, straight after.
+    _mt_eng, _mt_lbl = last_mt_label()
+    _mt_fields = _mt_reply_fields(_mt_eng, _mt_lbl)
 
     if return_extras and isinstance(result, dict):
         return jsonify({
@@ -9162,16 +9168,29 @@ def translate_remote():
             "translated_text": result.get("text", text),
             "confidence": result.get("confidence"),
             "alternatives": result.get("alternatives", []),
+            **_mt_fields,
         })
 
     translated = result if isinstance(result, str) else text
     # Skip caching a failed/echoed translation (would pin an untranslated answer).
     if _cache_on and isinstance(result, str) and _should_cache_translation(text, translated):
         try:
-            get_server_text_cache().set(text, source_lang, target_lang, _num_beams, {"text": translated}, **_cache_kw)
+            get_server_text_cache().set(text, source_lang, target_lang, _num_beams,
+                                        {"text": translated, **_mt_fields}, **_cache_kw)
         except Exception:
             pass
-    return jsonify({"success": True, "translated_text": translated, "confidence": None, "alternatives": []})
+    return jsonify({"success": True, "translated_text": translated, "confidence": None, "alternatives": [],
+                    **_mt_fields})
+
+
+def _mt_reply_fields(engine, label):
+    """The provenance fields of an /api/translate reply; absent when unknown."""
+    out = {}
+    if engine:
+        out["mt_engine"] = engine
+        if label:
+            out["mt_model"] = label
+    return out
 
 
 @app.route("/api/llm/summarize", methods=["POST"])
@@ -19303,6 +19322,7 @@ def _translate_via_remote(text, source_lang, target_lang, endpoint,
     not to wait longer. Connect is split out so an unplugged peer fails in seconds rather
     than burning the whole read budget per caption.
     """
+    _mt_provenance.peer = None
     try:
         payload = {
             "text": text,
@@ -19318,6 +19338,7 @@ def _translate_via_remote(text, source_lang, target_lang, endpoint,
                              timeout=_remote_translate_timeout())
         resp.raise_for_status()
         data = resp.json()
+        _mt_provenance.peer = _session_peer_provenance(data)
         # Round-trip latency Machine A experiences for this offloaded translation
         # (network + serialization + Machine B inference). Only successful calls.
         try:
@@ -19876,7 +19897,7 @@ def _set_mt_baseline_label(label):
     _mt_baseline_label["value"] = (label or "").strip()
 
 
-def _record_mt_engine(engine, model=""):
+def _record_mt_engine(engine, model="", peer=None):
     """Note the engine that produced the translation being returned.
 
     The engine is stored on every row: it genuinely varies caption to caption, since
@@ -19889,7 +19910,10 @@ def _record_mt_engine(engine, model=""):
     _mt_provenance.engine = engine
     label = _session_mt_row_label(
         config.get("live_translation", {}), engine,
-        remote_status=_remote_effective_status(), model=model)
+        remote_status=_remote_effective_status(), model=model, peer=peer)
+    # The full label, undeduplicated: what /api/translate reports to the peer it
+    # translated for, whose own session has its own baseline.
+    _mt_provenance.label = label
     _mt_provenance.model = _session_row_label_if_changed(label, _mt_baseline_label["value"])
     # First caption of the session establishes the baseline, so it is the one row
     # that carries the label and the rest are NULL against it.
@@ -19901,6 +19925,11 @@ def _record_mt_engine(engine, model=""):
 def last_mt_provenance():
     """(engine, model) for this thread's most recent translation, or (None, None)."""
     return getattr(_mt_provenance, "engine", None), getattr(_mt_provenance, "model", None)
+
+
+def last_mt_label():
+    """(engine, full model label) for this thread's most recent translation."""
+    return getattr(_mt_provenance, "engine", None), getattr(_mt_provenance, "label", None)
 
 
 def _remote_effective_status():
@@ -19945,7 +19974,13 @@ def translate_live_text(text, source_lang, target_lang, return_extras=False, num
                         # lag is this call and how much is the emit loop around it.
                         print(f"[TRANS-DBG] remote result=ok rtt={(time.perf_counter() - _t0) * 1000:.0f}ms "
                               f"ep={_remote_ep} text='{text[:40]}'", flush=True)
-                    _record_mt_engine(MT_ENGINE_REMOTE)
+                    # Which of the peer's engines answered, when it says. A peer that
+                    # passed the source through is recorded as exactly that.
+                    _peer = getattr(_mt_provenance, "peer", None)
+                    if _peer and _peer.get("engine") == MT_ENGINE_NONE:
+                        _record_mt_engine(MT_ENGINE_NONE)
+                    else:
+                        _record_mt_engine(MT_ENGINE_REMOTE, peer=_peer)
                     return _res
                 except _RemoteTranslateError as e:
                     print(f"[REMOTE_TRANSLATE] Call failed: {e}")

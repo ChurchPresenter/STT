@@ -10,6 +10,7 @@ from stt.session_meta import (
     MT_ENGINE_WHISPER,
     asr_row_label,
     mt_row_label,
+    peer_provenance,
     row_label_if_changed,
     build_session_meta,
     changed_keys,
@@ -963,6 +964,44 @@ class TestMtRowLabel:
     def test_absent_config_does_not_raise(self):
         assert mt_row_label(None, MT_ENGINE_LLM) == ""
         assert mt_row_label(None, MT_ENGINE_REMOTE) == "remote"
+
+
+class TestPeerProvenance:
+    """Which of a paired machine's engines answered one offloaded caption.
+
+    The status-based label names the model the peer is configured with, so a caption
+    the peer's NMT model rescued after its LLM declined was recorded as the LLM's,
+    which is the scoring trap per-row provenance exists to close.
+    """
+
+    LT = {"remote": {"endpoint": "192.168.2.52:8080"}}
+
+    def test_an_older_peer_says_nothing_and_keeps_the_status_label(self):
+        assert peer_provenance({"translated_text": "x"}) is None
+        label = mt_row_label(self.LT, MT_ENGINE_REMOTE, remote_status={"model": "gemma.gguf"},
+                             peer=peer_provenance({"translated_text": "x"}))
+        assert label == "192.168.2.52:8080 (gemma.gguf)"
+
+    def test_the_peer_s_own_engine_beats_its_configured_model(self):
+        peer = peer_provenance({"mt_engine": "nmt", "mt_model": "google/madlad400-3b-mt"})
+        label = mt_row_label(self.LT, MT_ENGINE_REMOTE, remote_status={"model": "gemma.gguf"}, peer=peer)
+        assert label == "192.168.2.52:8080 (nmt: google/madlad400-3b-mt)"
+
+    def test_an_engine_without_a_model_still_names_the_engine(self):
+        peer = peer_provenance({"mt_engine": "llm"})
+        assert mt_row_label(self.LT, MT_ENGINE_REMOTE, peer=peer) == "192.168.2.52:8080 (llm)"
+
+    @pytest.mark.parametrize("reply", [None, "llm", [], {"mt_engine": 3}, {"mt_engine": "  "}])
+    def test_a_malformed_reply_is_ignored(self, reply):
+        assert peer_provenance(reply) is None
+
+    def test_a_non_string_model_is_dropped_not_stored(self):
+        assert peer_provenance({"mt_engine": "llm", "mt_model": {"x": 1}}) == {"engine": "llm"}
+
+    def test_another_machine_cannot_write_an_unbounded_label(self):
+        peer = peer_provenance({"mt_engine": "e" * 5000, "mt_model": "m" * 5000})
+        assert peer is not None
+        assert len(peer["engine"]) <= 200 and len(peer["model"]) <= 200
 
 
 class TestRemoteLlmParameters:

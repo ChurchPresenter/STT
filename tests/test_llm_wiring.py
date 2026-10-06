@@ -15,6 +15,7 @@ import pytest
 
 from conftest import extract_definitions
 from stt.model_disk import dir_has_weights, model_presence
+from stt import session_meta
 from stt.session_meta import row_label_if_changed
 
 
@@ -552,6 +553,57 @@ class TestMtBaselineEstablishesItself:
         ns["_record_mt_engine"]("none")
         assert ns["_mt_provenance"].model is None
         assert state["value"] == "", "an untranslated caption must not fix the baseline"
+
+
+class TestOffloadReportsWhichEngineAnswered:
+    """Both halves of per-caption provenance over /api/translate.
+
+    Paired machines update on different nights, so each side must work with a peer
+    that predates the fields: an old server sends none, and an old client ignores them.
+    """
+
+    def server_ns(self):
+        return extract_definitions("speech_to_text.py", ["_mt_reply_fields"])
+
+    def test_the_server_names_the_leg_that_answered(self):
+        fields = self.server_ns()["_mt_reply_fields"]("nmt", "google/madlad400-3b-mt")
+        assert fields == {"mt_engine": "nmt", "mt_model": "google/madlad400-3b-mt"}
+
+    def test_the_server_sends_nothing_it_does_not_know(self):
+        # A cache entry from before the fields existed has neither.
+        assert self.server_ns()["_mt_reply_fields"](None, None) == {}
+        assert self.server_ns()["_mt_reply_fields"]("llm", "") == {"mt_engine": "llm"}
+
+    def client_ns(self, reply):
+        class Local:
+            pass
+
+        class Resp:
+            def raise_for_status(self):
+                pass
+
+            def json(self):
+                return reply
+
+        return extract_definitions(
+            "speech_to_text.py", ["_translate_via_remote"],
+            {"_mt_provenance": Local(),
+             "_peer_request": lambda *a, **k: Resp(),
+             "_remote_translate_timeout": lambda: (5, 15),
+             "_record_remote_translate_ms": lambda ms: None,
+             "_session_peer_provenance": session_meta.peer_provenance,
+             "time": __import__("time")})
+
+    def test_the_client_keeps_what_a_new_peer_reports(self):
+        ns = self.client_ns({"translated_text": "Hello", "mt_engine": "nmt", "mt_model": "madlad"})
+        assert ns["_translate_via_remote"]("Привет", "ru", "en", "http://peer") == "Hello"
+        assert ns["_mt_provenance"].peer == {"engine": "nmt", "model": "madlad"}
+
+    def test_an_old_peer_leaves_no_stale_provenance_behind(self):
+        ns = self.client_ns({"translated_text": "Hello"})
+        ns["_mt_provenance"].peer = {"engine": "llm"}  # left by a previous caption
+        ns["_translate_via_remote"]("Привет", "ru", "en", "http://peer")
+        assert ns["_mt_provenance"].peer is None
 
 
 class TestPreloadWarmsTheRightEngine:

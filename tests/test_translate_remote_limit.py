@@ -44,7 +44,7 @@ def call_translate(payload, *, remote=None, translated="TRANSLATED", activity=No
             calls["cached"] += 1
 
     ns = extract_definitions(
-        "speech_to_text.py", ["translate_remote"],
+        "speech_to_text.py", ["translate_remote", "_mt_reply_fields"],
         extra_globals={
             "config": {"live_translation": {"remote": remote if remote is not None else {}}},
             "request": _Request(payload),
@@ -61,6 +61,7 @@ def call_translate(payload, *, remote=None, translated="TRANSLATED", activity=No
             "get_server_text_cache": _Cache,
             "translate_live_text": _translate_live_text,
             "_should_cache_translation": lambda a, b: True,
+            "last_mt_label": lambda: ("llm", "gemma.gguf"),
             "app": type("A", (), {"route": staticmethod(lambda *a, **kw: (lambda f: f))})(),
         },
     )
@@ -144,3 +145,16 @@ class TestLengthCap:
         assert status == 200
         assert body["translated_text"] == ""
         assert calls["translated"] == 0
+
+
+class TestTheReplyNamesTheEngine:
+    """The peer records which leg translated each caption from these two fields."""
+
+    def test_a_translated_caption_names_the_engine_and_model(self):
+        body, status, _ = call_translate({"text": "Слово"})
+        assert status == 200
+        assert body["mt_engine"] == "llm" and body["mt_model"] == "gemma.gguf"
+
+    def test_extras_replies_name_it_too(self):
+        body, _, _ = call_translate({"text": "Слово", "return_extras": True})
+        assert body.get("mt_engine") == "llm"
