@@ -17,7 +17,8 @@ rather than filled with the source, because a missing caption is recoverable —
 backfill and the replay harness both key on NULL — and a poisoned one is not.
 """
 
-from typing import Dict, Optional, Tuple
+import sqlite3
+from typing import Dict, Optional, Set, Tuple
 
 from stt.translation_backfill import BackfillAttempts
 
@@ -29,6 +30,12 @@ DEFAULT_MAX_ATTEMPTS = 3
 # almost certainly fail again immediately; waiting a cycle or two costs nothing anyone is
 # watching, because the source text is already on screen.
 DEFAULT_COOLDOWN_SECONDS = 20.0
+
+# How long a caption may keep waiting on a paired server that says it is busy and making
+# progress (see stt.peer_load). Long enough to wait out a sermon-summary chunk or two
+# ahead of it, short enough that a caption is not still being chased minutes after the
+# speaker moved on. A server that is *not* working gets one try, not this.
+DEFAULT_MAX_WAIT_SECONDS = 180.0
 
 
 def persist_decision(mt_engine: str, none_engine: str,
@@ -61,36 +68,62 @@ class LiveTranslationAttempts:
     """
 
     def __init__(self, max_attempts: int = DEFAULT_MAX_ATTEMPTS,
-                 cooldown_seconds: float = DEFAULT_COOLDOWN_SECONDS) -> None:
+                 cooldown_seconds: float = DEFAULT_COOLDOWN_SECONDS,
+                 max_wait_seconds: float = DEFAULT_MAX_WAIT_SECONDS) -> None:
         self._attempts = BackfillAttempts(max_attempts=max_attempts)
         self._cooldown = float(cooldown_seconds)
+        self._max_wait = float(max_wait_seconds)
         self._last_try: Dict[int, float] = {}
         self._source: Dict[int, str] = {}
+        self._first_failure: Dict[int, float] = {}
+        self._given_up: Set[int] = set()
 
     def should_attempt(self, segment_id: int, now: float) -> bool:
         """Whether this caption may be sent to the model again on this cycle."""
-        if self._attempts.exhausted(segment_id):
+        if self.exhausted(segment_id):
             return False
         last = self._last_try.get(segment_id)
         if last is None:
             return True
         return (now - last) >= self._cooldown
 
-    def record_failure(self, segment_id: int, source_text: str, now: float) -> None:
-        """Note that nothing translated this caption, keeping its text for the display."""
-        self._attempts.record(segment_id)
-        self._last_try[segment_id] = float(now)
+    def record_failure(self, segment_id: int, source_text: str, now: float,
+                       peer_working: Optional[bool] = None) -> None:
+        """Note that nothing translated this caption, keeping its text for the display.
+
+        ``peer_working`` is what a paired translation server said about itself after
+        this failure (stt.peer_load.peer_is_working):
+
+        * False: it is down, or not getting through its work. One try is all a caption
+          gets; waiting longer only spends more timeouts.
+        * True: it is busy and making progress. The try is not counted, so the caption
+          keeps waiting, until ``max_wait_seconds`` after its first failure.
+        * None: unknown, which covers a server too old to say and every failure that
+          did not involve a server at all. The plain attempt cap applies.
+        """
+        now = float(now)
+        self._last_try[segment_id] = now
         self._source[segment_id] = source_text
+        first = self._first_failure.setdefault(segment_id, now)
+        if peer_working is False:
+            self._given_up.add(segment_id)
+        elif peer_working is True:
+            if now - first >= self._max_wait:
+                self._given_up.add(segment_id)
+        else:
+            self._attempts.record(segment_id)
 
     def record_success(self, segment_id: int) -> None:
         """Forget a caption that came back translated, so it costs nothing to carry."""
         self._attempts.succeeded(segment_id)
         self._last_try.pop(segment_id, None)
         self._source.pop(segment_id, None)
+        self._first_failure.pop(segment_id, None)
+        self._given_up.discard(segment_id)
 
     def exhausted(self, segment_id: int) -> bool:
         """Whether this caption has used up its retries and should be left alone."""
-        return self._attempts.exhausted(segment_id)
+        return segment_id in self._given_up or self._attempts.exhausted(segment_id)
 
     def display_text(self, segment_id: int) -> Optional[str]:
         """The untranslated text to keep showing, or None if there is nothing pending."""
@@ -105,7 +138,58 @@ class LiveTranslationAttempts:
         self._attempts.reset()
         self._last_try = {}
         self._source = {}
+        self._first_failure = {}
+        self._given_up = set()
 
     def size(self) -> int:
         """How many captions are being carried (for tests and diagnostics)."""
         return len(self._source)
+
+
+# --- what the session database records about it --------------------------------
+#
+# A caption that needed a retry or a backfill used to be stored exactly like one that
+# translated first time, and a caption that never translated left no trace beyond the
+# log. Two columns make the path visible after the fact:
+#
+#   mt_attempts  how many times a translation was asked for. Written on every failed
+#                try too, so a row that is still NULL says how hard it was tried.
+#   mt_via       which path finally translated it: "live" (first try), "retry" (a
+#                later try by the live loop) or "backfill" (repaired after scrolling
+#                out of the live window, so it was never shown translated).
+#
+# NULL in both means the row predates the columns, or was never sent to the
+# translation loop (Whisper translate writes the target language directly).
+
+VIA_LIVE = "live"
+VIA_RETRY = "retry"
+VIA_BACKFILL = "backfill"
+
+ATTEMPT_COLUMNS = (("mt_attempts", "INTEGER"), ("mt_via", "TEXT"))
+
+# SET fragments for the UPDATE that stores a translation. SQLite evaluates every
+# right-hand side against the row as it was before the update, so the CASE sees the
+# failed tries already counted, not this one.
+LIVE_SUCCESS_SET = (
+    "mt_attempts = COALESCE(mt_attempts, 0) + 1, "
+    "mt_via = CASE WHEN COALESCE(mt_attempts, 0) = 0 THEN '%s' ELSE '%s' END" % (VIA_LIVE, VIA_RETRY)
+)
+BACKFILL_SUCCESS_SET = "mt_attempts = COALESCE(mt_attempts, 0) + 1, mt_via = '%s'" % VIA_BACKFILL
+
+
+def missing_attempt_columns(existing: Set[str]) -> Tuple[Tuple[str, str], ...]:
+    """The attempt columns a session database still lacks, as (name, type)."""
+    return tuple(col for col in ATTEMPT_COLUMNS if col[0] not in existing)
+
+
+def record_failed_attempt(conn: sqlite3.Connection, row_id: int) -> None:
+    """Count one try that came back untranslated.
+
+    Only while the row is still untranslated: a late failure from another path must
+    not add to a caption that has since been translated.
+    """
+    conn.execute(
+        "UPDATE transcriptions SET mt_attempts = COALESCE(mt_attempts, 0) + 1"
+        " WHERE id = ? AND translated_text IS NULL",
+        (row_id,),
+    )

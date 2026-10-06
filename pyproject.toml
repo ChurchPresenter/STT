@@ -63,6 +63,7 @@ module = [
     "stt.sermon_summary",
     "stt.session_index",
     "stt.translation_replay",
+    "stt.peer_load",
     "stt.translation_backfill",
     "stt.tts_queue",
     "stt.session_cleanup",

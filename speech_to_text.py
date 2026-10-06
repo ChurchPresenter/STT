@@ -1425,9 +1425,22 @@ from stt.translation_utils import (
 )
 from stt.tts_queue import SpokenTracker
 from stt.translation_backfill import BackfillAttempts, select_backfill_ids
+from stt.peer_load import (
+    FAILURE_DOWN as _PEER_DOWN,
+    FAILURE_TIMEOUT as _PEER_TIMEOUT,
+    LOAD_KEY as _PEER_LOAD_KEY,
+    WorkTracker as _WorkTracker,
+    classify_failure as _classify_peer_failure,
+    parse_load as _parse_peer_load,
+    peer_is_working as _peer_is_working,
+)
 from stt.translation_attempts import (
+    BACKFILL_SUCCESS_SET as _MT_BACKFILL_SUCCESS_SET,
+    LIVE_SUCCESS_SET as _MT_LIVE_SUCCESS_SET,
     LiveTranslationAttempts as _LiveTranslationAttempts,
+    missing_attempt_columns as _missing_attempt_columns,
     persist_decision as _persist_decision,
+    record_failed_attempt as _record_failed_attempt,
 )
 
 
@@ -4484,6 +4497,16 @@ def initialize_database(session_config=None):
                 db_cursor.execute("ALTER TABLE transcriptions ADD COLUMN mt_model TEXT DEFAULT NULL")
                 db_connection.commit()
                 print("[DB] OK: Migration complete (added asr_model, mt_engine, mt_model columns)")
+            _attempt_cols = _missing_attempt_columns(set(columns))
+            if _attempt_cols:
+                # How a caption got its translation: how many tries, and whether the
+                # live loop or the backfill finally managed it. See
+                # stt.translation_attempts.
+                print("[DB] Migrating database: adding translation attempt columns...")
+                for _col, _kind in _attempt_cols:
+                    db_cursor.execute(f"ALTER TABLE transcriptions ADD COLUMN {_col} {_kind} DEFAULT NULL")
+                db_connection.commit()
+                print("[DB] OK: Migration complete (added mt_attempts, mt_via columns)")
 
             # A row's asr_model is left NULL while the session's own model is the one
             # transcribing, because session_meta already records that and repeating it
@@ -9091,7 +9114,22 @@ def clear_translation_cache():
 
 # Remote translation endpoints
 
+# What this machine is doing for paired machines, reported in the heartbeat reply so a
+# client whose caption timed out can tell "busy" from "not answering" (stt.peer_load).
+_peer_work = _WorkTracker()
+
+
+def _tracks_peer_work(view):
+    """Count a paired machine's request as work in progress while it runs."""
+    @functools.wraps(view)
+    def _wrapped(*args, **kwargs):
+        with _peer_work.working():
+            return view(*args, **kwargs)
+    return _wrapped
+
+
 @app.route("/api/translate", methods=["POST"])
+@_tracks_peer_work
 def translate_remote():
     """Remote translation endpoint — called by a paired machine (Machine A).
     Body JSON: {text, source_lang, target_lang, return_extras, num_alternatives}
@@ -9198,6 +9236,7 @@ def _mt_reply_fields(engine, label):
 
 
 @app.route("/api/llm/summarize", methods=["POST"])
+@_tracks_peer_work
 def summarize_remote():
     """Run one summarisation prompt on this machine's model, for a paired machine.
 
@@ -9705,7 +9744,9 @@ def translate_remote_heartbeat():
     if _hb_port:
         # A moved to a different port, or we learned it for the first time.
         _remember_client_port(client_ip, _hb_port)
-    return jsonify({"success": True})
+    # Whether this machine is getting through its work: the client asks right after a
+    # caption times out, to decide whether that caption is worth waiting for.
+    return jsonify({"success": True, _PEER_LOAD_KEY: _peer_work.snapshot()})
 
 
 @app.route("/api/translate/language", methods=["POST"])
@@ -19956,6 +19997,10 @@ def translate_live_text(text, source_lang, target_lang, return_extras=False, num
     # this machine also hosts trusted clients — chaining is prevented at the server
     # endpoint (local_only) rather than by globally disabling offload here.
     remote_cfg = config.get("live_translation", {}).get("remote", {})
+    # How an offloaded call failed, for the caller deciding how long the caption waits
+    # (see _peer_working_after_failure). Reset per call: a stale value would describe
+    # an earlier caption's failure.
+    _mt_provenance.remote_failure = None
     if not local_only and remote_cfg.get("enabled") and remote_cfg.get("endpoint"):
         remote_failed = False
         try:
@@ -19987,12 +20032,14 @@ def translate_live_text(text, source_lang, target_lang, return_extras=False, num
                         _record_mt_engine(MT_ENGINE_REMOTE, peer=_peer)
                     return _res
                 except _RemoteTranslateError as e:
+                    _mt_provenance.remote_failure = (_classify_peer_failure(e), _remote_ep)
                     print(f"[REMOTE_TRANSLATE] Call failed: {e}")
                     if _dbg:
                         print(f"[TRANS-DBG] remote result=fail rtt={(time.perf_counter() - _t0) * 1000:.0f}ms "
                               f"ep={_remote_ep} err={e} text='{text[:40]}'", flush=True)
                     remote_failed = True
             else:
+                _mt_provenance.remote_failure = (_PEER_DOWN, _remote_ep)
                 print(f"[REMOTE_TRANSLATE] {_remote_ep} unreachable")
                 if _dbg:
                     print(f"[TRANS-DBG] remote result=unreachable ep={_remote_ep} text='{text[:40]}'", flush=True)
@@ -20439,8 +20486,10 @@ def emit_translated_entries():
                             _dbg_branches.append((seg_id, "warmup_skip"))
                         continue
                     if not _persist_it:
-                        _live_translate_attempts.record_failure(seg_id, translated_text,
-                                                                time.time())
+                        _live_translate_attempts.record_failure(
+                            seg_id, translated_text, time.time(),
+                            peer_working=_peer_working_after_failure())
+                        _note_failed_translation(seg_id)
                         if dbg:
                             _dbg_branches.append((seg_id, "mt_none(display-only)"))
                     elif extras is not None:
@@ -20466,7 +20515,8 @@ def emit_translated_entries():
                                     _tconn.execute("PRAGMA busy_timeout=30000")
                                     _tconn.execute(
                                         "UPDATE transcriptions SET translated_text = ?, translation_language = ?,"
-                                        " translation_ts_ms = ?, mt_engine = ?, mt_model = ? WHERE id = ?",
+                                        " translation_ts_ms = ?, mt_engine = ?, mt_model = ?, "
+                                        + _MT_LIVE_SUCCESS_SET + " WHERE id = ?",
                                         (translated_text, target_lang, int(time.time() * 1000),
                                          _mt_engine, _mt_model, seg_id),
                                     )
@@ -20590,6 +20640,57 @@ _live_translate_attempts = _LiveTranslationAttempts()
 _translation_backfill_session = {"id": None}
 
 
+def _peer_working_after_failure():
+    """Whether the paired server this thread's last caption failed on is still working.
+
+    False when it could not be reached, True or False from its own report when the
+    call timed out, None (the plain attempt cap) for anything else, including every
+    failure that never involved a paired server. Must be called on the thread that
+    translated, straight after.
+    """
+    failure = getattr(_mt_provenance, "remote_failure", None)
+    if not failure:
+        return None
+    kind, endpoint = failure
+    if kind == _PEER_DOWN:
+        return False
+    if kind != _PEER_TIMEOUT:
+        return None
+    try:
+        resp = _peer_request(
+            "POST", endpoint, "/api/translate/heartbeat",
+            json={"port": coerce_int(config.get("web_server", {}).get("port"),
+                                     _DEFAULT_PORT, lo=1, hi=65535)},
+            timeout=3)
+        working = _peer_is_working(_parse_peer_load(resp.json()))
+    except Exception as e:
+        # Too busy to answer a heartbeat in 3s is not a server that is getting through
+        # its queue.
+        print(f"[REMOTE_TRANSLATE] {endpoint} did not answer a status check ({type(e).__name__})")
+        return False
+    print(f"[REMOTE_TRANSLATE] after a timeout {endpoint} reports "
+          f"{'working' if working else 'not working' if working is False else 'nothing (older version)'}")
+    return working
+
+
+def _note_failed_translation(seg_id):
+    """Count a try that came back untranslated in the session database (mt_attempts).
+
+    Best-effort and never raised: losing one count costs a little trace, while an
+    exception here would cost the caption loop.
+    """
+    try:
+        current_db = _ts_get("db_name")
+        if not current_db or not os.path.exists(current_db):
+            return
+        with sqlite3.connect(current_db, timeout=30.0) as _conn:
+            _conn.execute("PRAGMA busy_timeout=30000")
+            _record_failed_attempt(_conn, seg_id)
+            _conn.commit()
+    except Exception as e:
+        print(f"[TRANSLATION] could not record a failed attempt for segment {seg_id}: {e}", flush=True)
+
+
 def _run_translation_backfill(entries, source_lang, target_lang, dbg=False):
     """Translate one caption that has fallen behind the live translation window.
 
@@ -20649,8 +20750,10 @@ def _run_translation_backfill(entries, source_lang, target_lang, dbg=False):
         _translation_backfill.record(seg_id)
         translated = translate_live_text(text_by_id[seg_id], source_lang, target_lang)
         if not translated or not translated.strip():
+            _note_failed_translation(seg_id)
             return  # counted as an attempt; gives up after DEFAULT_MAX_ATTEMPTS
         if is_whisper_hallucination(translated):
+            _note_failed_translation(seg_id)
             return
 
         _mt_engine, _mt_model = last_mt_provenance()
@@ -20659,13 +20762,15 @@ def _run_translation_backfill(entries, source_lang, target_lang, dbg=False):
         # retried next cycle — but persisting it here would permanently mark the
         # caption translated with its own source. Leave it NULL and retry.
         if _mt_engine == MT_ENGINE_NONE:
+            _note_failed_translation(seg_id)
             return
 
         with sqlite3.connect(current_db, timeout=30.0) as _conn:
             _conn.execute("PRAGMA busy_timeout=30000")
             _conn.execute(
                 "UPDATE transcriptions SET translated_text = ?, translation_language = ?,"
-                " translation_ts_ms = ?, mt_engine = ?, mt_model = ? WHERE id = ?",
+                " translation_ts_ms = ?, mt_engine = ?, mt_model = ?, "
+                + _MT_BACKFILL_SUCCESS_SET + " WHERE id = ?",
                 (translated, target_lang, int(time.time() * 1000),
                  _mt_engine, _mt_model, seg_id),
             )
