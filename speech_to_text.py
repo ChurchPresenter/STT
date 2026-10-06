@@ -20776,6 +20776,7 @@ def emit_tts_audio():
 # names are re-imported here so the pipeline call sites below stay unchanged.
 from stt import segment_disposition as _segment_disposition
 from stt.disposition_stats import DispositionStats as _DispositionStats
+from stt.music_gate import MusicGate as _MusicGate
 from stt import text_utils as _text_utils
 from stt.text_utils import (  # noqa: F401
     DEFAULT_WHISPER_HALLUCINATIONS,
@@ -20802,13 +20803,14 @@ def is_whisper_hallucination(text):
 
 
 _disposition_stats = _DispositionStats()
+_music_gate = _MusicGate()
 _disposition_pushed_at = 0.0
 
 
-def decide_segment(text, *, cjk_deny=False, music_label=None, transcribe_music=False, music_reason="music", audio_tag=None):
+def decide_segment(text, *, cjk_deny=False, music_label=None, transcribe_music=False, music_reason="music", audio_tag=None, count=True):
     """Keep, strip a glued credit from, or deny one sentence (see stt/segment_disposition.py).
 
-    Also counts the outcome for /api/health (stt/disposition_stats.py): counts only, never text."""
+    Also counts the outcome for the corrections-page alert (stt/disposition_stats.py): counts only, never text."""
     global _disposition_pushed_at
     verdict = _segment_disposition.decide(
         text,
@@ -20818,6 +20820,8 @@ def decide_segment(text, *, cjk_deny=False, music_label=None, transcribe_music=F
         transcribe_music=transcribe_music,
         music_reason=music_reason,
     )
+    if not count:
+        return verdict
     try:
         now = time.time()
         _disposition_stats.record(verdict, audio_tag, now)
@@ -22215,6 +22219,9 @@ def thread1_function(ts, cq, cfq, cal_state, cal_data, cal_step1, asq):
                         transcription_state["queue_depth"] = None
                         _disposition_stats.reset()
                         transcription_state["filter_stats"] = None
+                        _gate_cfg = (config.get("speech_type_detection") or {})
+                        _music_gate.configure(_gate_cfg.get("music_override_trip_after", 3),
+                                              _gate_cfg.get("music_override_cooldown_seconds", 30))
                     print("[READY] Transcription system initialized successfully!")
 
                     # Health-dashboard performance accounting (worker-local; pushed
@@ -22669,9 +22676,13 @@ def thread1_function(ts, cq, cfq, cal_state, cal_data, cal_step1, asq):
                                 # transcribe_detected_music toggle only controls whether its
                                 # rows are visible or auto-denied ('music') at insert time.
                                 _std_cfg = process_config.get("speech_type_detection", {})
+                                # The override backs off when only subtitle credits come back from it
+                                # (an instrumental prelude): stt/music_gate.py.
                                 if (not speech_detected
                                         and (transcription_state.get("music_prob") or 0.0)
-                                            > _std_cfg.get("music_prob_threshold", 0.5)):
+                                            > _std_cfg.get("music_prob_threshold", 0.5)
+                                        and (not _std_cfg.get("music_override_backoff", True)
+                                             or _music_gate.allow(time.time()))):
                                     speech_detected = True
 
                                 # Check if phrase is complete (silence after speech)
@@ -23429,6 +23440,12 @@ def thread1_function(ts, cq, cfq, cal_state, cal_data, cal_step1, asq):
                                     if pending_remainder:
                                         current_text = (pending_remainder + " " + current_text).strip()
                                     if current_text:
+                                        # Every decode that produced text tells the music override whether
+                                        # it is finding speech or only credits (stt/music_gate.py).
+                                        _credit_only = decide_segment(current_text, count=False)
+                                        if _music_gate.record(_credit_only.denied and _credit_only.reason == "hallucination", time.time()):
+                                            print(f"[MUSIC-GATE] only credits came back from music; not forcing decodes for "
+                                                  f"{int(_music_gate.cooldown)}s (shut {_music_gate.trips}x this session)", flush=True)
                                         # Single update so text/timing/confidence stay consistent
                                         # for readers in the Flask process
                                         _live_update = {

@@ -126,6 +126,13 @@ def apply_profanity_filter(text: str, cfg: dict) -> str:
     return re.sub(pattern, replacement, text, flags=re.IGNORECASE)
 
 
+#: A credit's lead-in word on its own. Whisper writes a credit one word at a time, so the live
+#: preview and a pending fragment show just "Субтитры" before the rest arrives; the stems in
+#: the phrase list are two words and never match it. Whole-text only: the word inside a
+#: sentence is speech.
+LONE_CREDIT_WORDS = frozenset({"субтитры", "subtitles"})
+
+
 def is_whisper_hallucination(text: Optional[str], phrases: Sequence[str]) -> bool:
     """Whether text contains a known Whisper hallucination.
 
@@ -146,6 +153,8 @@ def is_whisper_hallucination(text: Optional[str], phrases: Sequence[str]) -> boo
         return False  # Filter disabled or empty
 
     text_normalized = normalize_for_hallucination_check(text)
+    if text_normalized in LONE_CREDIT_WORDS:
+        return True
     for hallucination in phrases:
         if normalize_for_hallucination_check(hallucination) in text_normalized:
             return True

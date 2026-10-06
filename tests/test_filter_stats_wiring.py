@@ -37,3 +37,19 @@ def test_a_new_session_zeroes_the_filter_counts():
 def test_filter_log_tag_is_allowlisted_for_diagnostics():
     from stt.diagnostics import LOG_TAGS
     assert "FILTER" in LOG_TAGS and '[FILTER]' in SRC
+
+
+def test_music_override_is_governed_by_the_gate():
+    assert "_music_gate.allow(time.time())" in SRC
+    assert '_std_cfg.get("music_override_backoff", True)' in SRC
+
+
+def test_every_decode_feeds_the_gate_and_a_new_session_reconfigures_it():
+    assert '_music_gate.record(_credit_only.denied and _credit_only.reason == "hallucination", time.time())' in SRC
+    assert "decide_segment(current_text, count=False)" in SRC
+    assert "_music_gate.configure(" in SRC
+
+
+def test_music_gate_log_tag_is_allowlisted():
+    from stt.diagnostics import LOG_TAGS
+    assert "MUSIC-GATE" in LOG_TAGS and "[MUSIC-GATE]" in SRC

@@ -444,3 +444,16 @@ class TestStripHallucinations:
         assert strip_hallucinations("hello", []) == "hello"
         assert strip_hallucinations("", PHRASES) == ""
         assert strip_hallucinations(None, PHRASES) == ""
+
+
+class TestLoneCreditWord:
+    def test_bare_lead_in_is_a_hallucination(self):
+        assert is_whisper_hallucination("Субтитры", ["Субтитры создавал"])
+        assert is_whisper_hallucination("  субтитры. ", ["Субтитры создавал"])
+        assert is_whisper_hallucination("Subtitles", ["Subtitles by"])
+
+    def test_the_word_inside_a_sentence_is_speech(self):
+        assert not is_whisper_hallucination("Включите субтитры для всех", ["Субтитры создавал"])
+
+    def test_filter_disabled_means_no_phrases_and_no_match(self):
+        assert not is_whisper_hallucination("Субтитры", [])

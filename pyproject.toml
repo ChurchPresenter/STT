@@ -95,6 +95,7 @@ module = [
     "stt.fd_limit",
     "stt.segment_disposition",
     "stt.disposition_stats",
+    "stt.music_gate",
     "stt.asr_replay",
 ]
 disallow_untyped_defs = true
