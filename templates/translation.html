@@ -1017,9 +1017,7 @@
                     document.getElementById('repetition_penalty').value = repPenalty;
                     document.getElementById('repPenaltyValue').textContent = parseFloat(repPenalty).toFixed(1);
 
-                    const contextWindow = currentSettings.context_window ?? 1;
-                    document.getElementById('context_window').value = contextWindow;
-                    document.getElementById('contextWindowValue').textContent = contextWindow;
+                    showContextWindowFor(currentSettings.translation_method || 'nllb');
 
                     // Translation alternatives
                     const altCount = data.translation_count ?? 3;
@@ -1185,7 +1183,9 @@
                     no_repeat_ngram_size: parseInt(document.getElementById('no_repeat_ngram_size').value),
                     repetition_penalty: parseFloat(document.getElementById('repetition_penalty').value),
                 },
-                context_window: parseInt(document.getElementById('context_window').value),
+                // One slider, two settings: the LLM keeps its own (llm.context_window).
+                ...(document.getElementById('translation_method').value === 'llm'
+                    ? {} : {context_window: parseInt(document.getElementById('context_window').value)}),
                 llm: collectLlmSettings(),
                 remote: {
                     enabled: document.getElementById('remote_translation_enabled').checked,
@@ -1537,6 +1537,7 @@
             const method = document.getElementById('translation_method').value;
             // Show the engine's own language set (NLLB ~200, MADLAD ~400, LLM ~28).
             switchLanguageSet(method);
+            showContextWindowFor(method);
             const whisperTransWarn = document.getElementById('whisper_translate_warning');
             const whisperForcedWarn = document.getElementById('whisper_forced_warning');
             const nllbRemoteSection = document.getElementById('nllb_remote_section');
@@ -1805,8 +1806,22 @@
             markDirty();
         }
 
+        // The Context Window slider edits whichever engine is selected: the LLM has its
+        // own setting (default 1), the NLLB/MADLAD models keep the top-level one.
+        function showContextWindowFor(method) {
+            const llm = (currentSettings && currentSettings.llm) || {};
+            const value = method === 'llm'
+                ? (llm.context_window ?? 1)
+                : ((currentSettings && currentSettings.context_window) ?? 1);
+            document.getElementById('context_window').value = value;
+            document.getElementById('contextWindowValue').textContent = value;
+        }
+
         function collectLlmSettings() {
+            const llmContext = document.getElementById('translation_method').value === 'llm'
+                ? {context_window: parseInt(document.getElementById('context_window').value, 10)} : {};
             return {
+                ...llmContext,
                 provider: document.getElementById('llm_provider').value,
                 prompt_style: document.getElementById('llm_prompt_style').value,
                 endpoint: document.getElementById('llm_endpoint').value.trim(),

@@ -997,6 +997,7 @@ from stt.ct2_translate import (  # noqa: F401
 )
 # Session provenance: which models/decode settings produced a given transcript.
 from stt.llm_translate import (
+    effective_context_window as _effective_context_window,
     DEFAULT_SYSTEM_PROMPT_TEMPLATE as _DEFAULT_LLM_SYSTEM_PROMPT,
     build_chat_messages as _llm_chat_messages,
     build_chat_payload as _llm_chat_payload,
@@ -8468,6 +8469,9 @@ def save_translation_settings():
             _llm["warmup_timeout_ms"] = coerce_int(_sent.get("warmup_timeout_ms"), 180000, lo=1000, hi=900000)
         if "keep_alive" in _sent:
             _llm["keep_alive"] = _sent["keep_alive"]
+        # The LLM's own context window; the top-level one stays the NMT models'.
+        if "context_window" in _sent:
+            _llm["context_window"] = coerce_int(_sent.get("context_window"), 1, lo=1, hi=5)
         _llm_before = dict(config.get("live_translation", {}).get("llm", {}) or {})
         config["live_translation"]["llm"] = _llm
         # Only a change that affects which weights are resident forces a reload —
@@ -9016,7 +9020,7 @@ def get_translation_status():
         "llm_retry_on_reject": _llm_retry_enabled(_llm_cfg) if _using_llm else None,
         "llm_fallback": ((_llm_cfg.get("fallback") or "nmt").strip().lower()
                          if _using_llm else None),
-        "llm_context_window": coerce_int(trans_config.get("context_window"), 1, lo=1, hi=10) if _using_llm else None,
+        "llm_context_window": _effective_context_window(trans_config) if _using_llm else None,
         # The effective prompt, built exactly as the caption path builds it — not the
         # configured value, which is usually blank and says nothing about what was sent.
         "llm_system_prompt": (_llm_system_prompt(
@@ -20153,7 +20157,9 @@ def emit_translated_entries():
             n_alternatives = corrections_cfg.get("n_best_alternatives", {}).get("translation_count", 3) if corrections_cfg.get("enabled", True) else 0
 
             # Max 5: beyond that the combined NLLB input approaches the 1024-token truncation
-            context_window = max(1, min(5, int(trans_config.get("context_window", 1) or 1)))
+            # The LLM has its own setting (live_translation.llm.context_window, default 1);
+            # see stt.llm_translate.effective_context_window.
+            context_window = _effective_context_window(trans_config)
 
             # The LLM has its own, much smaller ceiling: n_ctx. Where NLLB silently
             # truncates a too-long input, llama.cpp raises and the caption drops to the

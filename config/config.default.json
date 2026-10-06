@@ -500,6 +500,8 @@
       "_speed_comment": "Speech speed multiplier (0.5 = half speed, 2.0 = double speed). Honoured by edge and supertonic; piper's pace is fixed by the downloaded voice."
     },
     "llm": {
+      "context_window": 1,
+      "_context_window_comment": "Captions sent together when the LLM translates. Separate from the top-level context_window, which only the NLLB/MADLAD models use. 1 measured best: more context made no caption better and every caption slower.",
       "provider": "endpoint",
       "_provider_comment": "'local' runs a GGUF in-process via llama-cpp-python: no server, no extra installer, no port — the option that works on a fresh Windows/Linux/macOS install. 'endpoint' talks to any OpenAI-compatible server you already run (Ollama, LM Studio, llama-server, vLLM, hosted).",
       "endpoint": "",

@@ -19,6 +19,7 @@ import pytest
 from conftest import extract_definitions
 from stt.coercion import coerce_int
 from stt.llm_translate import (
+    effective_context_window,
     DEFAULT_SYSTEM_PROMPT_TEMPLATE,
     build_system_prompt,
     uses_local_llm,
@@ -75,6 +76,7 @@ def call_status(live_translation, *, local_llm=None, device=None, is_ct2=False,
             # can record the configuration that shaped its captions and not only
             # the model's name. These are the helpers that answer that.
             "coerce_int": coerce_int,
+            "_effective_context_window": effective_context_window,
             "_LLM_MIN_N_CTX": 1024,
             "_llm_system_prompt": build_system_prompt,
             "_DEFAULT_LLM_SYSTEM_PROMPT": DEFAULT_SYSTEM_PROMPT_TEMPLATE,
@@ -224,12 +226,16 @@ class TestLlmParametersReported:
     """
 
     def test_the_generation_settings_are_reported(self):
-        cfg = dict(LLM_LOCAL, context_window=2,
-                   llm=dict(LLM_LOCAL["llm"], max_tokens=200, n_ctx=4096))
+        cfg = dict(LLM_LOCAL, llm=dict(LLM_LOCAL["llm"], max_tokens=200, n_ctx=4096, context_window=2))
         status = call_status(cfg, local_llm=object())
         assert status["llm_max_tokens"] == 200
         assert status["llm_n_ctx"] == 4096
         assert status["llm_context_window"] == 2
+
+    def test_the_nmt_context_window_is_not_reported_as_the_llm_s(self):
+        # The top-level context_window belongs to NLLB/MADLAD; the LLM defaults to 1.
+        status = call_status(dict(LLM_LOCAL, context_window=3), local_llm=object())
+        assert status["llm_context_window"] == 1
 
     def test_the_rejection_behaviour_is_reported(self):
         cfg = dict(LLM_LOCAL, llm=dict(LLM_LOCAL["llm"],

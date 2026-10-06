@@ -1208,3 +1208,30 @@ class TestCyrillicTargetScript:
         assert validate_translation(mostly_russian, self.SRC_EN, "ru") == mostly_russian
         half_english = "Grace and peace to you, братья."
         assert validate_translation(half_english, self.SRC_EN, "ru") is None
+
+
+class TestEffectiveContextWindow:
+    """The LLM has its own context setting; NMT keeps the one it always had."""
+
+    def test_the_llm_defaults_to_one_whatever_the_nmt_setting_says(self):
+        from stt.llm_translate import effective_context_window
+        assert effective_context_window({"translation_method": "llm", "context_window": 3}) == 1
+
+    def test_an_explicit_llm_setting_is_honoured(self):
+        from stt.llm_translate import effective_context_window
+        assert effective_context_window({"translation_method": "llm", "llm": {"context_window": 2}}) == 2
+
+    def test_nmt_keeps_its_own_setting(self):
+        from stt.llm_translate import effective_context_window
+        assert effective_context_window({"translation_method": "madlad", "context_window": 2,
+                                         "llm": {"context_window": 1}}) == 2
+        assert effective_context_window({"context_window": 3}) == 3
+
+    @pytest.mark.parametrize("cfg,expected", [
+        (None, 1), ({}, 1), ({"context_window": "x"}, 1), ({"context_window": 99}, 5),
+        ({"context_window": 0}, 1), ({"translation_method": "LLM", "llm": "broken"}, 1),
+        ({"translation_method": "llm", "llm": {"context_window": True}}, 1),
+    ])
+    def test_unusable_values_fall_back_and_clamp(self, cfg, expected):
+        from stt.llm_translate import effective_context_window
+        assert effective_context_window(cfg) == expected

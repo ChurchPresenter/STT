@@ -84,6 +84,7 @@ _LLM_KEYS = (
     # still warming up".
     "retry_on_reject",
     "fallback",
+    "context_window",
 )
 
 # Provider-specific keys: recording an endpoint for a local session (or GPU

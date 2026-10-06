@@ -198,6 +198,38 @@ def language_name(code: Optional[str], names: Optional[Mapping[str, str]] = None
     return text
 
 
+# How many captions to send together when the LLM translates. One: gluing earlier
+# captions in front of the current one and cutting their translation back out failed
+# that cut on 100 of 603 captions (gemma-3-4b, 2026-08-03) for no gain in accepted
+# captions. Passing them as chat turns instead was measured on 2026-10-06 (gemma-4-12b,
+# two services, 1210 captions): nothing fixed, nothing broken, about 450 ms slower.
+# The NMT models keep their own setting, top-level context_window, which this does not
+# touch: nobody has measured context on NLLB or MADLAD.
+DEFAULT_LLM_CONTEXT_WINDOW = 1
+_CONTEXT_WINDOW_MAX = 5
+
+
+def effective_context_window(lt_cfg: Optional[Mapping[str, Any]]) -> int:
+    """The context window the live caption path uses, for the engine this box runs.
+
+    ``live_translation.llm.context_window`` when ``translation_method`` is "llm", else
+    the top-level ``context_window``. Clamped to 1-5 like the UI slider; anything
+    unusable reads as that engine's default.
+    """
+    lt = lt_cfg if isinstance(lt_cfg, Mapping) else {}
+    if str(lt.get("translation_method") or "").strip().lower() == "llm":
+        llm = lt.get("llm")
+        raw = llm.get("context_window") if isinstance(llm, Mapping) else None
+        default = DEFAULT_LLM_CONTEXT_WINDOW
+    else:
+        raw, default = lt.get("context_window"), 1
+    try:
+        value = int(raw) if raw is not None and not isinstance(raw, bool) else default
+    except (TypeError, ValueError):
+        value = default
+    return max(1, min(_CONTEXT_WINDOW_MAX, value))
+
+
 def build_system_prompt(base_prompt: str, target_lang: Optional[str],
                         names: Optional[Mapping[str, str]] = None) -> str:
     """The system prompt for a given target language.
