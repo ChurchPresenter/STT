@@ -64,6 +64,7 @@ module = [
     "stt.session_index",
     "stt.translation_replay",
     "stt.peer_load",
+    "stt.offload_jobs",
     "stt.translation_backfill",
     "stt.tts_queue",
     "stt.session_cleanup",

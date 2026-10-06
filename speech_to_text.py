@@ -1425,6 +1425,7 @@ from stt.translation_utils import (
 )
 from stt.tts_queue import SpokenTracker
 from stt.translation_backfill import BackfillAttempts, select_backfill_ids
+from stt.offload_jobs import OffloadJobs as _OffloadJobs
 from stt.peer_load import (
     FAILURE_DOWN as _PEER_DOWN,
     FAILURE_TIMEOUT as _PEER_TIMEOUT,
@@ -20239,6 +20240,18 @@ def emit_translated_entries():
 
             max_translations_per_cycle = 3  # Limit new translations per cycle so cached segments emit fast
 
+            # Offloaded calls run beside this loop (stt.offload_jobs) so one slow call
+            # holds up only its own caption. Only with fallback "skip": with "local" a
+            # failed call falls through to this machine's own model, and those models
+            # are only safe on one thread. Local translation stays inline as before.
+            _rc_cycle = trans_config.get("remote", {}) or {}
+            _offload_concurrent = bool(
+                _rc_cycle.get("enabled") and _rc_cycle.get("endpoint")
+                and _rc_cycle.get("fallback", "skip") == "skip"
+                and not _whisper_translation_active and not DEMO)
+            _cycle_session = _ts_get("session_id")
+            _offload_jobs.drop_other_sessions(_cycle_session)
+
             # Budget the cycle's fresh translations newest-first (with one slot
             # reserved for the oldest so the tail still clears). FIFO drain would
             # translate the segment a live consumer needs *last* during a backlog.
@@ -20258,6 +20271,8 @@ def emit_translated_entries():
                         continue  # translation already stored in DB
                     if cache.get(_e[0], _e[2], target_lang) or cache.get(_e[0], _e[2], target_lang, accept_stale_lang=True):
                         continue
+                    if _offload_jobs.busy(_cycle_session, _e[0]):
+                        continue  # already with the paired server, or its answer is waiting
                     if not _live_translate_attempts.should_attempt(_e[0], _now_cycle):
                         # Tried recently and nothing translated it. Retrying every 0.5s
                         # cycle would spend a 15s timeout per cycle per caption on a slow
@@ -20271,6 +20286,12 @@ def emit_translated_entries():
                     _allowed_fresh = set(_pending_fresh[-(max_translations_per_cycle - 1):]) | {_pending_fresh[0]}
                 else:
                     _allowed_fresh = set(_pending_fresh)
+                if _offload_concurrent:
+                    # Only as many as there are free slots: the rest wait their turn
+                    # newest-first, as they would have inline.
+                    _free = _offload_jobs.slots()
+                    if len(_allowed_fresh) > _free:
+                        _allowed_fresh = set(sorted(_allowed_fresh, reverse=True)[:_free])
                 # Published for the sermon summariser, which shares the local model and
                 # steps aside while captions are queued. Republished inside the loop below
                 # as well: one publish per cycle goes stale during the very cycle it
@@ -20313,6 +20334,7 @@ def emit_translated_entries():
             for idx, entry in enumerate(e for e in entries if not e[10]):
                 seg_id = entry[0]
                 original_text = entry[2]
+                _fresh = None  # this caption's (translation, extras, engine, model, peer) when one arrives
                 # Re-stamp the backlog hint as the cycle goes. Published once at the top of
                 # the cycle it is already a minute old by the end of a backlogged one, and
                 # the summariser reads a stale hint as "the pump is idle" — which is how a
@@ -20396,77 +20418,75 @@ def emit_translated_entries():
                         if dbg:
                             _dbg_branches.append((seg_id, "db_seed"))
                         continue
+                    # An offloaded call that has finished since the last cycle: apply it
+                    # below exactly as an inline one would be. One still running keeps
+                    # its caption off the screen until it answers, as a slow inline call
+                    # did, but without holding up anything else.
+                    _found, _answer = _offload_jobs.take(_cycle_session, seg_id)
+                    if _found:
+                        if isinstance(_answer, Exception):
+                            print(f"[TRANSLATION] offloaded call for segment {seg_id} failed: {_answer}", flush=True)
+                            _answer = (original_text, None, MT_ENGINE_NONE, None, None)
+                        _fresh = _answer
+                        if dbg:
+                            _dbg_branches.append((seg_id, "offload(answer)"))
+                    elif _offload_jobs.busy(_cycle_session, seg_id):
+                        if dbg:
+                            _dbg_branches.append((seg_id, "offload(in-flight)"))
+                        continue
                     # Over this cycle's translation budget — a later cycle picks it
                     # up (newest-first); skip emission until it's translated
-                    if seg_id not in _allowed_fresh:
+                    elif seg_id not in _allowed_fresh:
                         if dbg:
                             _dbg_branches.append((seg_id, "over_budget"))
                         continue
 
-                    # Build context from preceding segments if context_window > 1.
-                    # The combined (context + target) text is translated in one call, then the
-                    # target's portion is extracted by sentence-count alignment. If alignment
-                    # fails (translator merged sentences), fall back to translating the target
-                    # alone - never emit the combined translation.
-                    text_to_translate = original_text
-                    num_ctx_sentences = 0
-                    ctx_char_ratio = None
-                    if context_window > 1 and idx > 0:
-                        ctx_start = max(0, idx - (context_window - 1))
-                        context_texts = [entries[j][2] for j in range(ctx_start, idx)]
-                        if context_texts and _llm_ctx_budget is not None:
-                            _fitted = _llm_fit_context(
-                                context_texts, original_text, _llm_ctx_budget,
-                                counter=_llm_ctx_counter)
-                            if len(_fitted) != len(context_texts):
-                                if not _llm_ctx_shrunk:
-                                    print(f"[LLM-TRANSLATE] context trimmed to "
-                                          f"{len(_fitted)}/{len(context_texts)} segments "
-                                          f"to fit the {_llm_ctx_budget}-token budget")
-                                    _llm_ctx_shrunk = True
-                                context_texts = _fitted
-                        if context_texts:
-                            context_prefix = " ".join(context_texts)
-                            num_ctx_sentences = count_sentence_units(context_prefix)
-                            text_to_translate = context_prefix + " " + original_text
-                            # Context share of the source — guides the proportional
-                            # split when the translator merges sentences
-                            ctx_char_ratio = (len(context_prefix) + 1) / max(1, len(text_to_translate))
+                    if not _found:
+                        # Build context from preceding segments if context_window > 1.
+                        # The combined (context + target) text is translated in one call, then the
+                        # target's portion is extracted by sentence-count alignment. If alignment
+                        # fails (translator merged sentences), fall back to translating the target
+                        # alone - never emit the combined translation.
+                        text_to_translate = original_text
+                        num_ctx_sentences = 0
+                        ctx_char_ratio = None
+                        if context_window > 1 and idx > 0:
+                            ctx_start = max(0, idx - (context_window - 1))
+                            context_texts = [entries[j][2] for j in range(ctx_start, idx)]
+                            if context_texts and _llm_ctx_budget is not None:
+                                _fitted = _llm_fit_context(
+                                    context_texts, original_text, _llm_ctx_budget,
+                                    counter=_llm_ctx_counter)
+                                if len(_fitted) != len(context_texts):
+                                    if not _llm_ctx_shrunk:
+                                        print(f"[LLM-TRANSLATE] context trimmed to "
+                                              f"{len(_fitted)}/{len(context_texts)} segments "
+                                              f"to fit the {_llm_ctx_budget}-token budget")
+                                        _llm_ctx_shrunk = True
+                                    context_texts = _fitted
+                            if context_texts:
+                                context_prefix = " ".join(context_texts)
+                                num_ctx_sentences = count_sentence_units(context_prefix)
+                                text_to_translate = context_prefix + " " + original_text
+                                # Context share of the source — guides the proportional
+                                # split when the translator merges sentences
+                                ctx_char_ratio = (len(context_prefix) + 1) / max(1, len(text_to_translate))
 
-                    # Translate with confidence/alternatives if corrections enabled
-                    if _want_conf_cycle or _n_alt_cycle > 0:
-                        result = translate_live_text(
-                            text_to_translate, source_lang, target_lang,
-                            return_extras=True, num_alternatives=_n_alt_cycle,
-                        )
-                        if num_ctx_sentences:
-                            extracted = extract_context_translation(result.get("text", ""), num_ctx_sentences, ctx_char_ratio)
-                            if extracted:
-                                result["text"] = extracted
-                                result["alternatives"] = [
-                                    alt_extracted for alt_extracted in (
-                                        extract_context_translation(a, num_ctx_sentences, ctx_char_ratio)
-                                        for a in result.get("alternatives", [])
-                                    ) if alt_extracted
-                                ]
-                            else:
-                                # Alignment failed - retranslate without context
-                                result = translate_live_text(
-                                    original_text, source_lang, target_lang,
-                                    return_extras=True, num_alternatives=_n_alt_cycle,
-                                )
-                        translated_text = result["text"]
-                        extras = {"confidence": result.get("confidence"), "alternatives": result.get("alternatives", [])}
-                    else:
-                        translated_text = translate_live_text(text_to_translate, source_lang, target_lang)
-                        if num_ctx_sentences and isinstance(translated_text, str):
-                            extracted = extract_context_translation(translated_text, num_ctx_sentences, ctx_char_ratio)
-                            translated_text = extracted if extracted else translate_live_text(original_text, source_lang, target_lang)
-                        extras = None
+                        _call = functools.partial(
+                            _translate_fresh_caption, text_to_translate, original_text,
+                            num_ctx_sentences, ctx_char_ratio, _want_conf_cycle or _n_alt_cycle > 0,
+                            _n_alt_cycle, source_lang, target_lang)
+                        if _offload_concurrent:
+                            # Off this thread, so a slow call holds up only its own caption.
+                            # The answer is applied by the branch above on a later cycle.
+                            _offload_jobs.submit(_cycle_session, seg_id, _call)
+                            if dbg:
+                                _dbg_branches.append((seg_id, "offload(submitted)"))
+                            continue
+                        _fresh = _call()
 
-                    # Read before anything else translates on this thread: the record
-                    # is the last call's, and the in-progress line below makes one.
-                    _mt_engine, _mt_model = last_mt_provenance()
+                if _fresh is not None:
+                    translated_text, extras, _mt_engine, _mt_model, _peer_working = _fresh
                     # Two ways translate_live_text hands back the source text rather than a
                     # translation, and they need different answers:
                     #
@@ -20487,8 +20507,7 @@ def emit_translated_entries():
                         continue
                     if not _persist_it:
                         _live_translate_attempts.record_failure(
-                            seg_id, translated_text, time.time(),
-                            peer_working=_peer_working_after_failure())
+                            seg_id, translated_text, time.time(), peer_working=_peer_working)
                         _note_failed_translation(seg_id)
                         if dbg:
                             _dbg_branches.append((seg_id, "mt_none(display-only)"))
@@ -20634,6 +20653,54 @@ def emit_translated_entries():
 
 
 _translation_backfill = BackfillAttempts()
+# Offloaded caption calls in flight beside emit_translated_entries.
+_offload_jobs = _OffloadJobs()
+
+
+def _translate_fresh_caption(text_to_translate, original_text, num_ctx_sentences,
+                             ctx_char_ratio, want_extras, n_alt, source_lang, target_lang):
+    """One caption through translate_live_text, with any context cut back out.
+
+    Returns (translated_text, extras, mt_engine, mt_model, peer_working). Reads only its
+    arguments and this thread's own provenance, so it may run on the emit loop's thread
+    or beside it (stt.offload_jobs). It changes no shared state: the caller applies the
+    result.
+    """
+    if want_extras:
+        result = translate_live_text(
+            text_to_translate, source_lang, target_lang,
+            return_extras=True, num_alternatives=n_alt,
+        )
+        if num_ctx_sentences:
+            extracted = extract_context_translation(result.get("text", ""), num_ctx_sentences, ctx_char_ratio)
+            if extracted:
+                result["text"] = extracted
+                result["alternatives"] = [
+                    alt_extracted for alt_extracted in (
+                        extract_context_translation(a, num_ctx_sentences, ctx_char_ratio)
+                        for a in result.get("alternatives", [])
+                    ) if alt_extracted
+                ]
+            else:
+                # Alignment failed - retranslate without context
+                result = translate_live_text(
+                    original_text, source_lang, target_lang,
+                    return_extras=True, num_alternatives=n_alt,
+                )
+        translated_text = result["text"]
+        extras = {"confidence": result.get("confidence"), "alternatives": result.get("alternatives", [])}
+    else:
+        translated_text = translate_live_text(text_to_translate, source_lang, target_lang)
+        if num_ctx_sentences and isinstance(translated_text, str):
+            extracted = extract_context_translation(translated_text, num_ctx_sentences, ctx_char_ratio)
+            translated_text = extracted if extracted else translate_live_text(original_text, source_lang, target_lang)
+        extras = None
+    # Read before anything else translates on this thread: the record is the last call's.
+    mt_engine, mt_model = last_mt_provenance()
+    # Asked only when nothing translated it, and here rather than by the caller because
+    # how a paired server failed is this thread's record too.
+    peer_working = _peer_working_after_failure() if mt_engine == MT_ENGINE_NONE else None
+    return translated_text, extras, mt_engine, mt_model, peer_working
 # Captions the live loop could not translate: retried on a cooldown, given up on after
 # a few tries, and never written into the database as their own translation.
 _live_translate_attempts = _LiveTranslationAttempts()

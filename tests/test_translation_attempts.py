@@ -224,7 +224,7 @@ class TestWaitingOnAPeer:
         assert a.display_text(1) == "Мир вам", "the transcription stays on screen"
 
     def test_a_busy_server_making_progress_keeps_the_caption_waiting(self):
-        a = LiveTranslationAttempts()
+        a = LiveTranslationAttempts(max_wait_seconds=10_000)
         for i in range(DEFAULT_MAX_ATTEMPTS * 3):
             a.record_failure(1, "Мир вам", NOW + i * DEFAULT_COOLDOWN_SECONDS, peer_working=True)
         assert not a.exhausted(1), "a slow server's timeouts are not counted"
@@ -235,6 +235,16 @@ class TestWaitingOnAPeer:
         a.record_failure(1, "Мир вам", NOW + 179, peer_working=True)
         assert not a.exhausted(1)
         a.record_failure(1, "Мир вам", NOW + 180, peer_working=True)
+        assert a.exhausted(1)
+
+    def test_the_default_wait_is_about_one_caption_on_screen(self):
+        # Live captions: one more try after the first timeout, then the backfill.
+        a = LiveTranslationAttempts()
+        a.record_failure(1, "Мир вам", NOW, peer_working=True)
+        assert a.should_attempt(1, NOW + DEFAULT_COOLDOWN_SECONDS)
+        a.record_failure(1, "Мир вам", NOW + DEFAULT_COOLDOWN_SECONDS, peer_working=True)
+        assert not a.exhausted(1)
+        a.record_failure(1, "Мир вам", NOW + 2 * DEFAULT_COOLDOWN_SECONDS, peer_working=True)
         assert a.exhausted(1)
 
     def test_an_older_server_that_cannot_say_keeps_the_attempt_cap(self):

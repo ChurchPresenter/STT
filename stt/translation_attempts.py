@@ -32,10 +32,11 @@ DEFAULT_MAX_ATTEMPTS = 3
 DEFAULT_COOLDOWN_SECONDS = 20.0
 
 # How long a caption may keep waiting on a paired server that says it is busy and making
-# progress (see stt.peer_load). Long enough to wait out a sermon-summary chunk or two
-# ahead of it, short enough that a caption is not still being chased minutes after the
-# speaker moved on. A server that is *not* working gets one try, not this.
-DEFAULT_MAX_WAIT_SECONDS = 180.0
+# progress (see stt.peer_load). These are live captions: a translation that arrives
+# after the caption has left the screen helps nobody watching, and the backfill repairs
+# the archive anyway. 30s is one more try after the first timeout, about as long as a
+# caption stays on screen. A server that is *not* working gets one try, not this.
+DEFAULT_MAX_WAIT_SECONDS = 30.0
 
 
 def persist_decision(mt_engine: str, none_engine: str,

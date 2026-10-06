@@ -137,3 +137,43 @@ def test_the_route_wrapper_counts_while_running_and_after_a_crash():
     assert seen == [1]
     assert tracker.snapshot()["in_flight"] == 0
     assert view.__name__ == "view", "Flask routes by function name"
+
+
+# --- the caption call that may run beside the loop ------------------------------
+
+
+def fresh_ns(translate, engine):
+    probes = []
+    space = extract_definitions("speech_to_text.py", ["_translate_fresh_caption"], {
+        "translate_live_text": translate,
+        "extract_context_translation": lambda text, n, ratio: text.split(" | ")[-1] if " | " in text else None,
+        "last_mt_provenance": lambda: (engine, "model-x"),
+        "_peer_working_after_failure": lambda: probes.append(1) or False,
+        "MT_ENGINE_NONE": "none"})
+    return space["_translate_fresh_caption"], probes
+
+
+def test_a_translated_caption_is_returned_with_its_provenance_and_no_probe():
+    fn, probes = fresh_ns(lambda text, s, t, **kw: "Peace", "remote")
+    assert fn("Мир", "Мир", 0, None, False, 0, "ru", "en") == ("Peace", None, "remote", "model-x", None)
+    assert probes == []
+
+
+def test_an_untranslated_caption_asks_about_the_server_on_the_same_thread():
+    fn, probes = fresh_ns(lambda text, s, t, **kw: text, "none")
+    assert fn("Мир", "Мир", 0, None, False, 0, "ru", "en")[4] is False
+    assert probes == [1]
+
+
+def test_context_is_cut_back_out_and_a_failed_cut_retranslates_alone():
+    def translator(glued_reply):
+        def translate(text, s, t, **kw):
+            out = glued_reply if " " in text else "Alone"
+            return {"text": out, "alternatives": []} if kw.get("return_extras") else out
+        return translate
+
+    for want_extras in (False, True):
+        fn, _ = fresh_ns(translator("Before | After"), "remote")
+        assert fn("Раньше Сейчас", "Сейчас", 1, 0.5, want_extras, 0, "ru", "en")[0] == "After"
+        fn, _ = fresh_ns(translator("merged into one sentence"), "remote")
+        assert fn("Раньше Сейчас", "Сейчас", 1, 0.5, want_extras, 0, "ru", "en")[0] == "Alone"
