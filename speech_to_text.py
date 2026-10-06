@@ -3786,6 +3786,25 @@ else:
 # Global reference to transcription process for restart functionality
 transcription_process = None
 
+
+def _spawn_worker():
+    """Build and start a transcription worker, returning it only once started.
+
+    Callers assign the result to ``transcription_process``, which the main loop
+    joins once a second. Assigning the bare Process and calling ``start()`` on
+    the next line left a window — seconds long under Windows' spawn — in which
+    the loop joined an unstarted process, hit "can only join a started process"
+    and lost the main thread (STT-2J).
+    """
+    proc = multiprocessing.Process(
+        target=thread1_function,
+        args=(transcription_state, control_queue, config_queue,
+              calibration_state, calibration_data_shared, calibration_step1_data,
+              audio_stream_queue)
+    )
+    proc.start()
+    return proc
+
 # Set once the server begins shutting down / restarting. The transcription_state
 # Manager proxy dies when the Manager process is torn down (execv restart, signal,
 # auto-update), after which any proxy access raises BrokenPipeError/EOFError/
@@ -11255,13 +11274,7 @@ def restart_transcription():
                     transcription_process.join(timeout=2)
 
             # Start new process
-            transcription_process = multiprocessing.Process(
-                target=thread1_function,
-                args=(transcription_state, control_queue, config_queue,
-                      calibration_state, calibration_data_shared, calibration_step1_data,
-                      audio_stream_queue)
-            )
-            transcription_process.start()
+            transcription_process = _spawn_worker()
 
             # CRITICAL: Update global reference for signal handler
             globals()["thread1"] = transcription_process
@@ -13241,13 +13254,7 @@ def start_transcription():
                 # Worker doesn't exist or crashed - create a new one
                 # This should only happen on first start or if worker unexpectedly died
                 print("[START] Worker process not running, creating new worker...")
-                transcription_process = multiprocessing.Process(
-                    target=thread1_function,
-                    args=(transcription_state, control_queue, config_queue,
-                          calibration_state, calibration_data_shared, calibration_step1_data,
-                          audio_stream_queue)
-                )
-                transcription_process.start()
+                transcription_process = _spawn_worker()
                 globals()["thread1"] = transcription_process
             else:
                 # Worker is alive, just reuse it (it's waiting in idle loop)
@@ -13798,13 +13805,7 @@ def force_reset_transcription():
             _db_cache["last_fetch_time"] = 0
 
         # Restart the transcription process
-        transcription_process = multiprocessing.Process(
-            target=thread1_function,
-            args=(transcription_state, control_queue, config_queue,
-                  calibration_state, calibration_data_shared, calibration_step1_data,
-                  audio_stream_queue)
-        )
-        transcription_process.start()
+        transcription_process = _spawn_worker()
 
         # Update global reference for signal handler
         globals()["thread1"] = transcription_process
@@ -24394,7 +24395,10 @@ if __name__ == "__main__":
     # This makes the main process responsive to signals
     try:
         while transcription_process.is_alive() or thread2.is_alive():
-            transcription_process.join(timeout=1.0)
+            # A respawn on a request thread can publish a worker before it has
+            # started; joining one raises. Wait on the web thread instead.
+            if transcription_process.pid is not None:
+                transcription_process.join(timeout=1.0)
             thread2.join(timeout=1.0)
     except KeyboardInterrupt:
         print("\nMain process received KeyboardInterrupt, cleaning up...")
