@@ -36,12 +36,16 @@ handler that raises loses the original exception.
 
 from __future__ import annotations
 
+import os
 import traceback
 from typing import Any, Callable, List, NamedTuple, Optional
 
 #: Exceptions that mean "the operator asked us to stop", not "we broke". They are
 #: never reported to Sentry and never set an error state.
 _QUIET_EXCEPTIONS = (KeyboardInterrupt, SystemExit)
+
+#: What a Manager proxy raises once the process that owns the shared dict is gone.
+_MANAGER_GONE_EXCEPTIONS = (BrokenPipeError, EOFError, ConnectionResetError)
 
 
 class CrashOutcome(NamedTuple):
@@ -65,7 +69,27 @@ def is_quiet_exit(exc: BaseException) -> bool:
     unreported misconfiguration; treating it as a crash would file an issue every
     time the worker is stopped.
     """
-    return isinstance(exc, _QUIET_EXCEPTIONS)
+    return isinstance(exc, _QUIET_EXCEPTIONS) or is_manager_gone(exc)
+
+
+def is_manager_gone(exc: BaseException) -> bool:
+    """True when ``exc`` is a Manager proxy finding its owning process gone.
+
+    The worker's shared state is a ``multiprocessing.Manager`` dict, served by a
+    process the server owns. When the server exits or dies, the next write from
+    the worker (``transcription_state["audio_stalled"] = ...`` in the field)
+    raises ``BrokenPipeError`` out of ``managers.py``. Nothing the worker does can
+    fix that, and whatever took the server down reports itself, so filing it again
+    from the worker is noise. Only errors raised *inside* ``multiprocessing.managers``
+    qualify: a broken pipe from a socket or an ffmpeg pipe is still a fault.
+    """
+    if not isinstance(exc, _MANAGER_GONE_EXCEPTIONS):
+        return False
+    for frame in traceback.extract_tb(exc.__traceback__):
+        parts = os.path.normcase(frame.filename).replace("\\", "/").split("/")
+        if parts[-2:] == ["multiprocessing", "managers.py"]:
+            return True
+    return False
 
 
 def format_crash_banner(role: str, exc: BaseException) -> str:

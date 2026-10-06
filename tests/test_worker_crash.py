@@ -147,6 +147,49 @@ def test_stopping_the_worker_files_no_issue_and_sets_no_error(exc):
     assert set_state.calls == [], "a stop must not overwrite the stopping state"
 
 
+def _raise_from_manager_proxy(exc):
+    """Raise ``exc`` from code compiled as multiprocessing/managers.py, as a proxy would."""
+    code = compile("raise exc", "/usr/lib/python3.11/multiprocessing/managers.py", "exec")
+    try:
+        exec(code, {"exc": exc})
+    except BaseException as caught:  # noqa: BLE001 - deliberately returned
+        return caught
+
+
+@pytest.mark.parametrize("exc", [BrokenPipeError(32, "Broken pipe"), EOFError(), ConnectionResetError()])
+def test_a_manager_whose_server_is_gone_files_no_issue(exc):
+    capture, set_state = Recorder(), Recorder()
+
+    outcome = worker_crash.report_worker_crash(
+        _raise_from_manager_proxy(exc), capture=capture, set_state=set_state,
+    )
+
+    assert outcome.quiet is True
+    assert capture.calls == [], "the server going away is reported by the server"
+    assert set_state.calls == [], "there is no shared state left to write"
+
+
+def test_a_windows_manager_path_is_recognised():
+    code = compile("raise exc", "C:\\Program Files\\STT\\_internal\\multiprocessing\\managers.py", "exec")
+    try:
+        exec(code, {"exc": BrokenPipeError()})
+    except BrokenPipeError as caught:
+        assert worker_crash.is_manager_gone(caught)
+
+
+def test_a_broken_pipe_from_anywhere_else_is_still_a_crash():
+    capture = Recorder()
+
+    outcome = worker_crash.report_worker_crash(_raise(BrokenPipeError(32, "Broken pipe")), capture=capture)
+
+    assert outcome.quiet is False
+    assert capture.calls
+
+
+def test_a_different_error_from_the_manager_is_still_a_crash():
+    assert not worker_crash.is_manager_gone(_raise_from_manager_proxy(KeyError("x")))
+
+
 def test_quiet_exits_are_still_logged():
     log = Recorder()
     worker_crash.report_worker_crash(_raise(KeyboardInterrupt()), log=log)
