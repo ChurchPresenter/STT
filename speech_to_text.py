@@ -20764,6 +20764,7 @@ def emit_tts_audio():
 
 # Text-processing helpers live in stt/text_utils.py (importable, unit-tested);
 # names are re-imported here so the pipeline call sites below stay unchanged.
+from stt import segment_disposition as _segment_disposition
 from stt import text_utils as _text_utils
 from stt.text_utils import (  # noqa: F401
     DEFAULT_WHISPER_HALLUCINATIONS,
@@ -20789,10 +20790,16 @@ def is_whisper_hallucination(text):
     return _text_utils.is_whisper_hallucination(text, get_hallucination_phrases())
 
 
-def salvage_hallucination(text):
-    """The real speech left once known hallucinations are cut out of ``text``; "" if none."""
-    cleaned = _text_utils.strip_hallucinations(text, get_hallucination_phrases())
-    return "" if (not cleaned or is_whisper_hallucination(cleaned)) else cleaned
+def decide_segment(text, *, cjk_deny=False, music_label=None, transcribe_music=False, music_reason="music"):
+    """Keep, strip a glued credit from, or deny one sentence (see stt/segment_disposition.py)."""
+    return _segment_disposition.decide(
+        text,
+        phrases=get_hallucination_phrases(),
+        cjk_deny=cjk_deny,
+        music_label=music_label,
+        transcribe_music=transcribe_music,
+        music_reason=music_reason,
+    )
 
 
 def classify_partial_row(text):
@@ -22948,22 +22955,16 @@ def thread1_function(ts, cq, cfq, cal_state, cal_data, cal_step1, asq):
                                                                 _cjk_shadow = sentence  # original with CJK → shadow row
                                                                 sentence = _cjk_stripped
 
-                                                        _is_hallucination = is_whisper_hallucination(sentence)
-                                                        if _is_hallucination:
-                                                            # Whisper glues its credit onto real speech: keep the speech, drop only the credit
-                                                            _salvaged = salvage_hallucination(sentence)
-                                                            if _salvaged:
-                                                                print(f"[HALLUCINATION→STRIPPED] kept '{_salvaged[:40]}'", flush=True)
-                                                                sentence = _salvaged
-                                                                _is_hallucination = False
-                                                            else:
-                                                                print(f"[HALLUCINATION→DENIED] '{sentence[:40]}'", flush=True)
-
-                                                        _music_deny = (not _transcribe_music_enabled) and segment_speech_type == "Music"
-                                                        if _music_deny and not (_is_hallucination or _cjk_deny):
+                                                        _disp = decide_segment(sentence, cjk_deny=_cjk_deny, music_label=segment_speech_type, transcribe_music=_transcribe_music_enabled, music_reason=_music_deny_reason)
+                                                        if _disp.stripped:
+                                                            print(f"[HALLUCINATION→STRIPPED] kept '{_disp.text[:40]}'", flush=True)
+                                                        sentence = _disp.text
+                                                        if _disp.denied and _disp.hallucination:
+                                                            print(f"[HALLUCINATION→DENIED] '{sentence[:40]}'", flush=True)
+                                                        elif _disp.music:
                                                             print(f"[MUSIC→DENIED] '{sentence[:40]}'", flush=True)
-                                                        _denied = 1 if (_is_hallucination or _cjk_deny or _music_deny) else 0
-                                                        _denied_reason = ('hallucination' if _is_hallucination else 'cjk' if _cjk_deny else _music_deny_reason) if _denied else None
+                                                        _denied = 1 if _disp.denied else 0
+                                                        _denied_reason = _disp.reason
 
                                                         # original_text = verbatim ASR before profanity normalization
                                                         # (words_json `w` tokens are the fullest-raw form, never filtered)
@@ -23033,21 +23034,16 @@ def thread1_function(ts, cq, cfq, cal_state, cal_data, cal_step1, asq):
                                                             elif _rem_stripped != remainder:
                                                                 _rem_cjk_shadow = remainder
                                                                 remainder = _rem_stripped
-                                                        _rem_is_hallucination = is_whisper_hallucination(remainder)
-                                                        if _rem_is_hallucination:
-                                                            # Whisper glues its credit onto real speech: keep the speech, drop only the credit
-                                                            _salvaged = salvage_hallucination(remainder)
-                                                            if _salvaged:
-                                                                print(f"[HALLUCINATION→STRIPPED] kept '{_salvaged[:40]}'", flush=True)
-                                                                remainder = _salvaged
-                                                                _rem_is_hallucination = False
-                                                            else:
-                                                                print(f"[HALLUCINATION REMAINDER→DENIED] '{remainder[:40]}'", flush=True)
-                                                        _rem_music_deny = (not _transcribe_music_enabled) and segment_speech_type == "Music"
-                                                        if _rem_music_deny and not (_rem_is_hallucination or _rem_cjk_deny):
+                                                        _rem_disp = decide_segment(remainder, cjk_deny=_rem_cjk_deny, music_label=segment_speech_type, transcribe_music=_transcribe_music_enabled, music_reason=_music_deny_reason)
+                                                        if _rem_disp.stripped:
+                                                            print(f"[HALLUCINATION→STRIPPED] kept '{_rem_disp.text[:40]}'", flush=True)
+                                                        remainder = _rem_disp.text
+                                                        if _rem_disp.denied and _rem_disp.hallucination:
+                                                            print(f"[HALLUCINATION REMAINDER→DENIED] '{remainder[:40]}'", flush=True)
+                                                        elif _rem_disp.music:
                                                             print(f"[MUSIC REMAINDER→DENIED] '{remainder[:40]}'", flush=True)
-                                                        _rem_denied = 1 if (_rem_is_hallucination or _rem_cjk_deny or _rem_music_deny) else 0
-                                                        _rem_denied_reason = ('hallucination' if _rem_is_hallucination else 'cjk' if _rem_cjk_deny else _music_deny_reason) if _rem_denied else None
+                                                        _rem_denied = 1 if _rem_disp.denied else 0
+                                                        _rem_denied_reason = _rem_disp.reason
                                                         _verbatim_rem = remainder
                                                         remainder = apply_profanity_filter(remainder)
                                                         rem_word_count = len(remainder.split())
@@ -23226,22 +23222,16 @@ def thread1_function(ts, cq, cfq, cal_state, cal_data, cal_step1, asq):
                                                                     _cjk_shadow = sentence
                                                                     sentence = _cjk_stripped
 
-                                                            _is_hallucination = is_whisper_hallucination(sentence)
-                                                            if _is_hallucination:
-                                                                # Whisper glues its credit onto real speech: keep the speech, drop only the credit
-                                                                _salvaged = salvage_hallucination(sentence)
-                                                                if _salvaged:
-                                                                    print(f"[HALLUCINATION→STRIPPED] kept '{_salvaged[:40]}'", flush=True)
-                                                                    sentence = _salvaged
-                                                                    _is_hallucination = False
-                                                                else:
-                                                                    print(f"[HALLUCINATION→DENIED] '{sentence[:40]}'", flush=True)
-
-                                                            _music_deny = (not _transcribe_music_enabled) and _phrase_speech_type == "Music"
-                                                            if _music_deny and not (_is_hallucination or _cjk_deny):
+                                                            _disp = decide_segment(sentence, cjk_deny=_cjk_deny, music_label=_phrase_speech_type, transcribe_music=_transcribe_music_enabled, music_reason=_music_deny_reason)
+                                                            if _disp.stripped:
+                                                                print(f"[HALLUCINATION→STRIPPED] kept '{_disp.text[:40]}'", flush=True)
+                                                            sentence = _disp.text
+                                                            if _disp.denied and _disp.hallucination:
+                                                                print(f"[HALLUCINATION→DENIED] '{sentence[:40]}'", flush=True)
+                                                            elif _disp.music:
                                                                 print(f"[MUSIC→DENIED] '{sentence[:40]}'", flush=True)
-                                                            _denied = 1 if (_is_hallucination or _cjk_deny or _music_deny) else 0
-                                                            _denied_reason = ('hallucination' if _is_hallucination else 'cjk' if _cjk_deny else _music_deny_reason) if _denied else None
+                                                            _denied = 1 if _disp.denied else 0
+                                                            _denied_reason = _disp.reason
 
                                                             _verbatim = sentence
                                                             sentence = apply_profanity_filter(sentence)
@@ -23291,21 +23281,16 @@ def thread1_function(ts, cq, cfq, cal_state, cal_data, cal_step1, asq):
                                                                 elif _rem_stripped != remainder:
                                                                     _rem_cjk_shadow = remainder
                                                                     remainder = _rem_stripped
-                                                            _rem_is_hallucination = is_whisper_hallucination(remainder)
-                                                            if _rem_is_hallucination:
-                                                                # Whisper glues its credit onto real speech: keep the speech, drop only the credit
-                                                                _salvaged = salvage_hallucination(remainder)
-                                                                if _salvaged:
-                                                                    print(f"[HALLUCINATION→STRIPPED] kept '{_salvaged[:40]}'", flush=True)
-                                                                    remainder = _salvaged
-                                                                    _rem_is_hallucination = False
-                                                                else:
-                                                                    print(f"[HALLUCINATION REMAINDER→DENIED] '{remainder[:40]}'", flush=True)
-                                                            _rem_music_deny = (not _transcribe_music_enabled) and _phrase_speech_type == "Music"
-                                                            if _rem_music_deny and not (_rem_is_hallucination or _rem_cjk_deny):
+                                                            _rem_disp = decide_segment(remainder, cjk_deny=_rem_cjk_deny, music_label=_phrase_speech_type, transcribe_music=_transcribe_music_enabled, music_reason=_music_deny_reason)
+                                                            if _rem_disp.stripped:
+                                                                print(f"[HALLUCINATION→STRIPPED] kept '{_rem_disp.text[:40]}'", flush=True)
+                                                            remainder = _rem_disp.text
+                                                            if _rem_disp.denied and _rem_disp.hallucination:
+                                                                print(f"[HALLUCINATION REMAINDER→DENIED] '{remainder[:40]}'", flush=True)
+                                                            elif _rem_disp.music:
                                                                 print(f"[MUSIC REMAINDER→DENIED] '{remainder[:40]}'", flush=True)
-                                                            _rem_denied = 1 if (_rem_is_hallucination or _rem_cjk_deny or _rem_music_deny) else 0
-                                                            _rem_denied_reason = ('hallucination' if _rem_is_hallucination else 'cjk' if _rem_cjk_deny else _music_deny_reason) if _rem_denied else None
+                                                            _rem_denied = 1 if _rem_disp.denied else 0
+                                                            _rem_denied_reason = _rem_disp.reason
                                                             _verbatim_rem = remainder
                                                             remainder = apply_profanity_filter(remainder)
                                                             rem_word_count = len(remainder.split())
@@ -23511,18 +23496,14 @@ def thread1_function(ts, cq, cfq, cal_state, cal_data, cal_step1, asq):
                                 elif _flush_stripped != pending_remainder:
                                     _flush_cjk_shadow = pending_remainder
                                     pending_remainder = _flush_stripped
-                            _flush_is_hallucination = is_whisper_hallucination(pending_remainder)
-                            if _flush_is_hallucination:
-                                # Whisper glues its credit onto real speech: keep the speech, drop only the credit
-                                _salvaged = salvage_hallucination(pending_remainder)
-                                if _salvaged:
-                                    print(f"[HALLUCINATION→STRIPPED] kept '{_salvaged[:40]}'", flush=True)
-                                    pending_remainder = _salvaged
-                                    _flush_is_hallucination = False
-                                else:
-                                    print(f"[HALLUCINATION STOP-FLUSH→DENIED] '{pending_remainder[:40]}'", flush=True)
-                            _flush_denied = 1 if (_flush_is_hallucination or _flush_cjk_deny) else 0
-                            _flush_denied_reason = ('hallucination' if _flush_is_hallucination else 'cjk') if _flush_denied else None
+                            _flush_disp = decide_segment(pending_remainder, cjk_deny=_flush_cjk_deny)
+                            if _flush_disp.stripped:
+                                print(f"[HALLUCINATION→STRIPPED] kept '{_flush_disp.text[:40]}'", flush=True)
+                            pending_remainder = _flush_disp.text
+                            if _flush_disp.denied and _flush_disp.hallucination:
+                                print(f"[HALLUCINATION STOP-FLUSH→DENIED] '{pending_remainder[:40]}'", flush=True)
+                            _flush_denied = 1 if _flush_disp.denied else 0
+                            _flush_denied_reason = _flush_disp.reason
                             _verbatim_flush = pending_remainder
                             _flush_text = apply_profanity_filter(pending_remainder)
                             _flush_word_count = len(_flush_text.split())

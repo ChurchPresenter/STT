@@ -93,6 +93,8 @@ module = [
     "stt.shutdown_channel",
     "stt.win_job",
     "stt.fd_limit",
+    "stt.segment_disposition",
+    "stt.asr_replay",
 ]
 disallow_untyped_defs = true
 
