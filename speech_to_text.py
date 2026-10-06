@@ -3736,6 +3736,7 @@ if mp_manager is not None:
             "segments_per_min": None,  # Throughput over the session window
             "rows_saved": 0,  # Finalized transcript lines saved to the session DB
             "queue_depth": None,  # audio_stream_queue depth, when readable
+            "filter_stats": None,  # Sentence-filter counts + alert status (stt/disposition_stats.py)
             # Which init step the worker is on, and when it got there. Only
             # meaningful while status == "starting"; see stt/start_watch.py.
             "init_stage": "",
@@ -8168,6 +8169,7 @@ def get_health():
             "segments_total": ts.get("segments_total", 0),
             "segments_per_min": ts.get("segments_per_min") if running else None,
             "queue_depth": ts.get("queue_depth") if running else None,
+            "filters": ts.get("filter_stats") if running else None,
         }
 
         # --- system resources (live used vs. static totals) ---
@@ -20765,6 +20767,7 @@ def emit_tts_audio():
 # Text-processing helpers live in stt/text_utils.py (importable, unit-tested);
 # names are re-imported here so the pipeline call sites below stay unchanged.
 from stt import segment_disposition as _segment_disposition
+from stt.disposition_stats import DispositionStats as _DispositionStats
 from stt import text_utils as _text_utils
 from stt.text_utils import (  # noqa: F401
     DEFAULT_WHISPER_HALLUCINATIONS,
@@ -20790,9 +20793,16 @@ def is_whisper_hallucination(text):
     return _text_utils.is_whisper_hallucination(text, get_hallucination_phrases())
 
 
-def decide_segment(text, *, cjk_deny=False, music_label=None, transcribe_music=False, music_reason="music"):
-    """Keep, strip a glued credit from, or deny one sentence (see stt/segment_disposition.py)."""
-    return _segment_disposition.decide(
+_disposition_stats = _DispositionStats()
+_disposition_pushed_at = 0.0
+
+
+def decide_segment(text, *, cjk_deny=False, music_label=None, transcribe_music=False, music_reason="music", audio_tag=None):
+    """Keep, strip a glued credit from, or deny one sentence (see stt/segment_disposition.py).
+
+    Also counts the outcome for /api/health (stt/disposition_stats.py): counts only, never text."""
+    global _disposition_pushed_at
+    verdict = _segment_disposition.decide(
         text,
         phrases=get_hallucination_phrases(),
         cjk_deny=cjk_deny,
@@ -20800,6 +20810,20 @@ def decide_segment(text, *, cjk_deny=False, music_label=None, transcribe_music=F
         transcribe_music=transcribe_music,
         music_reason=music_reason,
     )
+    try:
+        now = time.time()
+        _disposition_stats.record(verdict, audio_tag, now)
+        snap = _disposition_stats.snapshot(now)
+        if snap["status"] != _disposition_stats.last_status:
+            _disposition_stats.last_status = snap["status"]
+            print(f"[FILTER] speech-tagged audio denied as music: {snap['suspect_recent']} in the last "
+                  f"{snap['window_seconds'] // 60} min ({snap['status']})", flush=True)
+        if (now - _disposition_pushed_at >= 1.0 or snap["status"] != "healthy") and transcription_state is not None:
+            _disposition_pushed_at = now
+            transcription_state["filter_stats"] = snap
+    except Exception:
+        pass  # counting must never cost a sentence
+    return verdict
 
 
 def classify_partial_row(text):
@@ -22181,6 +22205,8 @@ def thread1_function(ts, cq, cfq, cal_state, cal_data, cal_step1, asq):
                         transcription_state["segments_per_min"] = None
                         transcription_state["rows_saved"] = 0
                         transcription_state["queue_depth"] = None
+                        _disposition_stats.reset()
+                        transcription_state["filter_stats"] = None
                     print("[READY] Transcription system initialized successfully!")
 
                     # Health-dashboard performance accounting (worker-local; pushed
@@ -22955,7 +22981,7 @@ def thread1_function(ts, cq, cfq, cal_state, cal_data, cal_step1, asq):
                                                                 _cjk_shadow = sentence  # original with CJK → shadow row
                                                                 sentence = _cjk_stripped
 
-                                                        _disp = decide_segment(sentence, cjk_deny=_cjk_deny, music_label=segment_speech_type, transcribe_music=_transcribe_music_enabled, music_reason=_music_deny_reason)
+                                                        _disp = decide_segment(sentence, cjk_deny=_cjk_deny, music_label=segment_speech_type, audio_tag=segment_audio_tag, transcribe_music=_transcribe_music_enabled, music_reason=_music_deny_reason)
                                                         if _disp.stripped:
                                                             print(f"[HALLUCINATION→STRIPPED] kept '{_disp.text[:40]}'", flush=True)
                                                         sentence = _disp.text
@@ -23034,7 +23060,7 @@ def thread1_function(ts, cq, cfq, cal_state, cal_data, cal_step1, asq):
                                                             elif _rem_stripped != remainder:
                                                                 _rem_cjk_shadow = remainder
                                                                 remainder = _rem_stripped
-                                                        _rem_disp = decide_segment(remainder, cjk_deny=_rem_cjk_deny, music_label=segment_speech_type, transcribe_music=_transcribe_music_enabled, music_reason=_music_deny_reason)
+                                                        _rem_disp = decide_segment(remainder, cjk_deny=_rem_cjk_deny, music_label=segment_speech_type, audio_tag=segment_audio_tag, transcribe_music=_transcribe_music_enabled, music_reason=_music_deny_reason)
                                                         if _rem_disp.stripped:
                                                             print(f"[HALLUCINATION→STRIPPED] kept '{_rem_disp.text[:40]}'", flush=True)
                                                         remainder = _rem_disp.text
@@ -23222,7 +23248,7 @@ def thread1_function(ts, cq, cfq, cal_state, cal_data, cal_step1, asq):
                                                                     _cjk_shadow = sentence
                                                                     sentence = _cjk_stripped
 
-                                                            _disp = decide_segment(sentence, cjk_deny=_cjk_deny, music_label=_phrase_speech_type, transcribe_music=_transcribe_music_enabled, music_reason=_music_deny_reason)
+                                                            _disp = decide_segment(sentence, cjk_deny=_cjk_deny, music_label=_phrase_speech_type, audio_tag=_phrase_audio_tag, transcribe_music=_transcribe_music_enabled, music_reason=_music_deny_reason)
                                                             if _disp.stripped:
                                                                 print(f"[HALLUCINATION→STRIPPED] kept '{_disp.text[:40]}'", flush=True)
                                                             sentence = _disp.text
@@ -23281,7 +23307,7 @@ def thread1_function(ts, cq, cfq, cal_state, cal_data, cal_step1, asq):
                                                                 elif _rem_stripped != remainder:
                                                                     _rem_cjk_shadow = remainder
                                                                     remainder = _rem_stripped
-                                                            _rem_disp = decide_segment(remainder, cjk_deny=_rem_cjk_deny, music_label=_phrase_speech_type, transcribe_music=_transcribe_music_enabled, music_reason=_music_deny_reason)
+                                                            _rem_disp = decide_segment(remainder, cjk_deny=_rem_cjk_deny, music_label=_phrase_speech_type, audio_tag=_phrase_audio_tag, transcribe_music=_transcribe_music_enabled, music_reason=_music_deny_reason)
                                                             if _rem_disp.stripped:
                                                                 print(f"[HALLUCINATION→STRIPPED] kept '{_rem_disp.text[:40]}'", flush=True)
                                                             remainder = _rem_disp.text

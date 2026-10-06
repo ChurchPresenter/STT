@@ -94,6 +94,7 @@ module = [
     "stt.win_job",
     "stt.fd_limit",
     "stt.segment_disposition",
+    "stt.disposition_stats",
     "stt.asr_replay",
 ]
 disallow_untyped_defs = true
