@@ -8169,7 +8169,6 @@ def get_health():
             "segments_total": ts.get("segments_total", 0),
             "segments_per_min": ts.get("segments_per_min") if running else None,
             "queue_depth": ts.get("queue_depth") if running else None,
-            "filters": ts.get("filter_stats") if running else None,
         }
 
         # --- system resources (live used vs. static totals) ---
@@ -14141,6 +14140,15 @@ def get_corrections_settings():
     if not check_ip_whitelist():
         return jsonify({"success": False, "error": "Access Denied"}), 403
     return jsonify({"success": True, "corrections": config.get("corrections", {})})
+
+
+@app.route("/api/corrections/filter-stats", methods=["GET"])
+def get_corrections_filter_stats():
+    """What the sentence filters have done this session (counts only), for the corrections banner."""
+    if not check_ip_whitelist():
+        return jsonify({"success": False, "error": "Access Denied"}), 403
+    ts = _ts_snapshot()
+    return jsonify({"success": True, "filters": ts.get("filter_stats") if ts.get("running") else None})
 
 
 @app.route("/api/corrections/settings", methods=["POST"])

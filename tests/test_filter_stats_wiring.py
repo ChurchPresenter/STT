@@ -17,8 +17,17 @@ def test_every_music_aware_call_passes_the_audio_tag():
     assert all("audio_tag=" in c for c in music_aware)
 
 
-def test_health_exposes_filter_stats_while_running():
-    assert '"filters": ts.get("filter_stats") if running else None' in SRC
+def test_corrections_page_gets_the_filter_stats_not_health():
+    assert '@app.route("/api/corrections/filter-stats"' in SRC
+    assert 'ts.get("filter_stats") if ts.get("running") else None' in SRC
+    assert '"filters": ts.get("filter_stats")' not in SRC.split('def get_corrections_filter_stats')[0]
+
+
+def test_corrections_template_polls_the_filter_stats():
+    html = (Path(__file__).resolve().parent.parent / "templates" / "corrections.html").read_text(encoding="utf-8")
+    assert "/api/corrections/filter-stats" in html and 'id="filter-alert"' in html
+    health = (Path(__file__).resolve().parent.parent / "templates" / "health.html").read_text(encoding="utf-8")
+    assert "c-filters" not in health
 
 
 def test_a_new_session_zeroes_the_filter_counts():

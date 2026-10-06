@@ -20,6 +20,18 @@
         overflow: hidden;
       }
 
+      /* Sentence-filter alert: only shown when speech-tagged audio is being denied as music */
+      #filter-alert {
+        display: none; align-items: center; gap: 12px; flex-shrink: 0;
+        padding: 8px 16px; font-size: 0.85em;
+        background: var(--warning-bg); border-bottom: 1px solid var(--warning); color: var(--text-primary);
+      }
+      #filter-alert.error { background: var(--danger-bg); border-bottom-color: var(--danger); }
+      #filter-alert button {
+        padding: 3px 12px; border: 1px solid var(--border); border-radius: 14px;
+        background: var(--bg-card); color: var(--text-primary); cursor: pointer; font-size: 0.9em;
+      }
+
       /* Toolbar */
       .toolbar {
         display: flex; align-items: center; gap: 12px;
@@ -226,6 +238,10 @@
 {% endblock %}
 
 {% block content %}
+    <div id="filter-alert" role="alert">
+        <span id="filter-alert-text"></span>
+        <button type="button" onclick="jumpToDeniedMusic()">Show denied rows</button>
+    </div>
     <div class="toolbar">
         <span id="status-indicator" aria-live="polite"><span class="corrections-status-dot inactive"></span> Stopped</span>
         <button id="delay-toggle-btn" onclick="toggleDelay()">Delay: OFF</button>
@@ -790,6 +806,34 @@
 
         loadReview();
         setInterval(loadReview, 10000);
+
+        // Sentence-filter alert: speech-tagged audio denied as music is how lost words look
+        // from the outside. Counts come from the worker; the rows themselves are already
+        // listed below as denied cards with a Restore button.
+        function loadFilterAlert() {
+            fetch('/api/corrections/filter-stats')
+                .then(r => r.json())
+                .then(d => {
+                    const f = d && d.filters;
+                    const bar = document.getElementById('filter-alert');
+                    if (!f || f.status === 'healthy') { bar.style.display = 'none'; return; }
+                    document.getElementById('filter-alert-text').textContent =
+                        f.suspect_recent + ' sentence' + (f.suspect_recent === 1 ? '' : 's') +
+                        ' tagged as speech were denied as music in the last ' +
+                        Math.round(f.window_seconds / 60) + ' min. Words may be missing; restore them below.';
+                    bar.className = f.status === 'error' ? 'error' : '';
+                    bar.style.display = 'flex';
+                }).catch(() => {});
+        }
+        window.jumpToDeniedMusic = function() {
+            const ids = segOrder.filter(id => segments[id] && segments[id].denied &&
+                (segments[id].denied_reason || '').startsWith('music'));
+            const last = ids[ids.length - 1];
+            const el = last !== undefined && document.querySelector('.seg-card[data-seg-id="' + last + '"]');
+            if (el) el.scrollIntoView({ block: 'center' });
+        };
+        loadFilterAlert();
+        setInterval(loadFilterAlert, 10000);
 
         // Status is now derived from transcription_update events (instant, no polling)
     });

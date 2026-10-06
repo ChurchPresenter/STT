@@ -127,11 +127,6 @@
         <div class="stat-sub" id="m-detect-tag"></div>
         <div class="stat-sub" id="m-detect-sub"></div>
     </div>
-    <div class="stat-card" id="c-filters">
-        <div class="stat-label"><span class="dot"></span>Sentence filters</div>
-        <div class="stat-value" style="font-size:1.05em" id="m-filters">—</div>
-        <div class="stat-sub" id="m-filters-sub"></div>
-    </div>
     <div class="stat-card">
         <div class="stat-label">ASR model</div>
         <div class="stat-value" style="font-size:1.05em" id="m-model">—</div>
@@ -387,22 +382,6 @@
             ? "no audio from the microphone"
             : (t.audio_type ? (t.audio_type + (t.detection_mode ? ` · ${t.detection_mode}` : "")) : "");
         $("m-queue").textContent = dash(t.queue_depth);
-
-        // Sentence filters: counts only. Amber/red when speech-tagged audio is being
-        // denied as music, which is how a lost-words incident looks from the outside.
-        const f = t.filters;
-        if (f) {
-            $("m-filters").textContent = f.status === "healthy"
-                ? "Keeping speech"
-                : f.suspect_recent + " speech-tagged denied as music";
-            $("m-filters-sub").textContent = `${f.kept} kept · ${f.denied_music} music · `
-                + `${f.denied_hallucination} hallucination · ${f.stripped_credits} credits cut`;
-            setStatus("c-filters", f.status);
-        } else {
-            $("m-filters").textContent = "—";
-            $("m-filters-sub").textContent = "";
-            setStatus("c-filters", null);
-        }
 
         // Audio detectors (PANNs music/speech + Silero VAD)
         const d = h.detectors || {};
