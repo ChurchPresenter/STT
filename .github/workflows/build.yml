@@ -10,8 +10,8 @@ on:
         description: "Build Windows"
         type: boolean
         default: true
-      macos_arm:
-        description: "Build macOS Apple Silicon (ARM64)"
+      macos:
+        description: "Build macOS (Apple Silicon)"
         type: boolean
         default: true
       linux:
@@ -59,23 +59,10 @@ jobs:
     runs-on: ubuntu-22.04
     outputs:
       tag: ${{ steps.v.outputs.tag }}
-      macos_include: ${{ steps.mac.outputs.include }}
     steps:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
-      - id: mac
-        # macOS is Apple Silicon only. PyTorch published its last macOS x86_64
-        # wheels with 2.2.2, so the pinned torch cannot resolve on an Intel Mac —
-        # the x86_64 package we used to sign and notarize here could only ever
-        # install and then fail, which is what the watchdog now refuses up front.
-        run: |
-          items=()
-          if [ "${{ github.event_name }}" = "push" ] || [ "${{ inputs.macos_arm }}" = "true" ]; then
-            items+=('{"runner":"macos-latest","arch":"arm64"}')
-          fi
-          IFS=,
-          echo "include=[${items[*]}]" >> "$GITHUB_OUTPUT"
       - id: v
         run: |
           if [ "${{ github.event_name }}" = "push" ]; then
@@ -180,16 +167,14 @@ jobs:
 
   build-macos:
     needs: version
-    # macos_include is non-empty iff this is a tag push or an arch box was
-    # ticked; empty ('[]') means no macOS arch selected, so skip the job.
-    if: needs.version.outputs.macos_include != '[]'
-    strategy:
-      matrix:
-        # arm64 = macos-latest (Apple Silicon), the only macOS arch shipped —
-        # see the version job for why there is no Intel leg. Kept as a matrix so
-        # the arch reaches the artifact names and the macos_arm checkbox works.
-        include: ${{ fromJSON(needs.version.outputs.macos_include) }}
-    runs-on: ${{ matrix.runner }}
+    if: github.event_name == 'push' || inputs.macos
+    # Apple Silicon only, by decision. PyTorch's last macOS x86_64 wheels are
+    # 2.2.2, so the current pins have none for an Intel Mac and the watchdog
+    # refuses one up front. An older pin set would resolve, but it would be
+    # CPU-only and untested, so no Intel leg is built. That is also why this is
+    # one job rather than a matrix. The arm64 in the file names stays, because
+    # download links point at them.
+    runs-on: macos-latest
     env:
       # App signing activates once MACOS_CERTIFICATE_P12 exists; pkg signing +
       # notarization additionally need MACOS_INSTALLER_CERTIFICATE_P12
@@ -296,9 +281,9 @@ jobs:
             # Same name as the Application identity, different cert type
             INSTALLER_IDENTITY="${IDENTITY_NAME/Developer ID Application/Developer ID Installer}"
             productbuild --package stt-component.pkg --version "$VERSION" \
-              --sign "$INSTALLER_IDENTITY" --timestamp STT-macos-${{ matrix.arch }}.pkg
+              --sign "$INSTALLER_IDENTITY" --timestamp STT-macos-arm64.pkg
           else
-            productbuild --package stt-component.pkg --version "$VERSION" STT-macos-${{ matrix.arch }}.pkg
+            productbuild --package stt-component.pkg --version "$VERSION" STT-macos-arm64.pkg
           fi
           rm stt-component.pkg
       - name: Notarize and staple
@@ -309,13 +294,13 @@ jobs:
           API_ISSUER_ID: ${{ secrets.MACOS_NOTARIZATION_API_ISSUER_ID }}
         run: |
           echo "$API_KEY_P8" | base64 --decode > "$RUNNER_TEMP/AuthKey.p8"
-          xcrun notarytool submit STT-macos-${{ matrix.arch }}.pkg \
+          xcrun notarytool submit STT-macos-arm64.pkg \
             --key "$RUNNER_TEMP/AuthKey.p8" \
             --key-id "$API_KEY_ID" \
             --issuer "$API_ISSUER_ID" \
             --wait
-          xcrun stapler staple STT-macos-${{ matrix.arch }}.pkg
-          spctl --assess --type install -v STT-macos-${{ matrix.arch }}.pkg
+          xcrun stapler staple STT-macos-arm64.pkg
+          spctl --assess --type install -v STT-macos-arm64.pkg
           # Notarizing the pkg also notarizes the app inside it, so the ticket can be
           # stapled to the .app the zip below carries — without it a zipped app only
           # opens while Apple's service is reachable.
@@ -323,13 +308,13 @@ jobs:
       - name: Package zip
         # ditto, not zip: a plain zip drops the bundle's symlinks and breaks the
         # code signature. Built after stapling so the zip carries the ticket.
-        run: ditto -c -k --keepParent dist/STT.app STT-macos-${{ matrix.arch }}.zip
+        run: ditto -c -k --keepParent dist/STT.app STT-macos-arm64.zip
       - uses: actions/upload-artifact@v7
         with:
-          name: STT-macos-${{ matrix.arch }}
+          name: STT-macos-arm64
           path: |
-            STT-macos-${{ matrix.arch }}.pkg
-            STT-macos-${{ matrix.arch }}.zip
+            STT-macos-arm64.pkg
+            STT-macos-arm64.zip
           retention-days: 7
 
   build-linux:
