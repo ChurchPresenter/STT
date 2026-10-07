@@ -165,10 +165,17 @@ jobs:
             & $iscc "/DAppVersion=$VERSION" "installer\windows\setup.iss"
           }
           if ($LASTEXITCODE -ne 0) { throw "ISCC failed" }
+      - name: Package zip
+        shell: pwsh
+        # The same signed bootstrapper as the installer, for anyone who would rather
+        # unzip and run than install. dist\STT is what the installer copies.
+        run: Compress-Archive -Path dist\STT -DestinationPath STT-windows.zip
       - uses: actions/upload-artifact@v7
         with:
           name: STT-windows
-          path: Output/STT-Setup.exe
+          path: |
+            Output/STT-Setup.exe
+            STT-windows.zip
           retention-days: 7
 
   build-macos:
@@ -309,10 +316,20 @@ jobs:
             --wait
           xcrun stapler staple STT-macos-${{ matrix.arch }}.pkg
           spctl --assess --type install -v STT-macos-${{ matrix.arch }}.pkg
+          # Notarizing the pkg also notarizes the app inside it, so the ticket can be
+          # stapled to the .app the zip below carries — without it a zipped app only
+          # opens while Apple's service is reachable.
+          xcrun stapler staple dist/STT.app
+      - name: Package zip
+        # ditto, not zip: a plain zip drops the bundle's symlinks and breaks the
+        # code signature. Built after stapling so the zip carries the ticket.
+        run: ditto -c -k --keepParent dist/STT.app STT-macos-${{ matrix.arch }}.zip
       - uses: actions/upload-artifact@v7
         with:
           name: STT-macos-${{ matrix.arch }}
-          path: STT-macos-${{ matrix.arch }}.pkg
+          path: |
+            STT-macos-${{ matrix.arch }}.pkg
+            STT-macos-${{ matrix.arch }}.zip
           retention-days: 7
 
   build-linux:
@@ -351,6 +368,9 @@ jobs:
           sed -i "s/VERSION_PLACEHOLDER/$VERSION/" "$PKGDIR/DEBIAN/control"
           chmod 755 "$PKGDIR/DEBIAN/postinst" "$PKGDIR/DEBIAN/prerm"
           dpkg-deb --build --root-owner-group "$PKGDIR" STT-linux.deb
+          # For distributions without dpkg: the same bootstrapper, unpack and run.
+          # tar rather than zip so the executable bits survive.
+          tar -czf STT-linux.tar.gz -C dist STT
       - name: GPG-sign .deb
         if: env.LINUX_SIGNING_ENABLED == 'true'
         env:
@@ -369,7 +389,9 @@ jobs:
       - uses: actions/upload-artifact@v7
         with:
           name: STT-linux
-          path: STT-linux.deb
+          path: |
+            STT-linux.deb
+            STT-linux.tar.gz
           retention-days: 7
 
   # ── Release ────────────────────────────────────────────────────────────────
