@@ -161,7 +161,7 @@ jobs:
         with:
           name: STT-windows
           path: |
-            Output/STT-Setup.exe
+            Output/STT-windows.exe
             STT-windows.zip
           retention-days: 7
 
