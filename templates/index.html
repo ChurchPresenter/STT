@@ -119,6 +119,8 @@
 
          // Audio streaming URL params
          const audioStream = urlParams.get('audioStream') === 'true';
+         // 'hq' = the full-quality stream (48 kHz stereo by default) instead of the 16 kHz mono feed
+         const audioQuality = urlParams.get('audioQuality') === 'hq' ? 'hq' : 'standard';
          const ttsAudio = urlParams.get('ttsAudio') === 'true';
 
          // Store in global scope for use in other functions
@@ -142,6 +144,7 @@
            hideMusicSegments,
            showAll,
            audioStream,
+           audioQuality,
            ttsAudio,
            dripSpeed
          };
@@ -1926,7 +1929,7 @@
           resetDripState(true);
           // Re-join audio streaming rooms after reconnect (e.g. server restart)
           if (window.displayConfig.audioStream) {
-            socket.emit('join_audio_stream');
+            joinAudioStream();
             // Reset scheduling only if not currently playing (next play time is in the past)
             if (!audioStreamCtx || audioStreamNextPlayTime < audioStreamCtx.currentTime) {
               audioStreamNextPlayTime = 0;
@@ -1952,7 +1955,7 @@
           }
           // Join audio streaming rooms if enabled via URL params
           if (window.displayConfig.audioStream) {
-            socket.emit('join_audio_stream');
+            joinAudioStream();
           }
           if (window.displayConfig.ttsAudio) {
             socket.emit('join_tts_audio');
@@ -1987,13 +1990,41 @@
         // =====================================================================
         var audioStreamCtx = null;
         var audioStreamNextPlayTime = 0;
-        var audioStreamSampleRate = 16000;
+        var audioStreamHq = window.displayConfig.audioQuality === 'hq';
+        var audioStreamSampleRate = audioStreamHq ? 48000 : 16000;
+        var audioStreamChannels = 1;
+
+        function joinAudioStream() {
+          socket.emit(audioStreamHq ? 'join_audio_stream_hq' : 'join_audio_stream');
+        }
 
         socket.on('audio_stream_info', function(data) {
+          if (audioStreamHq) return;
           audioStreamSampleRate = data.sample_rate || 16000;
+          audioStreamChannels = 1;
+        });
+
+        socket.on('audio_stream_hq_info', function(data) {
+          if (!data.available) {
+            // Switched off on this server: fall back to the standard feed
+            audioStreamHq = false;
+            audioStreamSampleRate = 16000;
+            socket.emit('join_audio_stream');
+            return;
+          }
+          audioStreamSampleRate = data.sample_rate || 48000;
+          audioStreamChannels = data.channels || 2;
         });
 
         socket.on('audio_chunk', function(data) {
+          if (!audioStreamHq) playAudioStreamChunk(data, 1);
+        });
+
+        socket.on('audio_chunk_hq', function(data) {
+          if (audioStreamHq) playAudioStreamChunk(data, audioStreamChannels);
+        });
+
+        function playAudioStreamChunk(data, channels) {
           if (!window.displayConfig.audioStream) return;
           if (!audioUnlocked) return;
 
@@ -2012,17 +2043,19 @@
             audioStreamCtx.resume();
           }
 
-          // Convert Int16 PCM bytes to Float32 for Web Audio API
+          // Convert interleaved Int16 PCM bytes to per-channel Float32 for Web Audio API
           var int16Array = new Int16Array(data);
-          var float32Array = new Float32Array(int16Array.length);
-          for (var i = 0; i < int16Array.length; i++) {
-            float32Array[i] = int16Array[i] / 32768.0;
+          var frames = Math.floor(int16Array.length / channels);
+          if (!frames) return;
+          var buffer = audioStreamCtx.createBuffer(channels, frames, audioStreamSampleRate);
+          for (var ch = 0; ch < channels; ch++) {
+            var out = buffer.getChannelData(ch);
+            for (var i = 0; i < frames; i++) {
+              out[i] = int16Array[i * channels + ch] / 32768.0;
+            }
           }
 
-          // Create and schedule audio buffer for gapless playback
-          var buffer = audioStreamCtx.createBuffer(1, float32Array.length, audioStreamSampleRate);
-          buffer.getChannelData(0).set(float32Array);
-
+          // Schedule for gapless playback
           var source = audioStreamCtx.createBufferSource();
           source.buffer = buffer;
           source.connect(audioStreamCtx.destination);
@@ -2030,11 +2063,16 @@
           var currentTime = audioStreamCtx.currentTime;
           // Only snap forward if not yet started (first chunk or after reconnect reset)
           if (audioStreamNextPlayTime === 0) {
-            audioStreamNextPlayTime = currentTime + 0.02;
+            audioStreamNextPlayTime = currentTime + (audioStreamHq ? 0.25 : 0.02);
+          }
+          // HQ chunks are 100 ms, so network jitter can outrun the queue: keep a
+          // 250 ms cushion and re-anchor after an underrun instead of bunching up
+          if (audioStreamHq && audioStreamNextPlayTime < currentTime + 0.02) {
+            audioStreamNextPlayTime = currentTime + 0.25;
           }
           source.start(audioStreamNextPlayTime);
           audioStreamNextPlayTime += buffer.duration;
-        });
+        }
 
         // =====================================================================
         // TTS Audio Playback (for translated text)

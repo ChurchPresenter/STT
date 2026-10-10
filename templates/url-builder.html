@@ -420,6 +420,12 @@
                 <small style="color: #999; display: block; margin: -4px 0 8px 24px;">Hear the microphone audio through the browser</small>
 
                 <div class="checkbox-group">
+                    <input type="checkbox" id="url_audioQualityHq" oninput="updateCustomURL()">
+                    <label for="url_audioQualityHq">Full-Quality Audio (48 kHz stereo)</label>
+                </div>
+                <small style="color: #999; display: block; margin: -4px 0 8px 24px;">Uncompressed, about 1.5 Mbps per listener: best on the local network. Off = the 16 kHz mono feed transcription uses</small>
+
+                <div class="checkbox-group">
                     <input type="checkbox" id="url_ttsAudio" oninput="updateCustomURL(); checkTtsEnabled();">
                     <label for="url_ttsAudio">Enable TTS for Translation</label>
                 </div>
@@ -534,6 +540,7 @@
             showAll: false,
             hideMusicSegments: false,
             audioStream: false,
+            audioQualityHq: false,
             ttsAudio: false,
         };
 
@@ -626,6 +633,7 @@
             document.getElementById('url_showAll').checked = DEFAULTS.showAll;
             document.getElementById('url_hideMusicSegments').checked = DEFAULTS.hideMusicSegments;
             document.getElementById('url_audioStream').checked = DEFAULTS.audioStream;
+            document.getElementById('url_audioQualityHq').checked = DEFAULTS.audioQualityHq;
             document.getElementById('url_ttsAudio').checked = DEFAULTS.ttsAudio;
             toggleWordColorPicker();
             updateOpacityLabel();
@@ -764,6 +772,9 @@
             // Audio streaming parameters
             if (document.getElementById('url_audioStream').checked) {
                 params.append('audioStream', 'true');
+                if (document.getElementById('url_audioQualityHq').checked) {
+                    params.append('audioQuality', 'hq');
+                }
             }
             if (document.getElementById('url_ttsAudio').checked) {
                 params.append('ttsAudio', 'true');
@@ -1086,6 +1097,7 @@
             document.getElementById('url_showAll').checked = params.showAll === 'true';
             document.getElementById('url_hideMusicSegments').checked = params.hideMusicSegments === 'true';
             document.getElementById('url_audioStream').checked = params.audioStream === 'true';
+            document.getElementById('url_audioQualityHq').checked = params.audioQuality === 'hq';
             document.getElementById('url_ttsAudio').checked = params.ttsAudio === 'true';
 
             // Update URL with loaded defaults

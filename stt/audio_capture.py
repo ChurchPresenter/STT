@@ -177,6 +177,27 @@ def _open_failure_message(returncode, detail):
         f"{text}; the device may not exist, or may be in use by another application")
 
 
+def ffmpeg_input_args(device_name: Optional[str], platform: Optional[str] = None) -> list:
+    """The ffmpeg input arguments that open `device_name` on this platform.
+
+    A path to an existing file is played back at real-time pace (file-playback
+    mode, for testing). Shared by the transcription capture and the
+    high-quality listening capture (stt/hq_audio.py) so the two always open a
+    device the same way.
+    """
+    if device_name and os.path.isfile(device_name):
+        return ['-re', '-i', device_name]
+    platform = platform or sys.platform
+    if platform.startswith('linux'):
+        # Linux: ALSA (or the PulseAudio/PipeWire ALSA plugin)
+        return ['-f', 'alsa', '-i', device_name or 'default']
+    if platform == 'darwin':
+        return ['-f', 'avfoundation', '-i', f':{device_name}' if device_name else ':0']
+    if platform.startswith('win'):
+        return ['-f', 'dshow', '-i', f'audio={device_name}' if device_name else 'audio=Microphone']
+    raise RuntimeError(f"Unsupported platform: {platform}")
+
+
 class FFmpegAudioCapture:
     """Audio capture using ffmpeg - reliable cross-platform audio backend"""
 
@@ -301,115 +322,19 @@ class FFmpegAudioCapture:
             if self._ts_file_count > 1:
                 print(f"[DEBUG-TS-SPLIT] *** WARNING: THIS IS BACKUP FILE #{self._ts_file_count} - RECORDING HAS BEEN SPLIT ***", flush=True)
 
-        # File playback mode: device_name is a path to an audio file (for testing)
-        if self.device_name and os.path.isfile(self.device_name):
-            if self.ts_enabled:
-                cmd = [
-                    'ffmpeg', '-y', '-re',
-                    '-i', self.device_name,
-                    '-ar', str(self.sample_rate), '-ac', '1',
-                    '-filter_complex', '[0:a]asplit=2[a1][a2]',
-                    '-map', '[a1]', '-c:a', 'pcm_s16le', '-f', 's16le', 'pipe:1',
-                    '-map', '[a2]', '-c:a', 'mp2', '-b:a', '128k', '-f', 'mpegts', self.backup_file,
-                ]
-            else:
-                cmd = [
-                    'ffmpeg', '-y', '-re',
-                    '-i', self.device_name,
-                    '-ar', str(self.sample_rate), '-ac', '1',
-                    '-c:a', 'pcm_s16le', '-f', 's16le', 'pipe:1',
-                ]
-            print(f"[DEBUG-TS-CMD] FFmpeg command: {' '.join(cmd)}", flush=True)
-            return cmd
-
-        if sys.platform.startswith('linux'):
-            # Linux: Use ALSA or PulseAudio
-            if self.device_name:
-                device = self.device_name
-            else:
-                device = 'default'  # ALSA default device
-
-            if self.ts_enabled:
-                # Use filter_complex to split audio: raw PCM to stdout, MP2 to MPEG-TS file
-                # MPEG-TS requires a proper codec (mp2) for power-fail recovery
-                cmd = [
-                    'ffmpeg', '-y',
-                    '-f', 'alsa',
-                    '-i', device,
-                    '-ar', str(self.sample_rate),
-                    '-ac', '1',  # mono
-                    '-filter_complex', '[0:a]asplit=2[a1][a2]',
-                    '-map', '[a1]', '-c:a', 'pcm_s16le', '-f', 's16le', 'pipe:1',
-                    '-map', '[a2]', '-c:a', 'mp2', '-b:a', '128k', '-f', 'mpegts', self.backup_file
-                ]
-            else:
-                # Simple command without .ts backup - just PCM to stdout
-                cmd = [
-                    'ffmpeg', '-y',
-                    '-f', 'alsa',
-                    '-i', device,
-                    '-ar', str(self.sample_rate),
-                    '-ac', '1',  # mono
-                    '-c:a', 'pcm_s16le', '-f', 's16le', 'pipe:1'
-                ]
-
-        elif sys.platform == 'darwin':
-            # macOS: Use avfoundation
-            if self.device_name:
-                device = f':{self.device_name}'
-            else:
-                device = ':0'  # default device
-
-            if self.ts_enabled:
-                cmd = [
-                    'ffmpeg', '-y',
-                    '-f', 'avfoundation',
-                    '-i', device,
-                    '-ar', str(self.sample_rate),
-                    '-ac', '1',
-                    '-filter_complex', '[0:a]asplit=2[a1][a2]',
-                    '-map', '[a1]', '-c:a', 'pcm_s16le', '-f', 's16le', 'pipe:1',
-                    '-map', '[a2]', '-c:a', 'mp2', '-b:a', '128k', '-f', 'mpegts', self.backup_file
-                ]
-            else:
-                cmd = [
-                    'ffmpeg', '-y',
-                    '-f', 'avfoundation',
-                    '-i', device,
-                    '-ar', str(self.sample_rate),
-                    '-ac', '1',
-                    '-c:a', 'pcm_s16le', '-f', 's16le', 'pipe:1'
-                ]
-
-        elif sys.platform.startswith('win'):
-            # Windows: Use dshow
-            if self.device_name:
-                device = f'audio={self.device_name}'
-            else:
-                device = 'audio=Microphone'
-
-            if self.ts_enabled:
-                cmd = [
-                    'ffmpeg', '-y',
-                    '-f', 'dshow',
-                    '-i', device,
-                    '-ar', str(self.sample_rate),
-                    '-ac', '1',
-                    '-filter_complex', '[0:a]asplit=2[a1][a2]',
-                    '-map', '[a1]', '-c:a', 'pcm_s16le', '-f', 's16le', 'pipe:1',
-                    '-map', '[a2]', '-c:a', 'mp2', '-b:a', '128k', '-f', 'mpegts', self.backup_file
-                ]
-            else:
-                cmd = [
-                    'ffmpeg', '-y',
-                    '-f', 'dshow',
-                    '-i', device,
-                    '-ar', str(self.sample_rate),
-                    '-ac', '1',
-                    '-c:a', 'pcm_s16le', '-f', 's16le', 'pipe:1'
-                ]
+        input_args = ffmpeg_input_args(self.device_name)
+        convert = ['-ar', str(self.sample_rate), '-ac', '1']  # mono
+        if self.ts_enabled:
+            # Split audio: raw PCM to stdout, MP2 to MPEG-TS file
+            # MPEG-TS requires a proper codec (mp2) for power-fail recovery
+            cmd = [
+                'ffmpeg', '-y', *input_args, *convert,
+                '-filter_complex', '[0:a]asplit=2[a1][a2]',
+                '-map', '[a1]', '-c:a', 'pcm_s16le', '-f', 's16le', 'pipe:1',
+                '-map', '[a2]', '-c:a', 'mp2', '-b:a', '128k', '-f', 'mpegts', self.backup_file,
+            ]
         else:
-            raise RuntimeError(f"Unsupported platform: {sys.platform}")
+            cmd = ['ffmpeg', '-y', *input_args, *convert, '-c:a', 'pcm_s16le', '-f', 's16le', 'pipe:1']
 
         print(f"[DEBUG-TS-CMD] FFmpeg command: {' '.join(cmd)}", flush=True)
         return cmd

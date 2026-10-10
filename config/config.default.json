@@ -108,6 +108,14 @@
       "max_chars": 200,
       "_max_chars_comment": "How much trailing transcript to include in the prompt. Whisper's prompt budget is 224 tokens (~900 chars)"
     },
+    "listen_stream": {
+      "enabled": true,
+      "_enabled_comment": "Offer a full-quality copy of the input (Socket.IO room 'audio_stream_hq', event 'audio_chunk_hq', interleaved s16le PCM) for loudness meters and listeners. It opens the device a second time, only while transcription runs and someone has joined. The 16 kHz mono 'audio_stream' feed Whisper and SongListener use is unaffected.",
+      "sample_rate": 48000,
+      "_sample_rate_comment": "Sample rate of the high-quality stream in Hz.",
+      "channels": 2,
+      "_channels_comment": "Channels of the high-quality stream. A mono input is duplicated to both channels. About 1.5 Mbps per listener at 48 kHz stereo."
+    },
     "loudness_normalization": {
       "enabled": false,
       "_enabled_comment": "Boost quiet audio before transcription (single gain per pass, never clips). Only affects the audio sent to Whisper — energy threshold and calibration always see raw levels",

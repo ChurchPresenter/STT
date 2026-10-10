@@ -99,6 +99,7 @@ from stt import shutdown_channel as _shutdown_channel
 from stt import fd_limit as _fd_limit
 # What may appear in an operator's support report, by allowlist.
 from stt import diagnostics as _diagnostics
+from stt import hq_audio as _hq_audio
 from stt import model_disk as _model_disk
 from stt.http_params import merge_request_params, parse_json_body as _parse_json_body
 from stt.model_disk import _CT2_MARKER, dir_has_weights, dir_is_writable, has_weight_file, is_weight_file, model_presence  # noqa: F401
@@ -3742,6 +3743,7 @@ if mp_manager is not None:
             "live_word_confidences": [],  # Word-level confidence for the live preview
             "loaded_model": "",  # Name of the actual model that was loaded
             "audio_stream_enabled": False,  # Whether to stream audio to web clients
+            "audio_device": None,  # Device the worker's capture opened; the HQ listening capture opens the same one
             "audio_type": None,  # "Speaking", "Music", or "Quiet" — PANNs detection (no_speech_prob fallback)
             "detection_mode": None,  # "panns" (tagger live) or "energy" (fallback) — which detector is actually running
             "loaded_model_device": None,  # "cuda" / "mps" / "cpu" the ASR model landed on
@@ -17333,6 +17335,8 @@ def handle_connect():
 
 @socketio.on("disconnect")
 def handle_disconnect():
+    with _hq_listeners_lock:
+        _hq_listeners.discard(request.sid)
     emit("connected", {"data": "Disconnected from Alexs server"})
 
 
@@ -17671,6 +17675,54 @@ def handle_leave_audio_stream():
     """Client no longer wants live microphone audio"""
     from flask_socketio import leave_room
     leave_room("audio_stream")
+
+
+# Full-quality listening stream (stt/hq_audio.py): a second ffmpeg on the same
+# device, run only while someone is in the room. The 16 kHz room above is left
+# exactly as it is — Whisper and SongListener both depend on its format.
+_hq_listeners = set()
+_hq_listeners_lock = threading.Lock()
+
+
+def _hq_target():
+    with _hq_listeners_lock:
+        listeners = len(_hq_listeners)
+    return _hq_audio.resolve_target(
+        config.get("audio", {}).get("listen_stream"),
+        bool(transcription_state.get("running")),
+        transcription_state.get("audio_device"),
+        listeners,
+    )
+
+
+def _emit_hq_chunk(chunk):
+    socketio.emit("audio_chunk_hq", chunk, room="audio_stream_hq")
+
+
+_hq_capture = _hq_audio.HqCapture(_hq_target, _emit_hq_chunk)
+
+
+@socketio.on("join_audio_stream_hq")
+def handle_join_audio_stream_hq():
+    """Client wants the full-quality stream (meters, listening)"""
+    from flask_socketio import join_room
+    settings = config.get("audio", {}).get("listen_stream")
+    target = _hq_audio.resolve_target(settings, True, "-", 1)
+    if DEMO or target is None:
+        emit("audio_stream_hq_info", {"available": False})
+        return
+    join_room("audio_stream_hq")
+    with _hq_listeners_lock:
+        _hq_listeners.add(request.sid)
+    emit("audio_stream_hq_info", {"available": True, **_hq_audio.stream_info(target)})
+
+
+@socketio.on("leave_audio_stream_hq")
+def handle_leave_audio_stream_hq():
+    from flask_socketio import leave_room
+    leave_room("audio_stream_hq")
+    with _hq_listeners_lock:
+        _hq_listeners.discard(request.sid)
 
 
 @socketio.on("join_tts_audio")
@@ -21890,6 +21942,7 @@ def thread1_function(ts, cq, cfq, cal_state, cal_data, cal_step1, asq):
                             )
                             # Start the ffmpeg capture (it will populate the data_queue)
                             source.start()
+                            transcription_state["audio_device"] = str(device) if device is not None else None
                             print(f"[OK] Audio initialized successfully with device: {device}")
                             # File-playback mode (a "Test Audio File"): expose the
                             # source + its total length so the UI can show a
@@ -24140,6 +24193,9 @@ def thread2_function():
         # Start audio streaming background tasks
         socketio.start_background_task(emit_audio_stream)
         socketio.start_background_task(emit_tts_audio)
+        if not DEMO:
+            threading.Thread(target=_hq_capture.run, args=(threading.Event(),),
+                             daemon=True, name="audio-hq").start()
         # Drains the sermon-summary queue the phase tick fills. Started unconditionally:
         # the worker blocks on an empty queue, and nothing is queued while the feature is
         # off, so an installation without an LLM pays one idle thread.
