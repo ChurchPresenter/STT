@@ -3697,6 +3697,7 @@ if DEMO:
     config_queue = _demo_mode.local_queue()
     control_queue = _demo_mode.local_queue()
     audio_stream_queue = _demo_mode.local_queue(maxsize=10)
+    hq_stream_queue = _demo_mode.local_queue(maxsize=20)
 elif multiprocessing.current_process().name == 'MainProcess':
     # multiprocessing.Manager() with an initializer: the Manager's own process watches for
     # this one to disappear and exits with it, instead of outliving a killed server
@@ -3714,6 +3715,8 @@ elif multiprocessing.current_process().name == 'MainProcess':
 
     # Create multiprocessing Queue for streaming audio to web clients
     audio_stream_queue = MPQueue(maxsize=10)
+    # Full-quality listening chunks (100 ms each) from the same capture; dropped when full
+    hq_stream_queue = MPQueue(maxsize=20)
 else:
     # Spawned worker process: shared objects will be received as function arguments
     # and assigned to these globals at the top of thread1_function.
@@ -3721,6 +3724,7 @@ else:
     config_queue = None
     control_queue = None
     audio_stream_queue = None
+    hq_stream_queue = None
 
 if mp_manager is not None:
     # Global transcription state - use Manager.dict() for cross-process sharing
@@ -3743,6 +3747,7 @@ if mp_manager is not None:
             "live_word_confidences": [],  # Word-level confidence for the live preview
             "loaded_model": "",  # Name of the actual model that was loaded
             "audio_stream_enabled": False,  # Whether to stream audio to web clients
+            "audio_hq_enabled": False,  # Whether anyone is in the full-quality listening room
             "audio_device": None,  # Device the worker's capture opened; the HQ listening capture opens the same one
             "audio_type": None,  # "Speaking", "Music", or "Quiet" — PANNs detection (no_speech_prob fallback)
             "detection_mode": None,  # "panns" (tagger live) or "energy" (fallback) — which detector is actually running
@@ -3818,7 +3823,7 @@ def _spawn_worker():
         target=thread1_function,
         args=(transcription_state, control_queue, config_queue,
               calibration_state, calibration_data_shared, calibration_step1_data,
-              audio_stream_queue)
+              audio_stream_queue, hq_stream_queue)
     )
     proc.start()
     return proc
@@ -17337,6 +17342,7 @@ def handle_connect():
 def handle_disconnect():
     with _hq_listeners_lock:
         _hq_listeners.discard(request.sid)
+    _sync_hq_enabled()
     emit("connected", {"data": "Disconnected from Alexs server"})
 
 
@@ -17677,9 +17683,11 @@ def handle_leave_audio_stream():
     leave_room("audio_stream")
 
 
-# Full-quality listening stream (stt/hq_audio.py): a second ffmpeg on the same
-# device, run only while someone is in the room. The 16 kHz room above is left
-# exactly as it is — Whisper and SongListener both depend on its format.
+# Full-quality listening stream. On Linux/macOS it is a branch of the transcription
+# capture itself (FFmpegAudioCapture.hq_format), forwarded only while someone is in
+# the room; on Windows, a second ffmpeg on the same device (stt/hq_audio.py). The
+# 16 kHz room above is left exactly as it is — Whisper and SongListener both depend
+# on its format.
 _hq_listeners = set()
 _hq_listeners_lock = threading.Lock()
 
@@ -17693,6 +17701,16 @@ def _hq_target():
         transcription_state.get("audio_device"),
         listeners,
     )
+
+
+def _sync_hq_enabled():
+    """Tell the worker whether anyone wants full-quality chunks."""
+    with _hq_listeners_lock:
+        wanted = bool(_hq_listeners)
+    try:
+        transcription_state["audio_hq_enabled"] = wanted
+    except Exception:
+        pass  # Manager gone during shutdown
 
 
 def _emit_hq_chunk(chunk):
@@ -17714,6 +17732,7 @@ def handle_join_audio_stream_hq():
     join_room("audio_stream_hq")
     with _hq_listeners_lock:
         _hq_listeners.add(request.sid)
+    _sync_hq_enabled()
     emit("audio_stream_hq_info", {"available": True, **_hq_audio.stream_info(target)})
 
 
@@ -17723,6 +17742,7 @@ def handle_leave_audio_stream_hq():
     leave_room("audio_stream_hq")
     with _hq_listeners_lock:
         _hq_listeners.discard(request.sid)
+    _sync_hq_enabled()
 
 
 @socketio.on("join_tts_audio")
@@ -20907,6 +20927,35 @@ def _run_translation_backfill(entries, source_lang, target_lang, dbg=False):
 # Audio Streaming Background Tasks
 # =============================================================================
 
+def _queue_hq_chunk(chunk):
+    """Worker side: pass one full-quality chunk to the server, never waiting.
+
+    Called from the capture's pipe reader, which must keep draining ffmpeg, so a chunk
+    nobody wants (or that would not fit) is dropped."""
+    if hq_stream_queue is None:
+        return
+    try:
+        if not transcription_state.get("audio_hq_enabled", False):
+            return
+        hq_stream_queue.put_nowait(chunk)
+    except Full:
+        pass  # listener behind; drop rather than stall the capture
+    except (BrokenPipeError, EOFError, ConnectionError):
+        pass  # server shutting down
+
+
+def emit_hq_stream():
+    """Background task that streams full-quality chunks to the audio_stream_hq room"""
+    while True:
+        try:
+            data = hq_stream_queue.get(timeout=0.5)
+            socketio.emit("audio_chunk_hq", data, room="audio_stream_hq")
+        except Empty:
+            pass
+        except Exception as e:
+            print(f"[AUDIO-HQ] emit error: {e}", flush=True)
+
+
 def emit_audio_stream():
     """Background task that streams live audio chunks to web clients"""
     while True:
@@ -21536,7 +21585,7 @@ def _report_worker_crash(exc, role="worker"):
         set_state=_set_state, log=_log)
 
 
-def thread1_function(ts, cq, cfq, cal_state, cal_data, cal_step1, asq):
+def thread1_function(ts, cq, cfq, cal_state, cal_data, cal_step1, asq, hqq=None):
     """Main transcription process with start/stop support"""
     install_crash_diagnostics("worker")
     # Exit with the server, however it dies: a killed server used to leave this worker
@@ -21558,7 +21607,7 @@ def thread1_function(ts, cq, cfq, cal_state, cal_data, cal_step1, asq):
     # before this point would write its error into that private copy, where no web
     # request can ever read it -- which is how a missing dependency used to leave the
     # UI on STARTING for ever.
-    global transcription_state, control_queue, config_queue, audio_stream_queue
+    global transcription_state, control_queue, config_queue, audio_stream_queue, hq_stream_queue
     global calibration_state, calibration_data_shared, calibration_step1_data
     transcription_state = ts
     control_queue = cq
@@ -21567,6 +21616,7 @@ def thread1_function(ts, cq, cfq, cal_state, cal_data, cal_step1, asq):
     calibration_data_shared = cal_data
     calibration_step1_data = cal_step1
     audio_stream_queue = asq
+    hq_stream_queue = hqq
 
     # numpy and SpeechRecognition are imported defensively at module scope so the
     # demo build can omit them. Everything below needs both, so say so here rather
@@ -21932,6 +21982,8 @@ def thread1_function(ts, cq, cfq, cal_state, cal_data, cal_step1, asq):
                             ts_path_format = backup_cfg.get("path_format", "").strip() or "%Y/%m"
                             ts_formatted_path = datetime.now().strftime(ts_path_format)
                             ts_backup_dir = os.path.join(ts_base_dir, ts_formatted_path) if ts_enabled else None
+                            hq_target = _hq_audio.resolve_target(
+                                process_config.get("audio", {}).get("listen_stream"), True, str(device), 1)
                             source = create_compatible_audio_source(
                                 device_name=device,
                                 sample_rate=16000,
@@ -21939,6 +21991,8 @@ def thread1_function(ts, cq, cfq, cal_state, cal_data, cal_step1, asq):
                                 filename_format=ts_filename_format,
                                 filename_prefix=ts_filename_prefix,
                                 ts_enabled=ts_enabled,
+                                hq_format=(hq_target.sample_rate, hq_target.channels) if hq_target else None,
+                                on_hq_chunk=_queue_hq_chunk,
                             )
                             # Start the ffmpeg capture (it will populate the data_queue)
                             source.start()
@@ -24192,8 +24246,12 @@ def thread2_function():
 
         # Start audio streaming background tasks
         socketio.start_background_task(emit_audio_stream)
+        socketio.start_background_task(emit_hq_stream)
         socketio.start_background_task(emit_tts_audio)
-        if not DEMO:
+        # Elsewhere the full-quality stream is a branch of the transcription capture
+        # (FFmpegAudioCapture.hq_format); Windows cannot hand ffmpeg the extra pipe, so
+        # there it still opens the device a second time.
+        if not DEMO and sys.platform.startswith("win"):
             threading.Thread(target=_hq_capture.run, args=(threading.Event(),),
                              daemon=True, name="audio-hq").start()
         # Drains the sermon-summary queue the phase tick fills. Started unconditionally:
@@ -24622,7 +24680,7 @@ if __name__ == "__main__":
         target=thread1_function,
         args=(transcription_state, control_queue, config_queue,
               calibration_state, calibration_data_shared, calibration_step1_data,
-              audio_stream_queue)
+              audio_stream_queue, hq_stream_queue)
     )
     # thread2 = multiprocessing.Process(target=thread2_function)
     # thread1 = threading.Thread(target=thread1_function)

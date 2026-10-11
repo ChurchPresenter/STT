@@ -201,8 +201,16 @@ def ffmpeg_input_args(device_name: Optional[str], platform: Optional[str] = None
 class FFmpegAudioCapture:
     """Audio capture using ffmpeg - reliable cross-platform audio backend"""
 
-    def __init__(self, sample_rate=16000, chunk_duration=1.0, device_name=None, backup_dir=None, filename_format=None, filename_prefix=None, ts_enabled=True, open_timeout=5.0):
+    def __init__(self, sample_rate=16000, chunk_duration=1.0, device_name=None, backup_dir=None, filename_format=None, filename_prefix=None, ts_enabled=True, open_timeout=5.0,
+                 hq_format=None, on_hq_chunk=None):
         self.sample_rate = sample_rate
+        # Full-quality listening branch (stt/hq_audio.py): (sample_rate, channels) and a
+        # callback that must never block. It is one more output of this same ffmpeg,
+        # written to an extra pipe, so the device is opened once — a second open of an
+        # ALSA plughw: device fails with "Device or resource busy". Windows cannot pass
+        # an extra pipe to a child, so it keeps hq_audio.HqCapture's second open.
+        self.hq_format = hq_format if (hq_format and on_hq_chunk and not _IS_WINDOWS) else None
+        self._on_hq_chunk = on_hq_chunk
         self.chunk_duration = chunk_duration
         self.chunk_size = int(sample_rate * chunk_duration)
         self.device_name = device_name
@@ -302,8 +310,11 @@ class FFmpegAudioCapture:
         if self.device_name and os.path.isfile(self.device_name):
             self.playback_finished.set()
 
-    def _get_ffmpeg_command(self):
-        """Build ffmpeg command for the current platform with optional MPEG-TS backup"""
+    def _get_ffmpeg_command(self, hq_fd=None):
+        """Build ffmpeg command for the current platform with optional MPEG-TS backup.
+
+        With ``hq_fd`` (and ``hq_format``), one more branch of the same capture is
+        written as s16le PCM to that inherited file descriptor."""
         import sys
 
         # Create backup directory and generate timestamped filename (only if ts_enabled)
@@ -324,7 +335,20 @@ class FFmpegAudioCapture:
 
         input_args = ffmpeg_input_args(self.device_name)
         convert = ['-ar', str(self.sample_rate), '-ac', '1']  # mono
-        if self.ts_enabled:
+        if hq_fd is not None and self.hq_format:
+            hq_rate, hq_channels = self.hq_format
+            outputs = [['-c:a', 'pcm_s16le', '-f', 's16le', 'pipe:1']]
+            if self.ts_enabled:
+                outputs.append(['-c:a', 'mp2', '-b:a', '128k', '-f', 'mpegts', self.backup_file])
+            # flush_packets: hand each packet over at once instead of in ~170 ms pipe-buffer lumps
+            outputs.append(['-ar', str(hq_rate), '-ac', str(hq_channels), '-c:a', 'pcm_s16le',
+                            '-flush_packets', '1', '-f', 's16le', f'pipe:{hq_fd}'])
+            labels = [f'[a{i + 1}]' for i in range(len(outputs))]
+            cmd = ['ffmpeg', '-y', *input_args, *convert,
+                   '-filter_complex', f'[0:a]asplit={len(outputs)}{"".join(labels)}']
+            for label, out in zip(labels, outputs):
+                cmd += ['-map', label, *out]
+        elif self.ts_enabled:
             # Split audio: raw PCM to stdout, MP2 to MPEG-TS file
             # MPEG-TS requires a proper codec (mp2) for power-fail recovery
             cmd = [
@@ -339,6 +363,60 @@ class FFmpegAudioCapture:
         print(f"[DEBUG-TS-CMD] FFmpeg command: {' '.join(cmd)}", flush=True)
         return cmd
 
+    # --- full-quality branch ---------------------------------------------------
+    def _open_hq_pipe(self):
+        """(read, write) ends for the full-quality branch, or (None, None) without one."""
+        if not self.hq_format:
+            return None, None
+        return os.pipe()
+
+    @staticmethod
+    def _hq_popen_kwargs(hq_w):
+        return {"pass_fds": (hq_w,)} if hq_w is not None else {}
+
+    @staticmethod
+    def _close_fds(*fds):
+        for fd in fds:
+            if fd is not None:
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
+
+    def _start_hq_reader(self, hq_r, hq_w):
+        """Close our copy of the write end (so ffmpeg's exit reaches the reader as EOF)
+        and drain the read end on its own thread."""
+        if hq_r is None:
+            return
+        self._close_fds(hq_w)
+        threading.Thread(target=self._read_hq, args=(hq_r,), name="audio-hq-reader", daemon=True).start()
+
+    def _read_hq(self, fd):
+        """Read the full-quality branch until ffmpeg exits, in whole 100 ms chunks.
+
+        This thread never waits on anything but the pipe: if it stopped reading, ffmpeg
+        would block on the full pipe and stall the transcription output with it. The
+        callback is expected to drop chunks nobody is taking rather than wait."""
+        from stt.hq_audio import Chunker, chunk_bytes
+        chunker = Chunker(chunk_bytes(*self.hq_format))
+        failed = False
+        try:
+            while True:
+                data = os.read(fd, 65536)
+                if not data:
+                    return
+                for chunk in chunker.feed(data):
+                    try:
+                        self._on_hq_chunk(chunk)
+                    except Exception as e:  # never let a listener problem stop the drain
+                        if not failed:
+                            print(f"[AUDIO-HQ] chunk handler error: {e}", flush=True)
+                            failed = True
+        except OSError:
+            pass
+        finally:
+            self._close_fds(fd)
+
     def _capture_loop(self, callback):
         """Main capture loop running in a separate thread"""
         # Debug tracking variables
@@ -346,7 +424,8 @@ class FFmpegAudioCapture:
         last_debug_time = time.time()
 
         try:
-            cmd = self._get_ffmpeg_command()
+            hq_r, hq_w = self._open_hq_pipe()
+            cmd = self._get_ffmpeg_command(hq_fd=hq_w)
             print(f"[FFMPEG] Starting audio capture: {' '.join(cmd)}")
 
             # Start ffmpeg process
@@ -357,12 +436,15 @@ class FFmpegAudioCapture:
                     stderr=subprocess.PIPE,
                     bufsize=self.chunk_size * 2,  # 16-bit samples
                     creationflags=_CREATE_NO_WINDOW,
+                    **self._hq_popen_kwargs(hq_w),
                 )
             except OSError as e:
                 print(f"[FFMPEG] Failed to start ffmpeg: {e}", flush=True)
+                self._close_fds(hq_r, hq_w)
                 self._open_error = e
                 self._open_event.set()
                 return
+            self._start_hq_reader(hq_r, hq_w)
 
             print(f"[DEBUG-TS-START] FFmpeg started, PID: {self.process.pid}", flush=True)
             print(f"[DEBUG-TS-START] Backup file target: {self.backup_file}", flush=True)
@@ -444,7 +526,8 @@ class FFmpegAudioCapture:
                     self.process.wait(timeout=2)
                 except subprocess.TimeoutExpired:
                     self.process.kill()
-                cmd = self._get_ffmpeg_command()
+                hq_r, hq_w = self._open_hq_pipe()
+                cmd = self._get_ffmpeg_command(hq_fd=hq_w)
                 print(f"[DEBUG-TS-SPLIT] *** BACKUP FILE SPLIT DUE TO TIMEOUT *** Old: {old_backup_file} -> New: {self.backup_file}", flush=True)
                 print(f"[FFMPEG] Restarting: {' '.join(cmd)}", flush=True)
                 with self._process_lock:
@@ -453,15 +536,22 @@ class FFmpegAudioCapture:
                     # then create exactly the orphan this guard exists to prevent.
                     if not self.running:
                         print("[DEBUG-TS-RESTART] Stopping — not respawning ffmpeg", flush=True)
+                        self._close_fds(hq_r, hq_w)
                         return b''
-                    proc = subprocess.Popen(
-                        cmd,
-                        stdout=subprocess.PIPE,
-                        stderr=subprocess.PIPE,
-                        bufsize=self.chunk_size * 2,
-                        creationflags=_CREATE_NO_WINDOW,
-                    )
+                    try:
+                        proc = subprocess.Popen(
+                            cmd,
+                            stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE,
+                            bufsize=self.chunk_size * 2,
+                            creationflags=_CREATE_NO_WINDOW,
+                            **self._hq_popen_kwargs(hq_w),
+                        )
+                    except OSError:
+                        self._close_fds(hq_r, hq_w)
+                        raise
                     self.process = proc
+                self._start_hq_reader(hq_r, hq_w)
                 # Everything below reads the local handle, not self.process: stop()
                 # may null the field the moment the lock is released, and the reader
                 # this sets up still has to be attached to the process just spawned.
@@ -1005,7 +1095,8 @@ def resolve_audio_device_by_name(saved_name, devices=None):
     return FFmpegAudioCapture.resolve_device_by_name(saved_name, devices)
 
 
-def create_compatible_audio_source(device_name=None, sample_rate=16000, backup_dir=None, filename_format=None, filename_prefix=None, ts_enabled=True):
+def create_compatible_audio_source(device_name=None, sample_rate=16000, backup_dir=None, filename_format=None, filename_prefix=None, ts_enabled=True,
+                                   hq_format=None, on_hq_chunk=None):
     """
     Create an audio source compatible with the existing queue-based transcription system.
 
@@ -1016,6 +1107,8 @@ def create_compatible_audio_source(device_name=None, sample_rate=16000, backup_d
         filename_format: strftime format for backup filenames (None for default %Y-%m-%d_%H%M%S)
         filename_prefix: Optional prefix for backup filenames (None for no prefix)
         ts_enabled: Whether to enable .ts backup (default True)
+        hq_format: (sample_rate, channels) of the full-quality listening branch, or None
+        on_hq_chunk: Non-blocking callback for each 100 ms full-quality chunk
 
     Returns:
         A source object with SAMPLE_WIDTH attribute and a data queue that can be used
@@ -1028,7 +1121,9 @@ def create_compatible_audio_source(device_name=None, sample_rate=16000, backup_d
         backup_dir=backup_dir,
         filename_format=filename_format,
         filename_prefix=filename_prefix,
-        ts_enabled=ts_enabled
+        ts_enabled=ts_enabled,
+        hq_format=hq_format,
+        on_hq_chunk=on_hq_chunk,
     )
     source.data_queue = Queue()
     return source
