@@ -339,7 +339,7 @@ class FFmpegAudioCapture:
             hq_rate, hq_channels = self.hq_format
             outputs = [['-c:a', 'pcm_s16le', '-f', 's16le', 'pipe:1']]
             if self.ts_enabled:
-                outputs.append(['-c:a', 'mp2', '-b:a', '128k', '-f', 'mpegts', self.backup_file])
+                outputs.append(['-c:a', 'mp2', '-b:a', '128k', '-f', 'mpegts', str(self.backup_file)])
             # flush_packets: hand each packet over at once instead of in ~170 ms pipe-buffer lumps
             outputs.append(['-ar', str(hq_rate), '-ac', str(hq_channels), '-c:a', 'pcm_s16le',
                             '-flush_packets', '1', '-f', 's16le', f'pipe:{hq_fd}'])
@@ -398,6 +398,7 @@ class FFmpegAudioCapture:
         would block on the full pipe and stall the transcription output with it. The
         callback is expected to drop chunks nobody is taking rather than wait."""
         from stt.hq_audio import Chunker, chunk_bytes
+        assert self.hq_format is not None  # only started when the branch exists
         chunker = Chunker(chunk_bytes(*self.hq_format))
         failed = False
         try:
