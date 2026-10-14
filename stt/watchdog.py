@@ -799,7 +799,13 @@ _STATIC_FFMPEG_URLS = {
         "https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz",
         "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-linux64-gpl.tar.xz",
     ),
-    "darwin": ("https://evermeet.cx/ffmpeg/getrelease/ffmpeg/zip",),
+    # evermeet.cx, the old source, answers 410 since 2026-10 and was x86_64 only.
+    # Martin Riedl's release build is arm64; the backup is a bare gzipped binary.
+    # HEAD on the redirect answers 404 — only GET resolves it.
+    "darwin": (
+        "https://ffmpeg.martin-riedl.de/redirect/latest/macos/arm64/release/ffmpeg.zip",
+        "https://github.com/eugeneware/ffmpeg-static/releases/latest/download/ffmpeg-darwin-arm64.gz",
+    ),
     "win32": (
         "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip",
         "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip",
@@ -1661,7 +1667,10 @@ class Provisioner:
         )
 
     def _extract_ffmpeg(self, archive, dest):
-        """Extract just the ffmpeg (+ffprobe) binaries from a static archive into dest."""
+        """Extract just the ffmpeg (+ffprobe) binaries from a static archive into dest.
+
+        A bare ``.gz`` (not ``.tar.gz``) is one gzipped ffmpeg binary."""
+        import gzip
         import tarfile
         wanted = ("ffmpeg", "ffprobe", "ffmpeg.exe", "ffprobe.exe")
         if archive.endswith((".tar.xz", ".tar.gz", ".txz", ".tgz")):
@@ -1672,6 +1681,12 @@ class Provisioner:
                         m.name = base
                         tf.extract(m, dest)
                         os.chmod(os.path.join(dest, base), 0o755)
+        elif archive.endswith(".gz"):
+            target = os.path.join(dest, "ffmpeg.exe" if IS_WINDOWS else "ffmpeg")
+            with gzip.open(archive) as src, open(target, "wb") as out:
+                shutil.copyfileobj(src, out)
+            if not IS_WINDOWS:
+                os.chmod(target, 0o755)
         else:  # zip
             with zipfile.ZipFile(archive) as zf:
                 for n in zf.namelist():
