@@ -343,6 +343,21 @@ class TestAugmentedPath:
         assert "WinGet" not in path
         assert os.path.join("Git", "cmd") not in path
 
+    def test_macos_includes_homebrew(self, monkeypatch):
+        # A GUI app gets launchd's PATH: brew and its ffmpeg were unseen.
+        monkeypatch.setattr(watchdog, "IS_WINDOWS", False)
+        monkeypatch.setattr(watchdog.sys, "platform", "darwin")
+        monkeypatch.setenv("PATH", "/usr/bin")
+        entries = watchdog._augmented_path().split(os.pathsep)
+        assert "/opt/homebrew/bin" in entries
+        assert "/usr/local/bin" in entries
+
+    def test_linux_gets_no_homebrew_entries(self, monkeypatch):
+        monkeypatch.setattr(watchdog, "IS_WINDOWS", False)
+        monkeypatch.setattr(watchdog.sys, "platform", "linux")
+        monkeypatch.setenv("PATH", "/usr/bin")
+        assert "/opt/homebrew/bin" not in watchdog._augmented_path().split(os.pathsep)
+
     def test_existing_path_is_preserved(self, monkeypatch):
         monkeypatch.setenv("PATH", "/existing/entry")
         monkeypatch.setattr(watchdog, "_registry_path", lambda: "")

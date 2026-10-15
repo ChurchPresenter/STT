@@ -672,7 +672,7 @@ class TestStaticFfmpegMirrors:
         return p
 
     def test_a_mirror_answering_503_falls_through_to_the_next(self, monkeypatch, tmp_path):
-        first, second = watchdog._STATIC_FFMPEG_URLS["win32"]
+        first, second, *_ = watchdog._STATIC_FFMPEG_URLS["win32"]
         p = self.provisioner(monkeypatch, tmp_path, failing={first})
 
         p._install_static_ffmpeg()
@@ -701,6 +701,11 @@ class TestStaticFfmpegMirrors:
         # macOS had one source; when evermeet.cx went 410, every Mac setup failed.
         for platform in ("linux", "win32", "darwin"):
             assert len(watchdog._STATIC_FFMPEG_URLS[platform]) >= 2, platform
+
+    def test_every_platform_ends_on_a_host_that_keeps_its_files(self):
+        # Every macOS source of 26.3.119 was a single host; one 410 stranded it.
+        for platform in ("win32", "darwin"):
+            assert watchdog._STATIC_FFMPEG_URLS[platform][-1].startswith("https://files.pythonhosted.org/"), platform
 
     def test_macos_sources_are_arm64(self):
         # Apple Silicon only: an x86_64 binary needs Rosetta, which a fresh Mac lacks.
@@ -735,6 +740,25 @@ class TestExtractFfmpeg:
         make_provisioner(monkeypatch)._extract_ffmpeg(str(archive), str(dest))
 
         assert (dest / "ffmpeg").read_bytes() == b"binary"
+
+    @pytest.mark.parametrize(("windows", "member", "name"), [
+        (False, "imageio_ffmpeg/binaries/ffmpeg-macos-aarch64-v7.1", "ffmpeg"),
+        (True, "imageio_ffmpeg/binaries/ffmpeg-win-x86_64-v7.1.exe", "ffmpeg.exe"),
+    ])
+    def test_a_pypi_wheel_yields_its_versioned_binary(self, monkeypatch, tmp_path, windows, member, name):
+        import zipfile
+        monkeypatch.setattr(watchdog, "IS_WINDOWS", windows)
+        archive = tmp_path / "imageio_ffmpeg-0.6.0-py3-none-any.whl"
+        with zipfile.ZipFile(archive, "w") as zf:
+            zf.writestr("imageio_ffmpeg/binaries/README.md", b"readme")
+            zf.writestr(member, b"binary")
+        dest = tmp_path / "bin"
+        dest.mkdir()
+
+        make_provisioner(monkeypatch)._extract_ffmpeg(str(archive), str(dest))
+
+        assert sorted(os.listdir(dest)) == [name]
+        assert (dest / name).read_bytes() == b"binary"
 
     def test_a_tar_gz_is_not_taken_for_a_bare_gzip(self, monkeypatch, tmp_path):
         import tarfile

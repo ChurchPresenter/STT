@@ -791,6 +791,16 @@ def _dep_failure_marker():
 
 
 _FFMPEG_BIN_DIR = os.path.join(DATA_DIR, "bin")
+# Last resort: imageio-ffmpeg's wheels carry a static ffmpeg, and a file on
+# files.pythonhosted.org is never taken down — the evermeet.cx 410 stranded a
+# release whose sources were all single hosts. Pinned, so the URL is immutable;
+# both builds were checked for the capture devices (avfoundation, dshow).
+_PYPI_FFMPEG_WHEELS = {
+    "darwin": "https://files.pythonhosted.org/packages/40/5c/f3d8a657d362cc93b81aab8feda487317da5b5d31c0e1fdfd5e986e55d17/"
+              "imageio_ffmpeg-0.6.0-py3-none-macosx_11_0_arm64.whl",
+    "win32": "https://files.pythonhosted.org/packages/2c/c6/fa760e12a2483469e2bf5058c5faff664acf66cadb4df2ad6205b016a73d/"
+             "imageio_ffmpeg-0.6.0-py3-none-win_amd64.whl",
+}
 # Static ffmpeg sources, tried in order. BtbN's GitHub builds back up the two
 # single-host mirrors; _extract_ffmpeg takes the binaries by basename, so their
 # bin/ layout needs nothing special.
@@ -805,10 +815,12 @@ _STATIC_FFMPEG_URLS = {
     "darwin": (
         "https://ffmpeg.martin-riedl.de/redirect/latest/macos/arm64/release/ffmpeg.zip",
         "https://github.com/eugeneware/ffmpeg-static/releases/latest/download/ffmpeg-darwin-arm64.gz",
+        _PYPI_FFMPEG_WHEELS["darwin"],
     ),
     "win32": (
         "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip",
         "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip",
+        _PYPI_FFMPEG_WHEELS["win32"],
     ),
 }
 
@@ -1059,6 +1071,10 @@ def _augmented_path():
             # redundant static build was downloaded on top.
             os.path.join(local, "Microsoft", "WinGet", "Links"),
         ]
+    elif sys.platform == "darwin":
+        # A GUI app gets launchd's PATH, not the shell's, so Homebrew (and the
+        # ffmpeg it installs) went unseen and setup downloaded one regardless.
+        extra += ["/opt/homebrew/bin", "/usr/local/bin"]
     tail = os.environ.get("PATH", "")
     reg = _registry_path()
     if reg:
@@ -1687,10 +1703,13 @@ class Provisioner:
                 shutil.copyfileobj(src, out)
             if not IS_WINDOWS:
                 os.chmod(target, 0o755)
-        else:  # zip
+        else:  # zip (a .whl is one too)
             with zipfile.ZipFile(archive) as zf:
                 for n in zf.namelist():
                     base = os.path.basename(n)
+                    # imageio-ffmpeg names its binary ffmpeg-<os>-<arch>-v<ver>[.exe].
+                    if n.startswith("imageio_ffmpeg/binaries/ffmpeg-"):
+                        base = "ffmpeg.exe" if base.endswith(".exe") else "ffmpeg"
                     if base in wanted:
                         with zf.open(n) as src, open(os.path.join(dest, base), "wb") as out:
                             shutil.copyfileobj(src, out)
