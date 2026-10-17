@@ -36,6 +36,7 @@ ignore_missing_imports = true
 # The extracted logic modules are fully annotated — keep them that way.
 module = [
     "stt.text_utils",
+    "stt.digital_silence",
     "stt.formatting",
     "stt.segments",
     "stt.config_utils",

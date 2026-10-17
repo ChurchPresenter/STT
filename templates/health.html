@@ -369,7 +369,9 @@
         // room. audio_stalled is the worker saying ffmpeg has produced nothing
         // for 10s+ and is restarting itself — say that instead of showing a
         // number that looks like silence.
-        if (t.audio_stalled) {
+        // audio_silent is the other dead mic: data arrives but is exactly zero
+        // (on macOS, a refused microphone permission).
+        if (t.audio_stalled || t.audio_silent) {
             $("m-audio").textContent = "No signal";
             $("m-audio-bar").style.width = "0%";
             setStatus("c-audio", "error");
@@ -380,6 +382,8 @@
         }
         $("m-audiotype").textContent = t.audio_stalled
             ? "no audio from the microphone"
+            : t.audio_silent
+            ? "microphone sending pure silence (check mic permission)"
             : (t.audio_type ? (t.audio_type + (t.detection_mode ? ` · ${t.detection_mode}` : "")) : "");
         $("m-queue").textContent = dash(t.queue_depth);
 

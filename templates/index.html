@@ -1841,16 +1841,28 @@
         // Only meaningful mid-run: a stopped session has no microphone to be
         // quiet, and the flag is stale until the next start.
         const stalled = !!(state && state.running && state.audio_stalled);
-        if (!stalled) {
+        // Audio arriving but every sample exactly zero: the OS is withholding
+        // the signal. A refused macOS microphone permission looks like this —
+        // the device lists, opens and streams, and the meter reads like a quiet
+        // room. Stalled wins: no data at all says more than zeroed data.
+        const silent = !stalled && !!(state && state.running && state.audio_silent);
+        if (!stalled && !silent) {
           container.style.display = 'none';
           return;
         }
         container.style.display = 'flex';
         dot.classList.remove('warning', 'inactive', 'active', 'starting');
         dot.classList.add('error');
-        text.textContent = 'No audio for 10s+';
-        text.title = 'The microphone has sent no audio for over 10 seconds. '
-          + 'Check that it is connected, unmuted, and not in use by another application.';
+        if (stalled) {
+          text.textContent = 'No audio for 10s+';
+          text.title = 'The microphone has sent no audio for over 10 seconds. '
+            + 'Check that it is connected, unmuted, and not in use by another application.';
+        } else {
+          text.textContent = 'Mic sending silence for 10s+';
+          text.title = 'The microphone is sending pure digital silence, which a real room never produces. '
+            + 'On a Mac, allow STT in System Settings > Privacy & Security > Microphone, then restart STT. '
+            + 'Otherwise check that the device is not muted in hardware or in its mixer software.';
+        }
       }
 
       // Update the disk-full warning from a usage percent (delivered on the

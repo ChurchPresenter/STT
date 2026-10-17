@@ -159,3 +159,38 @@ class TestHealthPage:
         it the tile would read "No signal" in the normal colour."""
         source = HEALTH.read_text(encoding="utf-8")
         assert 'setStatus("c-audio", "error")' in source
+
+
+RUNNING_SILENT = {"running": True, "status": "running", "audio_silent": True}
+
+
+class TestDigitalSilence:
+    """Audio arriving as exact zeros: the shape of a refused macOS mic permission.
+
+    The device lists, opens and streams, so audio_stalled never fires and the
+    meter reads like a quiet room. See stt/digital_silence.py.
+    """
+
+    def test_silent_input_during_a_run_is_shown_as_an_error(self):
+        dom = run_banner(RUNNING_SILENT, preset_display="none")
+        assert dom["display"] == "flex"
+        assert dom["classes"] == ["error"]
+
+    def test_the_wording_owns_the_delay(self):
+        assert "10s" in run_banner(RUNNING_SILENT)["text"]
+
+    def test_the_tooltip_points_at_the_mac_privacy_setting(self):
+        """The one fix an operator cannot guess: nothing on screen says permission."""
+        title = run_banner(RUNNING_SILENT)["title"]
+        assert "Privacy & Security" in title and "Microphone" in title
+
+    def test_a_stall_outranks_silence(self):
+        """No data at all is the more specific report; it must not be relabelled."""
+        both = {"running": True, "status": "running", "audio_stalled": True, "audio_silent": True}
+        assert run_banner(both)["text"] == "No audio for 10s+"
+
+    def test_a_stopped_session_hides_it(self):
+        assert run_banner({"running": False, "audio_silent": True})["display"] == "none"
+
+    def test_the_health_tile_reads_no_signal_for_it_too(self):
+        assert "t.audio_stalled || t.audio_silent" in HEALTH.read_text(encoding="utf-8")

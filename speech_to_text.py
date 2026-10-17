@@ -107,6 +107,7 @@ from stt import model_catalog as _model_catalog
 from stt import model_files as _model_files
 from stt import session_edit as _session_edit
 from stt import start_watch as _start_watch
+from stt import digital_silence as _digital_silence
 
 
 def safe_managed_path(path, base_dir=None):
@@ -3739,6 +3740,7 @@ if mp_manager is not None:
             "audio_level": 0,  # Audio level for histogram (0-100)
             "audio_db": -60,  # Audio level in decibels
             "audio_stalled": False,  # True when ffmpeg has produced no audio for 10s+ (mic muted/unplugged) — mirrors FFmpegAudioCapture.is_stalled
+            "audio_silent": False,  # True when audio arrives but every sample has been exactly 0 for 10s+ (macOS mic permission denied, device muted) — stt/digital_silence.py
             "audio_energy": 0,  # Raw audio energy (RMS)
             "start_time": 0,  # epoch seconds when transcription became active; 0 = not running
             "live_text": "",  # Live preview text (not yet saved to DB)
@@ -8211,6 +8213,7 @@ def get_health():
             "audio_level": ts.get("audio_level", 0) if running else 0,
             "audio_db": ts.get("audio_db"),
             "audio_stalled": ts.get("audio_stalled", False) if running else False,
+            "audio_silent": ts.get("audio_silent", False) if running else False,
             "audio_type": ts.get("audio_type") if running else None,
             "detection_mode": ts.get("detection_mode") if running else None,
             "audio_tag": ts.get("audio_tag") if running else None,      # PANNs top CNN14 class
@@ -13862,6 +13865,7 @@ def force_reset_transcription():
         transcription_state["message"] = "Transcription forcefully reset"
         transcription_state["loaded_model"] = ""
         transcription_state["audio_stalled"] = False
+        transcription_state["audio_silent"] = False
         transcription_state["is_file_playback"] = False
         transcription_state["playback_source"] = None
         transcription_state["playback_duration"] = None
@@ -22299,6 +22303,10 @@ def thread1_function(ts, cq, cfq, cal_state, cal_data, cal_step1, asq, hqq=None)
 
                     # Initialize full session audio file (if .wav backup is enabled)
                     session_audio_file = _new_session_audio_path(process_config)
+                    # Exact-zero input: what a mic macOS refuses to share delivers
+                    # (devices still list and open, every sample is 0).
+                    digital_silence = _digital_silence.DigitalSilence()
+                    transcription_state["audio_silent"] = False
 
                     def has_speech(audio_bytes, sample_rate=16000):
                         """
@@ -22982,6 +22990,7 @@ def thread1_function(ts, cq, cfq, cal_state, cal_data, cal_step1, asq, hqq=None)
                                     transcription_state["audio_level"] = level
                                     transcription_state["audio_db"] = db
                                     transcription_state["audio_energy"] = raw_energy
+                                    transcription_state["audio_silent"] = digital_silence.feed(accumulated_new_data, time.monotonic())
 
                                     # Hand the raw pre-VAD buffer to the background
                                     # PANNs detector (non-blocking; never stalls draining).
@@ -24029,6 +24038,7 @@ def thread1_function(ts, cq, cfq, cal_state, cal_data, cal_step1, asq, hqq=None)
                     # first loop iteration — long enough for the live page to
                     # keep warning about a mic nobody is using.
                     transcription_state["audio_stalled"] = False
+                    transcription_state["audio_silent"] = False
                     # Drop file-playback markers so the live-settings trackbar
                     # doesn't linger after an end-of-file (or any) stop.
                     transcription_state["is_file_playback"] = False
