@@ -11,5 +11,11 @@
     <true/>
     <key>com.apple.security.cs.allow-dyld-environment-variables</key>
     <true/>
+    <!-- Without this a hardened-runtime app is refused the microphone silently:
+         no prompt, no entry under Privacy > Microphone, and every input device
+         still lists and opens but delivers zeros. NSMicrophoneUsageDescription
+         in watchdog.spec is the prompt text; this is the permission to ask. -->
+    <key>com.apple.security.device.audio-input</key>
+    <true/>
 </dict>
 </plist>
