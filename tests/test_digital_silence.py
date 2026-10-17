@@ -50,20 +50,35 @@ class TestDigitalSilence:
         d = DigitalSilence()
         assert not any(d.feed(ROOM_TONE, now=float(t)) for t in range(60))
 
-    def test_signal_returning_clears_it_on_the_next_chunk(self):
+    def test_signal_arriving_clears_it_on_the_next_chunk(self):
         d = DigitalSilence()
         d.feed(ZEROS, now=0.0)
         assert d.feed(ZEROS, now=20.0)
         assert not d.feed(ROOM_TONE, now=20.5)
 
-    def test_a_brief_mute_restarts_the_clock(self):
-        """Zeros, signal, zeros: the second run is timed from its own start."""
+    def test_a_gated_feed_between_speakers_is_never_reported(self):
+        """A mixer's USB/Dante feed sends exact zeros while the channel is gated
+        or muted. Once the input has carried real signal, it is known to work."""
+        d = DigitalSilence()
+        d.feed(ROOM_TONE, now=0.0)
+        assert not any(d.feed(ZEROS, now=float(t)) for t in range(1, 600))
+        assert not d.silent(now=600.0)
+
+    def test_once_cleared_it_stays_cleared(self):
+        """Started early on a gated feed: warned until the first sound, then never again."""
         d = DigitalSilence()
         d.feed(ZEROS, now=0.0)
-        d.feed(ROOM_TONE, now=8.0)
-        d.feed(ZEROS, now=9.0)
-        assert not d.feed(ZEROS, now=15.0)
-        assert d.feed(ZEROS, now=19.0)
+        assert d.feed(ZEROS, now=30.0)
+        d.feed(ROOM_TONE, now=31.0)
+        assert not d.feed(ZEROS, now=100.0)
+
+    def test_a_new_session_starts_unproven(self):
+        """A permission revoked between services must still be caught."""
+        old = DigitalSilence()
+        old.feed(ROOM_TONE, now=0.0)
+        new = DigitalSilence()
+        new.feed(ZEROS, now=0.0)
+        assert new.feed(ZEROS, now=DEFAULT_THRESHOLD_SECONDS)
 
     def test_an_empty_chunk_changes_nothing(self):
         d = DigitalSilence()
