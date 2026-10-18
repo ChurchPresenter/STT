@@ -70,6 +70,29 @@ def _merge_missing_keys(dst: dict, src: dict) -> bool:
     return changed
 
 
+# Settings that no longer do anything, as key paths. ``_merge_missing_keys`` only
+# ever adds, so without this a removed setting lingers in every install's config.json
+# and reads as if it still applied.
+RETIRED_KEYS: Tuple[Tuple[str, ...], ...] = (
+    # Fed previous captions to Whisper as initial_prompt; measured worse on real
+    # services and removed (it never reached faster-whisper in the first place).
+    ("audio", "context_prompt"),
+)
+
+
+def drop_retired_keys(config: dict, retired: Tuple[Tuple[str, ...], ...] = RETIRED_KEYS) -> bool:
+    """Remove each retired key path from ``config``. Returns True if anything was removed."""
+    changed = False
+    for path in retired:
+        parent: Any = config
+        for key in path[:-1]:
+            parent = parent.get(key) if isinstance(parent, dict) else None
+        if isinstance(parent, dict) and path[-1] in parent:
+            del parent[path[-1]]
+            changed = True
+    return changed
+
+
 def restore_config_from_template(template_file: str, config_file: str, reason: str = "") -> bool:
     """Copy the bundled config.default.json over config_file. Returns True on success."""
     if not os.path.exists(template_file):

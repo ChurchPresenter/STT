@@ -436,6 +436,7 @@ from stt.config_utils import (  # noqa: F401
     SUPPORTED_VIDEO_FORMATS,
     _atomic_write_json,
     _merge_missing_keys,
+    drop_retired_keys,
     validate_file,
     is_known_timezone as _is_known_timezone,
     resolve_timezone as _resolve_timezone,
@@ -607,6 +608,11 @@ def load_config():
                     if "use_english_model" in whisper:
                         whisper.pop("use_english_model")
                         migrated = True
+
+    # Drop settings that were removed from the template (stt/config_utils.RETIRED_KEYS)
+    if drop_retired_keys(config):
+        print("[MIGRATION] Removed retired settings from config.json")
+        migrated = True
 
     # Save migrated config
     if migrated:
@@ -23086,33 +23092,10 @@ def thread1_function(ts, cq, cfq, cal_state, cal_data, cal_step1, asq, hqq=None)
                                         whisper_params = dict(whisper_params)  # Copy to avoid mutating config
                                         whisper_params["word_timestamps"] = True
 
-                                    # Cross-capture context: feed the tail of the finalized transcript
-                                    # as initial_prompt so each capture knows what came before.
-                                    # Never include pending_remainder — that audio is still being
-                                    # re-transcribed from the rolling buffer and would get echoed.
-                                    _ctx_prompt_added = False
-                                    _prompt_before_ctx = None
-                                    ctx_prompt_cfg = process_config.get("audio", {}).get("context_prompt", {})
-                                    if ctx_prompt_cfg.get("enabled", True) and saved_sentences:
-                                        ctx_max_chars = ctx_prompt_cfg.get("max_chars", 200)
-                                        if ctx_max_chars > 0:
-                                            prompt_tail = " ".join(saved_sentences[-5:])
-                                            if len(prompt_tail) > ctx_max_chars:
-                                                prompt_tail = prompt_tail[-ctx_max_chars:]
-                                                _cut = prompt_tail.find(" ")
-                                                # Drop the leading partial word; if the tail is one
-                                                # unbroken run with no space, discard it entirely
-                                                if _cut > 0:
-                                                    prompt_tail = prompt_tail[_cut + 1:]
-                                                elif _cut < 0:
-                                                    prompt_tail = ""
-                                            if prompt_tail:
-                                                whisper_params = dict(whisper_params)
-                                                existing = whisper_params.get("initial_prompt")
-                                                _prompt_before_ctx = existing
-                                                whisper_params["initial_prompt"] = (existing + " " + prompt_tail) if existing else prompt_tail
-                                                _ctx_prompt_added = True
-
+                                    # No cross-capture prompt: feeding the previous captions back as
+                                    # initial_prompt was measured against real services (2026-10-18)
+                                    # and lost words, re-emitted captions already shown, and looped
+                                    # on the prompt where speech gave way to music.
 
                                     # Transcribe the audio chunk and get segments with timestamps
                                     # This is key to avoiding overlaps - Whisper knows segment boundaries
@@ -23167,13 +23150,6 @@ def thread1_function(ts, cq, cfq, cal_state, cal_data, cal_step1, asq, hqq=None)
                                         try:
                                             _target_lang = _trans_cfg.get("target_language", "en")
                                             _pass2_params = dict(whisper_params)  # Copy pass 1 params
-                                            # Drop the source-language context tail for the translation
-                                            # pass - it would bias output toward the source language
-                                            if _ctx_prompt_added:
-                                                if _prompt_before_ctx:
-                                                    _pass2_params["initial_prompt"] = _prompt_before_ctx
-                                                else:
-                                                    _pass2_params.pop("initial_prompt", None)
                                             _pass2_language = live_language
 
                                             if _trans_method == "whisper_translate" and _target_lang == "en":

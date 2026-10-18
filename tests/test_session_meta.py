@@ -287,13 +287,6 @@ class TestOffloadedTranslation:
 
 
 class TestAudioShapingAndSegmentation:
-    def test_context_prompt_is_recorded_as_a_decode_input(self):
-        """Prior captions are passed to Whisper as initial_prompt, so the same
-        audio decodes differently depending on what preceded it."""
-        meta = build({"audio": {"context_prompt": {"enabled": True, "max_chars": 200}}})
-        assert meta["asr.context_prompt.enabled"] == "true"
-        assert meta["asr.context_prompt.max_chars"] == "200"
-
     def test_loudness_normalization_is_recorded(self):
         meta = build({"audio": {"loudness_normalization": {
             "enabled": True, "target_rms_dbfs": -20, "max_gain": 10}}})

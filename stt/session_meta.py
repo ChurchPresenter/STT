@@ -339,15 +339,8 @@ def _add_transcription(meta: Dict[str, str], config: Mapping[str, Any]) -> None:
 def _add_audio_shaping(meta: Dict[str, str], audio: Mapping[str, Any]) -> None:
     """What reached the model besides the microphone signal itself.
 
-    ``context_prompt`` is decode-affecting in the same way beam_size is — the
-    previous captions are passed to Whisper as initial_prompt, so the same audio
-    decodes differently depending on what preceded it. ``loudness_normalization``
-    changes the samples before the model ever sees them.
+    ``loudness_normalization`` changes the samples before the model ever sees them.
     """
-    ctx = _section(audio, "context_prompt")
-    _put(meta, "asr.context_prompt.enabled", ctx.get("enabled"))
-    _put(meta, "asr.context_prompt.max_chars", ctx.get("max_chars"))
-
     norm = _section(audio, "loudness_normalization")
     _put(meta, "asr.normalize.enabled", norm.get("enabled"))
     _put(meta, "asr.normalize.target_rms_dbfs", norm.get("target_rms_dbfs"))

@@ -102,12 +102,6 @@
     },
     "stabilize_live_text": true,
     "_stabilize_live_text_comment": "LocalAgreement: reveal a live in-progress word only once two consecutive hypotheses agree, so the live caption stops rewriting itself (jitter). Adds a small, self-correcting lag on the newest word(s). false = show the raw hypothesis each pass (old behavior).",
-    "context_prompt": {
-      "enabled": true,
-      "_enabled_comment": "Feed the tail of the finalized transcript to Whisper as initial_prompt so each capture knows what came before (better continuity and punctuation)",
-      "max_chars": 200,
-      "_max_chars_comment": "How much trailing transcript to include in the prompt. Whisper's prompt budget is 224 tokens (~900 chars)"
-    },
     "listen_stream": {
       "enabled": true,
       "_enabled_comment": "Offer a full-quality copy of the input (Socket.IO room 'audio_stream_hq', event 'audio_chunk_hq', interleaved s16le PCM) for loudness meters and listeners. It opens the device a second time, only while transcription runs and someone has joined. The 16 kHz mono 'audio_stream' feed Whisper and SongListener use is unaffected.",

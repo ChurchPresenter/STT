@@ -8,9 +8,11 @@ import os
 import pytest
 
 from stt.config_utils import (
+    RETIRED_KEYS,
     _atomic_write_json,
     _merge_missing_keys,
     compute_display_version,
+    drop_retired_keys,
     restore_config_from_template,
     validate_file,
     is_known_timezone,
@@ -79,6 +81,36 @@ class TestMergeMissingKeys:
         _merge_missing_keys(dst, src)
         dst["b"]["list"].append(3)
         assert src["b"]["list"] == [1, 2]
+
+
+class TestDropRetiredKeys:
+    def test_removes_context_prompt_and_keeps_its_siblings(self):
+        cfg = {"audio": {"context_prompt": {"enabled": True, "max_chars": 200}, "phrase_timeout": 2}}
+        assert drop_retired_keys(cfg) is True
+        assert cfg == {"audio": {"phrase_timeout": 2}}
+
+    def test_second_pass_changes_nothing(self):
+        cfg = {"audio": {"context_prompt": {}}}
+        drop_retired_keys(cfg)
+        assert drop_retired_keys(cfg) is False
+
+    def test_missing_or_non_dict_parent_is_left_alone(self):
+        assert drop_retired_keys({}) is False
+        cfg = {"audio": "not a section"}
+        assert drop_retired_keys(cfg) is False
+        assert cfg == {"audio": "not a section"}
+
+    def test_nested_path(self):
+        cfg = {"a": {"b": {"c": 1, "d": 2}}}
+        assert drop_retired_keys(cfg, (("a", "b", "c"),)) is True
+        assert cfg == {"a": {"b": {"d": 2}}}
+
+    def test_template_holds_no_retired_key(self):
+        """The merge would put a retired key straight back on the next load."""
+        path = os.path.join(os.path.dirname(__file__), "..", "config", "config.default.json")
+        with open(path, encoding="utf-8") as f:
+            template = json.load(f)
+        assert drop_retired_keys(template, RETIRED_KEYS) is False
 
 
 class TestRestoreConfigFromTemplate:
