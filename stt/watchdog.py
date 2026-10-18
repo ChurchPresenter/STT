@@ -848,6 +848,62 @@ class UnsupportedPlatformError(ProvisionError):
     the headless loop checks for it to stop retrying a permanent condition."""
 
 
+class InsufficientDiskError(ProvisionError):
+    """Not enough free space to finish setup. The operator's disk, not our code:
+    reported to Sentry as a warning under one fingerprint, so it is counted
+    without filing an error, and Retry stays enabled for after they free space."""
+
+
+#: Free space setup asks for, in GB, by which torch build it will install.
+#: Measured 2026-10-18 with no model present (setup downloads none):
+#:   CUDA (Linux, RTX 3080): environment ~7.8 GB, 6.3 of it torch + nvidia + triton,
+#:     plus ~1 GB of uv cache beyond the hard-linked wheels -> ~9 GB.
+#:   CPU (macOS arm64): environment 1.3 GB + uv cache 0.6 + Python 0.2 -> ~2.1 GB.
+#:   CPU (Windows 11 VM, fresh 26.3.131, free-space delta): setup 2.62 GB, torch
+#:     alone 1.19 GB; the small model added 0.46 GB -> 3.1 GB in all.
+#: Each leaves headroom for a first model: large-v3 (2.9 GB) on a GPU box, small
+#: (~0.5 GB) on a CPU one. A flat 8 GB had refused CPU machines that fit and let
+#: GPU machines start an install that then ran out of space mid-way.
+_DISK_NEED_CUDA_GB = 12.0
+_DISK_NEED_CPU_GB = 4.0
+
+
+def _installs_cuda_torch(has_nvidia, sys_platform=None, machine=None):
+    """Whether setup's torch will be the multi-GB CUDA build.
+
+    An NVIDIA card gets the CUDA index. Without one, plain PyPI torch is CPU-only
+    on Windows and macOS but is the CUDA build on Linux x86_64, which pulls the
+    nvidia-* wheels whether or not a card exists.
+    """
+    sys_platform = sys.platform if sys_platform is None else sys_platform
+    machine = platform.machine() if machine is None else machine
+    if has_nvidia:
+        return True
+    return sys_platform.startswith("linux") and machine.lower() in ("x86_64", "amd64")
+
+
+def _disk_label(path, sys_platform=None):
+    """How to name the disk holding ``path`` to an operator: "C:" on Windows,
+    the folder elsewhere (with the home directory as ~, since this message
+    reaches Sentry)."""
+    sys_platform = sys.platform if sys_platform is None else sys_platform
+    if sys_platform == "win32":
+        import ntpath  # os.path on Windows; explicit so the rule is testable anywhere
+        drive = ntpath.splitdrive(path)[0]
+        if drive:
+            return drive
+    return redact_home_paths(path)
+
+
+def _disk_shortfall_message(free_gb, need_gb, disk, cuda):
+    """What to do, not just what is wrong: the amount to free and where."""
+    build = "GPU (CUDA) build" if cuda else "CPU build"
+    short = max(0.1, need_gb - free_gb)
+    return (f"Not enough disk space: {free_gb:.1f} GB free on {disk}, "
+            f"~{need_gb:.0f} GB needed for the {build} of PyTorch and a first model. "
+            f"Free at least {short:.1f} GB on {disk} and press Retry.")
+
+
 def _mac_hardware_is_arm64():
     """True when this Mac's *hardware* is Apple Silicon, regardless of the arch
     of the running process. platform.machine() reports the process arch, which
@@ -1436,15 +1492,18 @@ class Provisioner:
     # -- steps ---------------------------------------------------------------
 
     def _step_disk(self):
+        # DATA_DIR may not exist yet on a first run; its drive is what matters.
+        probe = DATA_DIR if os.path.isdir(DATA_DIR) else os.path.dirname(DATA_DIR)
         try:
-            free_gb = shutil.disk_usage(DATA_DIR).free / (1024 ** 3)
+            free_gb = shutil.disk_usage(probe).free / (1024 ** 3)
         except OSError:
             return
-        self.log(f"  {free_gb:.1f} GB free")
-        if free_gb < 8:
-            raise ProvisionError(
-                f"Only {free_gb:.1f} GB free; ~8 GB needed for PyTorch and models."
-            )
+        cuda = _installs_cuda_torch(self._has_nvidia())
+        need_gb = _DISK_NEED_CUDA_GB if cuda else _DISK_NEED_CPU_GB
+        self.log(f"  {free_gb:.1f} GB free, ~{need_gb:.0f} GB needed")
+        if free_gb < need_gb:
+            raise InsufficientDiskError(
+                _disk_shortfall_message(free_gb, need_gb, _disk_label(DATA_DIR), cuda))
 
     def _step_uv(self):
         uv = _which("uv")
@@ -3648,8 +3707,12 @@ def _run_provisioning_headless(max_attempts=None):
             permanent = _is_permanent_dep_failure(str(e))
             if attempt == 1:
                 # No attempt counter here: it is part of the Sentry grouping key.
-                logging.error(f"[SETUP] Provisioning failed: {e}")
-                _sentry_capture(e, fingerprint=_provision_fingerprint(e))
+                # A full disk logs at warning: an error record is itself an issue.
+                if isinstance(e, InsufficientDiskError):
+                    logging.warning(f"[SETUP] Provisioning failed: {e}")
+                else:
+                    logging.error(f"[SETUP] Provisioning failed: {e}")
+                _sentry_capture(e, fingerprint=_provision_fingerprint(e), level=_provision_level(e))
                 hint = _newer_release_hint(str(e))
                 if hint:
                     logging.error(f"[SETUP] {hint}")
@@ -3731,7 +3794,7 @@ class ProvisionWindow:
                 self._q.put(("done", False))
                 # Same grouping as the headless path: an operator pressing
                 # Retry five times must not mint five issues.
-                _sentry_capture(e, fingerprint=_provision_fingerprint(e))
+                _sentry_capture(e, fingerprint=_provision_fingerprint(e), level=_provision_level(e))
 
         threading.Thread(target=work, daemon=True).start()
 
@@ -4007,10 +4070,19 @@ def _provision_fingerprint(exc):
     the command, with home directories already redacted by ``Provisioner._run``
     — and whether it is the kind that a retry can fix.
     """
+    if isinstance(exc, InsufficientDiskError):
+        # The message carries this machine's free GB; one issue for all of them.
+        return ["provisioning", type(exc).__name__]
     message = redact_home_paths(str(exc))
     command = message.split(" — last output:")[0].strip()
     kind = "permanent" if _is_permanent_dep_failure(message) else "transient"
     return ["provisioning", type(exc).__name__, command, kind]
+
+
+def _provision_level(exc):
+    """Sentry level for a provisioning failure: a full disk is the operator's to
+    fix, so it is counted as a warning rather than filed as an error."""
+    return "warning" if isinstance(exc, InsufficientDiskError) else None
 
 
 def _dep_failure_fingerprint(stage, message):
@@ -4039,16 +4111,18 @@ def _log_grouped(level, message, fingerprint):
         logging.log(level, message)
 
 
-def _sentry_capture(exc, fingerprint=None):
+def _sentry_capture(exc, fingerprint=None, level=None):
     """Best-effort capture+flush of a watchdog-side exception (e.g. a
     provisioning failure). Silent no-op when the SDK is absent or Sentry is
-    disabled; the flush matters because the headless path exits right after."""
+    disabled; the flush matters because the headless path exits right after.
+    ``level`` overrides the event's level, e.g. "warning" for a condition of the
+    operator's machine rather than a fault of ours."""
     try:
         import sentry_sdk
     except Exception:
         return
     scope_cm = None
-    if fingerprint:
+    if fingerprint or level:
         try:
             scope_cm = sentry_sdk.new_scope()
         except Exception:
@@ -4058,7 +4132,10 @@ def _sentry_capture(exc, fingerprint=None):
     try:
         if scope_cm is not None:
             with scope_cm as scope:
-                scope.fingerprint = fingerprint
+                if fingerprint:
+                    scope.fingerprint = fingerprint
+                if level:
+                    scope.level = level
                 sentry_sdk.capture_exception(exc)
         else:
             sentry_sdk.capture_exception(exc)

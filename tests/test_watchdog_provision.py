@@ -808,3 +808,96 @@ class TestStagedDownload:
         with pytest.raises(OSError):
             self.run(monkeypatch, tmp_path, fail=True)
         assert list(tmp_path.iterdir()) == []
+
+
+class TestDiskSpace:
+    """How much free space setup asks for, and what it says when there isn't any.
+
+    A flat 8 GB refused a CPU-only Windows machine (STT-2Q: 4.5 GB free) that the
+    CPU build of torch fits in, and let a GPU machine with 8-9 GB start an install
+    that needs ~9 GB before any model.
+    """
+
+    GB = 1024 ** 3
+
+    def run_step(self, monkeypatch, tmp_path, *, free_gb, nvidia, plat="win32", machine="AMD64"):
+        p = make_provisioner(monkeypatch)
+        p._has_nvidia = lambda: nvidia
+        monkeypatch.setattr(watchdog, "DATA_DIR", str(tmp_path / ".stt"))
+        monkeypatch.setattr(watchdog.sys, "platform", plat)
+        monkeypatch.setattr(watchdog.platform, "machine", lambda: machine)
+        monkeypatch.setattr(watchdog.shutil, "disk_usage",
+                            lambda path: type("U", (), {"free": int(free_gb * self.GB)})())
+        p._step_disk()
+        return p
+
+    def test_a_cpu_machine_with_room_for_the_cpu_build_passes(self, monkeypatch, tmp_path):
+        """The STT-2Q machine: 4.5 GB free, no NVIDIA card."""
+        self.run_step(monkeypatch, tmp_path, free_gb=4.5, nvidia=False)
+
+    def test_a_cpu_machine_below_the_cpu_need_is_refused(self, monkeypatch, tmp_path):
+        with pytest.raises(watchdog.InsufficientDiskError):
+            self.run_step(monkeypatch, tmp_path, free_gb=2.0, nvidia=False)
+
+    def test_a_gpu_machine_needs_room_for_the_cuda_build(self, monkeypatch, tmp_path):
+        """8 GB used to pass, then ran out partway through installing ~9 GB."""
+        with pytest.raises(watchdog.InsufficientDiskError):
+            self.run_step(monkeypatch, tmp_path, free_gb=8.5, nvidia=True)
+
+    def test_a_gpu_machine_with_room_passes(self, monkeypatch, tmp_path):
+        self.run_step(monkeypatch, tmp_path, free_gb=20, nvidia=True)
+
+    def test_linux_x86_without_a_card_still_gets_the_cuda_build(self, monkeypatch, tmp_path):
+        """PyPI's Linux x86_64 torch pulls the nvidia-* wheels with or without a GPU."""
+        with pytest.raises(watchdog.InsufficientDiskError):
+            self.run_step(monkeypatch, tmp_path, free_gb=6, nvidia=False, plat="linux", machine="x86_64")
+
+    @pytest.mark.parametrize("plat,machine", [("darwin", "arm64"), ("linux", "aarch64"), ("win32", "AMD64")])
+    def test_cpu_torch_platforms(self, plat, machine):
+        assert not watchdog._installs_cuda_torch(False, plat, machine)
+
+    def test_an_unreadable_disk_is_not_a_refusal(self, monkeypatch, tmp_path):
+        p = make_provisioner(monkeypatch)
+        p._has_nvidia = lambda: False
+        monkeypatch.setattr(watchdog, "DATA_DIR", str(tmp_path / ".stt"))
+
+        def boom(path):
+            raise OSError("unreadable")
+        monkeypatch.setattr(watchdog.shutil, "disk_usage", boom)
+        p._step_disk()
+
+    def test_a_first_run_measures_the_drive_the_data_dir_will_be_on(self, monkeypatch, tmp_path):
+        seen = []
+        p = make_provisioner(monkeypatch)
+        p._has_nvidia = lambda: False
+        monkeypatch.setattr(watchdog, "DATA_DIR", str(tmp_path / ".stt"))
+        monkeypatch.setattr(watchdog.shutil, "disk_usage",
+                            lambda path: seen.append(path) or type("U", (), {"free": 100 * self.GB})())
+        p._step_disk()
+        assert seen == [str(tmp_path)]
+
+    def test_the_message_says_what_to_free_and_where(self):
+        msg = watchdog._disk_shortfall_message(4.5, 12.0, "C:", cuda=True)
+        assert "Free at least 7.5 GB on C:" in msg
+        assert "Retry" in msg and "GPU" in msg
+
+    def test_windows_names_the_drive(self):
+        assert watchdog._disk_label(r"C:\Users\x\.stt", "win32") == "C:"
+
+    def test_a_full_disk_is_still_a_provision_error(self):
+        """Every existing handler catches ProvisionError; this must not slip past them."""
+        assert issubclass(watchdog.InsufficientDiskError, watchdog.ProvisionError)
+        assert not issubclass(watchdog.InsufficientDiskError, watchdog.UnsupportedPlatformError)
+
+
+class TestDiskSpaceReporting:
+    def test_every_machine_groups_into_one_issue(self):
+        a = watchdog.InsufficientDiskError(watchdog._disk_shortfall_message(4.5, 12, "C:", True))
+        b = watchdog.InsufficientDiskError(watchdog._disk_shortfall_message(1.2, 4, "D:", False))
+        assert watchdog._provision_fingerprint(a) == watchdog._provision_fingerprint(b)
+
+    def test_it_is_reported_as_a_warning(self):
+        assert watchdog._provision_level(watchdog.InsufficientDiskError("x")) == "warning"
+
+    def test_other_failures_keep_their_level(self):
+        assert watchdog._provision_level(watchdog.ProvisionError("x")) is None
