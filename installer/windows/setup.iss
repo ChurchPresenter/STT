@@ -32,7 +32,10 @@ Name: "desktopicon"; Description: "Create a &desktop shortcut"; GroupDescription
 Name: "autostart"; Description: "Start STT automatically at &login"; GroupDescription: "Auto-start:"
 
 [Run]
-Filename: "schtasks.exe"; Parameters: "/Create /TN ""STT"" /TR ""{app}\STT.exe --headless"" /SC ONLOGON /RL HIGHEST /F"; Flags: runhidden; Tasks: autostart
+; /TR is one argument holding a whole command line, so the program path needs its
+; own quotes inside it (\" to schtasks). Without them Task Scheduler split
+; "C:\Program Files\STT\STT.exe" at the space and ran "C:\Program" (0x80070002).
+Filename: "schtasks.exe"; Parameters: "/Create /TN ""STT"" /TR ""\""{app}\STT.exe\"" --headless"" /SC ONLOGON /RL HIGHEST /F"; Flags: runhidden; Tasks: autostart
 ; After a silent auto-update, immediately start the new binary via the scheduled task
 Filename: "schtasks.exe"; Parameters: "/Run /TN ""STT"""; Flags: runhidden nowait; Tasks: autostart
 ; After an interactive install, offer to launch the GUI
