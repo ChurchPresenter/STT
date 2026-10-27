@@ -1,6 +1,6 @@
 """What leaves the machine in a crash report, and what never should.
 
-Four jobs, all running inside Sentry's ``before_send`` hook:
+Five jobs, all running inside Sentry's ``before_send`` hook:
 
 **Scrubbing.** The UI promises that no transcription content is sent. Request
 bodies carry transcript text (``/api/translate``), glossary and dictionary
@@ -39,6 +39,14 @@ left to serve and nothing to fix, but the child has already imported the
 server module, so Sentry is up and reports it as an unhandled crash. Anchored
 to spawn's bootstrap frame *and* the handle duplication, like the handover.
 
+**Dropping traffic that was never HTTP.** werkzeug answers a request line it
+cannot parse with a 400 (or 414/431/501) and logs it on the ``werkzeug`` logger
+at *error*, so Sentry files it as an issue. On a LAN that is a camera or media
+player probing for RTSP, or a port scanner (STT-2M: ``Bad request version
+('RTSP/1.0')``). The server rejected it correctly, and the sender is not ours to
+fix. Anchored to that logger and werkzeug's ``code N, message`` format, so an
+error our own code logs is still reported.
+
 Stdlib-only: events come in as the plain dicts Sentry hands to the hook.
 """
 
@@ -56,6 +64,11 @@ _HANDOVER_MODULE = "engineio.async_drivers._websocket_wsgi"
 #: What that frame raises, per server: werkzeug wants ``ConnectionError``,
 #: gunicorn wants ``StopIteration``. Neither means anything went wrong.
 _HANDOVER_EXCEPTIONS = frozenset({"ConnectionError", "StopIteration"})
+
+#: werkzeug's ``send_error`` log line for a request it could not parse. These
+#: are the codes ``http.server`` emits while still reading the request line and
+#: headers, before any application code has run.
+_UNPARSEABLE_REQUEST = re.compile(r"\bcode (?:400|414|431|501), message ")
 
 #: Request fields that can hold user content or the access token.
 _REQUEST_FIELDS_TO_DROP = ("data", "query_string", "cookies", "headers", "env")
@@ -169,12 +182,21 @@ def is_orphaned_spawn(event: Dict[str, Any]) -> bool:
     return in_spawn and in_detach
 
 
+def is_unparseable_request(event: Dict[str, Any]) -> bool:
+    """True if ``event`` is werkzeug logging a request that was never valid HTTP."""
+    if event.get("logger") != "werkzeug":
+        return False
+    logentry = event.get("logentry") or {}
+    texts = (event.get("message"), logentry.get("formatted"), logentry.get("message"))
+    return any(isinstance(t, str) and _UNPARSEABLE_REQUEST.search(t) for t in texts)
+
+
 def scrub_event(event: Dict[str, Any], hint: Any = None) -> Optional[Dict[str, Any]]:
     """Sentry ``before_send``/``before_send_transaction`` hook.
 
     Returns the event with user content removed, or ``None`` to drop it.
     """
-    if is_websocket_handover(event) or is_orphaned_spawn(event):
+    if is_websocket_handover(event) or is_orphaned_spawn(event) or is_unparseable_request(event):
         return None
 
     request = event.get("request")

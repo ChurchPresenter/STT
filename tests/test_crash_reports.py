@@ -2,6 +2,7 @@
 
 from stt.crash_reports import (
     is_orphaned_spawn,
+    is_unparseable_request,
     is_websocket_handover,
     redact_home_paths,
     scrub_event,
@@ -225,3 +226,40 @@ def test_a_demo_reports_into_its_own_environment():
 
 def test_the_two_environments_are_not_the_same():
     assert sentry_environment(True) != sentry_environment(False)
+
+
+def _werkzeug_log_event(formatted, logger="werkzeug"):
+    """A werkzeug log record as Sentry's logging integration turns it into an event."""
+    return {
+        "logger": logger,
+        "level": "error",
+        "logentry": {
+            "message": "192.0.2.7 - - [24/Oct/2026 12:12:33] code %d, message %s",
+            "params": [],
+            "formatted": formatted,
+        },
+    }
+
+
+def test_a_non_http_probe_is_dropped():
+    # The STT-2M shape: something on the LAN speaking RTSP to the HTTP port.
+    event = _werkzeug_log_event("192.0.2.7 - - [24/Oct/2026 12:12:33] code 400, message Bad request version ('RTSP/1.0')")
+    assert is_unparseable_request(event)
+    assert scrub_event(event) is None
+
+
+def test_an_unsupported_method_probe_is_dropped():
+    event = _werkzeug_log_event("192.0.2.7 - - [24/Oct/2026 12:12:33] code 501, message Unsupported method ('PRI')")
+    assert scrub_event(event) is None
+
+
+def test_werkzeug_error_on_request_is_kept():
+    # A real exception werkzeug caught (EMFILE, say) is a fault worth seeing.
+    event = _werkzeug_log_event("Error on request:\nTraceback ...\nOSError: [Errno 24] Too many open files")
+    assert not is_unparseable_request(event)
+    assert scrub_event(event) is not None
+
+
+def test_the_same_text_from_our_own_logger_is_kept():
+    event = _werkzeug_log_event("code 400, message Bad request version", logger="stt.server")
+    assert scrub_event(event) is not None
