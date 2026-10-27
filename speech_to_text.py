@@ -1345,9 +1345,16 @@ def load_translation_model(use_gpu=True, model_id=None, use_fp16=False, use_ct2=
         # downloaded, and which is the documented way to save several gigabytes —
         # would have a working setup refused for missing a file nothing reads.
         if not use_ct2:
+            # No weights at all: checked first because transformers' own error
+            # ("no file named model.safetensors, or pytorch_model.bin") names no
+            # remedy. Usually weights reclaimed after a CT2 conversion. STT-2S.
+            _no_weights = _model_disk.missing_weights_message(
+                model_presence(MODELS_DIR, local_dir_name), model_id)
+            if _no_weights:
+                raise _model_disk.ModelUnavailable(_no_weights)
             _incomplete = _model_files.manifest_mismatches(model_path)
             if _incomplete:
-                raise RuntimeError(
+                raise _model_disk.ModelUnavailable(
                     f"The translation model '{model_id}' is incomplete on disk — "
                     f"{_model_files.describe_missing(_incomplete)} "
                     f"{'are' if len(_incomplete) > 1 else 'is'} missing or truncated. "
@@ -4678,6 +4685,10 @@ app.config["MAX_CONTENT_LENGTH"] = 4 * 1024 * 1024 * 1024  # 4GB cap on uploads 
 app.config["TEMPLATES_AUTO_RELOAD"] = True  # Auto-reload templates when they change
 app.config["SEND_FILE_MAX_AGE_DEFAULT"] = 0  # Disable caching for static files
 socketio = SocketIO(app, async_mode="threading", static_url_path="/static", static_folder=os.path.join(BUNDLE_DIR, "static"), ping_timeout=120, ping_interval=25)
+# A binary broadcast (audio_chunk_hq) shares one packet between websocket and
+# polling listeners; engineio caches its first encoding for both. STT-2R.
+import engineio.packet as _engineio_packet  # noqa: E402
+_engineio_compat.install(_engineio_packet.Packet)
 
 # --- Access log ------------------------------------------------------------
 # Records every HTTP request (tagged web vs api), WebSocket connect/disconnect,
@@ -4685,10 +4696,6 @@ socketio = SocketIO(app, async_mode="threading", static_url_path="/static", stat
 # Viewed at /logs (page) and /api/logs (JSON). Thin wrapper over stt.request_log.
 from stt import request_log as _request_log  # noqa: E402
 from stt import repeat_filter as _repeat_filter  # noqa: E402
-# A binary broadcast (audio_chunk_hq) shares one packet between websocket and
-# polling listeners; engineio caches its first encoding for both. STT-2R.
-import engineio.packet as _engineio_packet  # noqa: E402
-_engineio_compat.install(_engineio_packet.Packet)
 from stt import file_backup as _file_backup  # noqa: E402
 from stt import metrics as _metrics  # noqa: E402
 from stt import audio_file as _audio_file  # noqa: E402
@@ -8586,7 +8593,11 @@ def save_translation_settings():
                     unload_live_translation_model()
                 use_gpu = config.get("live_translation", {}).get("use_gpu", config.get("performance", {}).get("use_gpu", True))
                 model_id = config["live_translation"].get("translation_model")
-                get_live_translation_model(use_gpu, model_id)
+                try:
+                    get_live_translation_model(use_gpu, model_id)
+                except _model_disk.ModelUnavailable as e:
+                    # The operator's to fix in the Model Manager, not a crash.
+                    print(f"[LIVE-TRANSLATION] {e}", flush=True)
             threading.Thread(target=reload_translation_model, daemon=True).start()
 
     # Clear cache on model or method change (stale tokenizer/model).

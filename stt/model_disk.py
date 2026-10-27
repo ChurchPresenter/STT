@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import os
 import tempfile
-from typing import Iterable, List, NamedTuple
+from typing import Iterable, List, NamedTuple, Optional
 
 # Single-file weight layouts across the model families this app downloads:
 #   HF Transformers -> model.safetensors / pytorch_model.bin
@@ -149,3 +149,36 @@ def dir_is_writable(path: str) -> bool:
             return True
     except OSError:
         return False
+
+
+class ModelUnavailable(RuntimeError):
+    """The model on disk cannot be loaded, and the operator can fix it.
+
+    Something the operator can repair in the Model Manager, not a defect in the
+    code, so a load thread that catches it logs it rather than letting it escape
+    to the crash reporter (STT-2S).
+    """
+
+
+def missing_weights_message(presence: ModelPresence, model_id: str) -> Optional[str]:
+    """Why a transformers load of ``model_id`` would fail for lack of weights, or None.
+
+    Checked before ``from_pretrained`` is called. Otherwise transformers fails
+    with "no file named model.safetensors, or pytorch_model.bin", which says
+    nothing about how to fix it. The common case is a model whose weights were
+    reclaimed after a CTranslate2 conversion, with CTranslate2 since turned off.
+    The Model Manager still lists that model as downloaded, and it is: the
+    conversion can run it, but the transformers engine cannot.
+    """
+    if presence.has_weights:
+        return None
+    if presence.ct2_variants:
+        return (
+            f"The translation model '{model_id}' only has a CTranslate2 conversion on disk; "
+            f"its original weights were removed. Turn CTranslate2 back on in the translation "
+            f"settings, or download the model again in the Model Manager."
+        )
+    return (
+        f"The translation model '{model_id}' has no weights on disk. "
+        f"Download it again in the Model Manager (Settings -> Model Manager)."
+    )

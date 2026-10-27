@@ -153,8 +153,10 @@ class TestManifestCheckSkipsTheConversionPath:
         import re
 
         source = pathlib.Path("speech_to_text.py").read_text(encoding="utf-8")
+        # Anywhere inside that block: lines between must be indented deeper
+        # than the `if` (8 spaces), so the check cannot escape the guard.
         guarded = re.search(
-            r"if not use_ct2:\s*\n\s*_incomplete = _model_files\.manifest_mismatches",
+            r"\n {8}if not use_ct2:\n(?:(?: {12,}.*)?\n)*? {12}_incomplete = _model_files\.manifest_mismatches",
             source)
         assert guarded, (
             "manifest_mismatches must run only off the CT2 path — a converted "

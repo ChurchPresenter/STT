@@ -10,6 +10,8 @@ from stt.model_disk import (
     has_weight_file,
     is_weight_file,
     ct2_variant_names,
+    ModelUnavailable,
+    missing_weights_message,
     model_presence,
 )
 
@@ -202,3 +204,27 @@ class TestModelPresence:
         p = model_presence(str(tmp_path / "nope"), "m")
         assert p.downloaded is False
         assert p.ct2_variants == []
+
+
+class TestMissingWeightsMessage:
+    def test_weights_present_is_fine(self, tmp_path):
+        (tmp_path / "m").mkdir()
+        (tmp_path / "m" / "model.safetensors").write_text("w")
+        assert missing_weights_message(model_presence(str(tmp_path), "m"), "org/m") is None
+
+    def test_conversion_only_points_at_ctranslate2(self, tmp_path):
+        # The STT-2S shape: weights reclaimed after converting, CT2 later turned off.
+        (tmp_path / "m").mkdir()
+        (tmp_path / "m" / "config.json").write_text("{}")
+        (tmp_path / "m-ct2-int8").mkdir()
+        msg = missing_weights_message(model_presence(str(tmp_path), "m"), "org/m")
+        assert msg is not None and "CTranslate2" in msg and "org/m" in msg
+
+    def test_nothing_at_all_asks_for_a_download(self, tmp_path):
+        (tmp_path / "m").mkdir()
+        msg = missing_weights_message(model_presence(str(tmp_path), "m"), "org/m")
+        assert msg is not None and "Model Manager" in msg and "CTranslate2" not in msg
+
+    def test_model_unavailable_is_a_runtime_error(self):
+        # Existing callers catch RuntimeError; the subclass must not escape them.
+        assert issubclass(ModelUnavailable, RuntimeError)
