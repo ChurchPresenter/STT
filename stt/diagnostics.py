@@ -48,7 +48,7 @@ from stt.model_files import REQUIRED_BY_FAMILY, describe_missing
 #: what somebody said. When in doubt a tag stays out: a missing line costs a
 #: follow-up question, a leaked line costs a congregation's privacy.
 LOG_TAGS = frozenset({
-    "AUDIO", "AUDIO-HQ", "AUTH", "AUTO-UPDATE", "CALIBRATION", "CLEANUP", "CONFIG",
+    "AUDIO", "AUDIO-HQ", "AUTH", "AUTO-UPDATE", "CALIBRATION", "CAPTION-ORDER", "CLEANUP", "CONFIG",
     "DB", "DB-CLEANUP", "DEBUG-TS-CMD", "DEBUG-TS-RESTART", "DEBUG-TS-START",
     "DEBUG-TS-STDERR", "DEBUG-TS-STOP", "DEBUG-TS-TIMEOUT", "DOWNLOAD", "ERROR",
     "EXECUTE", "FATAL", "FDLIMIT", "FFMPEG", "FILTER", "INFO", "INIT", "LIVEMAP", "MIGRATION", "MUSIC-GATE", "OK",

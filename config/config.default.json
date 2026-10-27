@@ -404,6 +404,8 @@
     "_target_language_comment": "Target language code (e.g., 'en', 'es', 'fr', 'de', 'ru')",
     "source_language": "auto",
     "_source_language_comment": "Source language (auto uses configured audio.language)",
+    "in_order_hold_seconds": 15,
+    "_in_order_hold_seconds_comment": "Seconds a finished caption waits for an earlier one still being translated, so displays only ever gain lines at the end. A caption not translated in time is left off the live display rather than inserted later (the SRT still gets it). 0 sends each as soon as it is ready",
     "translate_in_progress": false,
     "_translate_in_progress_comment": "Also translate in-progress text (may cause flicker)",
     "display_mode": "translated_only",

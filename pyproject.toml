@@ -97,6 +97,7 @@ module = [
     "stt.win_job",
     "stt.fd_limit",
     "stt.engineio_compat",
+    "stt.caption_order",
     "stt.segment_disposition",
     "stt.disposition_stats",
     "stt.music_gate",

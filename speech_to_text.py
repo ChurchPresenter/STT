@@ -102,6 +102,7 @@ from stt import diagnostics as _diagnostics
 from stt import hq_audio as _hq_audio
 from stt import model_disk as _model_disk
 from stt import engineio_compat as _engineio_compat
+from stt import caption_order as _caption_order_mod
 from stt.http_params import merge_request_params, parse_json_body as _parse_json_body
 from stt.model_disk import _CT2_MARKER, dir_has_weights, dir_is_writable, has_weight_file, is_weight_file, model_presence  # noqa: F401
 from stt import model_catalog as _model_catalog
@@ -20429,6 +20430,9 @@ def emit_translated_entries():
             # to raise drain throughput (cached extras still display normally)
             _want_conf_cycle = want_confidence and not _backlogged
             _n_alt_cycle = 0 if _backlogged else n_alternatives
+            # Captions still waiting for a translation this cycle; see stt/caption_order.py
+            _caption_order.begin_cycle(_cycle_session)
+            _order_pending = []
             for idx, entry in enumerate(e for e in entries if not e[10]):
                 seg_id = entry[0]
                 original_text = entry[2]
@@ -20531,12 +20535,14 @@ def emit_translated_entries():
                     elif _offload_jobs.busy(_cycle_session, seg_id):
                         if dbg:
                             _dbg_branches.append((seg_id, "offload(in-flight)"))
+                        _order_pending.append(seg_id)
                         continue
                     # Over this cycle's translation budget — a later cycle picks it
                     # up (newest-first); skip emission until it's translated
                     elif seg_id not in _allowed_fresh:
                         if dbg:
                             _dbg_branches.append((seg_id, "over_budget"))
+                        _order_pending.append(seg_id)
                         continue
 
                     if not _found:
@@ -20580,6 +20586,7 @@ def emit_translated_entries():
                             _offload_jobs.submit(_cycle_session, seg_id, _call)
                             if dbg:
                                 _dbg_branches.append((seg_id, "offload(submitted)"))
+                            _order_pending.append(seg_id)
                             continue
                         _fresh = _call()
 
@@ -20602,13 +20609,18 @@ def emit_translated_entries():
                     if not _show_it:
                         if dbg:
                             _dbg_branches.append((seg_id, "warmup_skip"))
+                        _order_pending.append(seg_id)
                         continue
                     if not _persist_it:
                         _live_translate_attempts.record_failure(
                             seg_id, translated_text, time.time(), peer_working=_peer_working)
                         _note_failed_translation(seg_id)
+                        # Never shown live: a source-language stand-in would be replaced
+                        # on screen later. The backfill still repairs the record.
+                        _caption_order.skip(seg_id, f"translation failed ({_mt_engine})", time.time())
                         if dbg:
-                            _dbg_branches.append((seg_id, "mt_none(display-only)"))
+                            _dbg_branches.append((seg_id, "mt_none(skipped)"))
+                        continue
                     elif extras is not None:
                         cache.set_with_extras(seg_id, original_text, translated_text, target_lang,
                                               confidence=extras.get("confidence"), alternatives=extras.get("alternatives", []))
@@ -20671,6 +20683,16 @@ def emit_translated_entries():
                     seg_data["confidence"] = extras.get("confidence")
                     seg_data["alternatives"] = extras.get("alternatives", [])
                 translated_segments.append(seg_data)
+
+            # Only ever grow the list at its end: a caption finished ahead of an
+            # earlier one waits for it (bounded), so a reveal never sees a line
+            # inserted above what it has shown. See stt/caption_order.py.
+            translated_segments = _caption_order.order(
+                translated_segments, _order_pending, time.time(),
+                coerce_float(trans_config.get("in_order_hold_seconds"),
+                             _caption_order_mod.DEFAULT_HOLD_SECONDS, lo=0.0, hi=120.0))
+            for _event in _caption_order.drain_events():
+                print(f"[CAPTION-ORDER] {_event}", flush=True)
 
             # Always send in-progress text; is_translated tells the frontend whether
             # it's in the target language (so it can suppress source-language flash).
@@ -20753,6 +20775,8 @@ def emit_translated_entries():
 _translation_backfill = BackfillAttempts()
 # Offloaded caption calls in flight beside emit_translated_entries.
 _offload_jobs = _OffloadJobs()
+# Keeps emit_translated_entries' caption list append-only (stt/caption_order.py).
+_caption_order = _caption_order_mod.EmissionOrder()
 
 
 def _translate_fresh_caption(text_to_translate, original_text, num_ctx_sentences,
