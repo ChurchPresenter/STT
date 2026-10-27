@@ -101,6 +101,7 @@ from stt import fd_limit as _fd_limit
 from stt import diagnostics as _diagnostics
 from stt import hq_audio as _hq_audio
 from stt import model_disk as _model_disk
+from stt import engineio_compat as _engineio_compat
 from stt.http_params import merge_request_params, parse_json_body as _parse_json_body
 from stt.model_disk import _CT2_MARKER, dir_has_weights, dir_is_writable, has_weight_file, is_weight_file, model_presence  # noqa: F401
 from stt import model_catalog as _model_catalog
@@ -4684,6 +4685,10 @@ socketio = SocketIO(app, async_mode="threading", static_url_path="/static", stat
 # Viewed at /logs (page) and /api/logs (JSON). Thin wrapper over stt.request_log.
 from stt import request_log as _request_log  # noqa: E402
 from stt import repeat_filter as _repeat_filter  # noqa: E402
+# A binary broadcast (audio_chunk_hq) shares one packet between websocket and
+# polling listeners; engineio caches its first encoding for both. STT-2R.
+import engineio.packet as _engineio_packet  # noqa: E402
+_engineio_compat.install(_engineio_packet.Packet)
 from stt import file_backup as _file_backup  # noqa: E402
 from stt import metrics as _metrics  # noqa: E402
 from stt import audio_file as _audio_file  # noqa: E402

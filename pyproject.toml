@@ -96,6 +96,7 @@ module = [
     "stt.shutdown_channel",
     "stt.win_job",
     "stt.fd_limit",
+    "stt.engineio_compat",
     "stt.segment_disposition",
     "stt.disposition_stats",
     "stt.music_gate",
