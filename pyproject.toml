@@ -103,6 +103,7 @@ module = [
     "stt.music_gate",
     "stt.asr_replay",
     "stt.hq_audio",
+    "stt.display_clear",
 ]
 disallow_untyped_defs = true
 

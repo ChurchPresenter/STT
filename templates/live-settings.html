@@ -878,6 +878,10 @@
                         <button id="btn_reset_session" class="control-btn" onclick="resetSession()" disabled>
                             New Session
                         </button>
+                        <button id="btn_clear_display" class="control-btn" onclick="clearAllScreens()" disabled
+                                title="Wipe the captions on every screen, ChurchPresenter included. The recording continues in the same session file.">
+                            Clear Screens
+                        </button>
                         <button id="btn_force_reset" class="control-btn btn-force-reset" onclick="forceResetTranscription()">
                             Force Reset
                         </button>
@@ -1416,6 +1420,37 @@
             }
         }
 
+        // Wipe every caption screen (web viewers, translation, ChurchPresenter)
+        // while the recording carries on in the same session file. Whatever was
+        // mid-sentence at this moment stays off the screens when it finalises.
+        async function clearAllScreens() {
+            if (!confirm('Clear all screens?\n\nEvery display, ChurchPresenter included, starts fresh. Nothing is deleted: the recording continues in the same session and keeps everything said so far.')) {
+                return;
+            }
+            const btn = document.getElementById('btn_clear_display');
+            const original = btn.textContent;
+            btn.disabled = true;
+            btn.textContent = 'Clearing…';
+            try {
+                const response = await fetch('/api/transcription/clear-display', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' }
+                });
+                const data = await response.json();
+                if (data.success) {
+                    showAlert('All screens cleared', 'success');
+                    clearTranscriptionDisplay();
+                } else {
+                    showAlert('Error: ' + (data.error || 'Clear failed'), 'error');
+                }
+            } catch (error) {
+                showAlert('Error clearing screens: ' + error.message, 'error');
+            } finally {
+                btn.textContent = original;
+                updateStatus();
+            }
+        }
+
         async function forceResetTranscription() {
             if (!confirm('WARNING: Force reset will forcefully kill the transcription process and reset the state.\n\nThis should only be used if the system is stuck.\n\nAre you sure you want to continue?')) {
                 return;
@@ -1563,6 +1598,8 @@
 
                     // Handle different status states
                     if (btnResetSession) btnResetSession.disabled = (state.status !== 'running');
+                    const btnClearDisplay = document.getElementById('btn_clear_display');
+                    if (btnClearDisplay) btnClearDisplay.disabled = (state.status !== 'running');
 
                     if (state.status === 'running') {
                         statusIndicator.className = 'status-indicator running';

@@ -97,6 +97,8 @@ from stt import pair_tokens as _pair_tokens_mod
 from stt import worker_crash as _worker_crash
 from stt import shutdown_channel as _shutdown_channel
 from stt import fd_limit as _fd_limit
+# Clear-all-screens markers: which captions the live displays may still show.
+from stt import display_clear as _display_clear
 # What may appear in an operator's support report, by allowlist.
 from stt import diagnostics as _diagnostics
 from stt import hq_audio as _hq_audio
@@ -3655,6 +3657,12 @@ class WhisperLiveTranscriber:
     def get_all_text(self):
         """Get all transcribed text concatenated."""
         return " ".join(seg['text'] for seg in self.transcript if seg.get('text'))
+
+    def audio_end_time(self):
+        """Seconds of audio heard so far, on the clock segment start/end times use."""
+        with self.lock:
+            buffered = 0 if self.frames_np is None else self.frames_np.shape[0]
+            return self.frames_offset + buffered / float(self.RATE)
 
     def reset(self):
         """Reset transcriber state for new session."""
@@ -13845,6 +13853,72 @@ def reset_session():
     }), 504
 
 
+@app.route("/api/transcription/clear-display", methods=["POST"])
+def clear_display():
+    """Clear every caption screen and keep the recording in one session file.
+
+    Every display — the web viewers, the translation view, ChurchPresenter —
+    starts fresh, including a sentence or translation still in progress when
+    this is called. Unlike reset-session nothing rolls over: the worker writes a
+    marker row into the session database's ``display_clears`` table, and the
+    live screens show only captions after it (stt/display_clear.py). No caption
+    row is edited, deleted or denied, so exports and the File Manager keep the
+    whole service.
+
+    Example: curl -X POST http://localhost:8080/api/transcription/clear-display
+    """
+    if not check_ip_whitelist():
+        return jsonify({"success": False, "error": "Access Denied"}), 403
+
+    with _transcription_start_lock:
+        if not _ts_get("running", False):
+            _note_access_detail("rejected: transcription not running")
+            return jsonify({
+                "success": False,
+                "error": "Transcription is not running — the screens are already clear.",
+            }), 409
+
+        previous = (_ts_get("display_clear") or {}).get("id")
+        with _transcription_state_lock:
+            transcription_state["display_clear_error"] = None
+        try:
+            control_queue.put({"command": "clear_display"})
+        except Exception as e:
+            _note_access_detail(f"clear-display failed to queue: {e}")
+            return jsonify({"success": False, "error": f"Could not reach the worker: {e}"}), 500
+
+    # The worker answers between audio chunks, so this is normally well under a second.
+    deadline = time.time() + 10
+    while time.time() < deadline:
+        marker = _ts_get("display_clear") or {}
+        if marker.get("id") is not None and marker.get("id") != previous:
+            _invalidate_entries_cache()
+            session_id = _ts_get("session_id")
+            socketio.emit("display_cleared", {"session_id": session_id, "display_epoch": marker["id"]})
+            _note_access_detail(f"display cleared: marker #{marker['id']} after row {marker.get('after_row_id')}")
+            return jsonify({
+                "success": True,
+                "message": "All screens cleared.",
+                "session_id": session_id,
+                "display_epoch": marker["id"],
+                "after_row_id": marker.get("after_row_id"),
+                "audio_cutoff": marker.get("audio_cutoff"),
+            })
+        failure = _ts_get("display_clear_error")
+        if failure:
+            _note_access_detail(f"clear-display failed: {failure}")
+            return jsonify({"success": False, "error": f"Clear failed: {failure}"}), 500
+        if not _ts_get("running", False):
+            break
+        sleep(0.1)
+
+    _note_access_detail("clear-display did not complete in time")
+    return jsonify({
+        "success": False,
+        "error": "The worker did not confirm the clear. Check the server log.",
+    }), 504
+
+
 @app.route("/api/transcription/force-reset", methods=["POST"])
 def force_reset_transcription():
     """API endpoint to force reset transcription state (emergency use)"""
@@ -17397,6 +17471,7 @@ def handle_request_all_entries():
         "in_progress": "",
         "is_running": transcription_state.get("running", False),
         "session_id": transcription_state.get("session_id"),
+        "display_epoch": _current_display_epoch(),  # bumps on Clear all screens
     })
 
 
@@ -17414,6 +17489,7 @@ def handle_request_all_translation_entries():
             "enabled": False,
             "is_running": transcription_state.get("running", False),
             "session_id": transcription_state.get("session_id"),
+            "display_epoch": _current_display_epoch(),  # bumps on Clear all screens
         })
         return
 
@@ -17474,6 +17550,7 @@ def handle_request_all_translation_entries():
         "enabled": True,
         "is_running": transcription_state.get("running", False),
         "session_id": transcription_state.get("session_id"),
+        "display_epoch": _current_display_epoch(),  # bumps on Clear all screens
     })
 
 
@@ -17796,6 +17873,23 @@ def handle_leave_tts_audio():
 # live view. Approve/discard therefore operate on the DB rows directly.
 
 
+# The latest Clear-all-screens marker id seen in the session database, keyed by
+# that database so a new session never inherits the old one's epoch.
+_display_epoch_state = {"db": None, "epoch": 0}
+
+
+def _note_display_epoch(db_name, epoch):
+    _display_epoch_state["db"] = db_name
+    _display_epoch_state["epoch"] = epoch
+
+
+def _current_display_epoch():
+    """What every caption payload carries so a client notices a Clear: the marker id, 0 if none."""
+    if _display_epoch_state["db"] != transcription_state.get("db_name"):
+        return 0
+    return _display_epoch_state["epoch"]
+
+
 def _invalidate_entries_cache():
     """Force the next emit cycle to re-read the DB."""
     with _cache_lock:
@@ -18043,6 +18137,11 @@ def get_new_entries(limit_override=None):
         # Use context manager for database connection
         with sqlite3.connect(current_db_name) as conn:
             cursor = conn.cursor()
+            # Screens show only what came after the latest Clear-all-screens marker
+            # (stt/display_clear.py); the rows themselves are never touched.
+            _clear_marker = _display_clear.latest_clear(conn)
+            _note_display_epoch(current_db_name, _display_clear.display_epoch(_clear_marker))
+            _clear_sql, _clear_params = _display_clear.sql_filter(_clear_marker)
             if limit <= 0:
                 # 0 or negative means no limit — return all visible entries.
                 cursor.execute(
@@ -18054,8 +18153,10 @@ def get_new_entries(limit_override=None):
                     WHERE timestamp != '' AND TRIM(text) != ''
                     AND COALESCE(is_final, 1) = 1
                     AND COALESCE(denied, 0) = 0
+                    """ + _clear_sql + """
                     ORDER BY id ASC
-                """
+                """,
+                    _clear_params,
                 )
             else:
                 # Window the LATEST N *visible* (non-denied) rows. Denied rows —
@@ -18075,11 +18176,12 @@ def get_new_entries(limit_override=None):
                         WHERE timestamp != '' AND TRIM(text) != ''
                         AND COALESCE(is_final, 1) = 1
                         AND COALESCE(denied, 0) = 0
+                        """ + _clear_sql + """
                         ORDER BY id DESC
                         LIMIT ?
                     ) ORDER BY id ASC
                 """,
-                    (limit,),
+                    (*_clear_params, limit),
                 )
             transcriptions = cursor.fetchall()
 
@@ -19396,6 +19498,7 @@ def emit_new_entries():
             "audio_type": _ts_get("audio_type"),  # "Speaking", "Music", or "Quiet"
             "detection_mode": _ts_get("detection_mode"),  # "panns" or "energy"
             "session_id": _ts_get("session_id"),  # stable per-session anchor
+            "display_epoch": _current_display_epoch(),  # bumps on Clear all screens
         }
         if staged_segments:
             emit_data["staged_segments"] = staged_segments
@@ -20256,6 +20359,7 @@ def emit_translated_entries():
                 "model_loaded": is_live_translation_ready(),
                 "model_loading": _live_translation_model_loading,
                 "session_id": _ts_get("session_id"),
+                "display_epoch": _current_display_epoch(),  # bumps on Clear all screens
             })
             # Sleep longer when translation is disabled
             socketio.sleep(update_interval * 2)
@@ -20275,6 +20379,7 @@ def emit_translated_entries():
                     "model_loaded": is_live_translation_ready(),
                     "model_loading": _live_translation_model_loading,
                     "session_id": _ts_get("session_id"),
+                    "display_epoch": _current_display_epoch(),  # bumps on Clear all screens
                 })
                 socketio.sleep(update_interval)
                 continue
@@ -20752,6 +20857,7 @@ def emit_translated_entries():
                 "model_loaded": is_live_translation_ready(),
                 "model_loading": _live_translation_model_loading,
                 "session_id": _ts_get("session_id"),
+                "display_epoch": _current_display_epoch(),  # bumps on Clear all screens
             })
 
             # Repair captions the live window can no longer reach. Done after the
@@ -22679,6 +22785,41 @@ def thread1_function(ts, cq, cfq, cal_state, cal_data, cal_step1, asq, hqq=None)
                                                 transcription_state["error"] = f"Session reset failed: {reset_error}"
                                             is_running = False
                                             break
+                                    elif command["command"] == "clear_display":
+                                        # Clear all screens, keep the recording: a marker row in this
+                                        # session database hides everything saved so far, and the audio
+                                        # cutoff hides what is still in flight (buffer, live hypothesis,
+                                        # held-back fragment) when it finalises — see stt/display_clear.py.
+                                        # Written here, on the caption connection under its lock, so no
+                                        # caption can land between the MAX(id) read and the marker.
+                                        try:
+                                            _clear_now = datetime.now(configured_timezone)
+                                            with _db_lock:
+                                                _marker = _display_clear.record_clear(
+                                                    persistent_db_conn,
+                                                    _clear_now.strftime("%Y-%m-%d %H:%M:%S"),
+                                                    int(_clear_now.timestamp() * 1000),
+                                                    live_transcriber.audio_end_time(),
+                                                )
+                                            # Take the half-finished line off the screens now rather than
+                                            # when it finalises (it is hidden then too).
+                                            _hyp_buffer.reset()
+                                            with _transcription_state_lock:
+                                                transcription_state["live_text"] = ""
+                                                transcription_state["display_clear"] = {
+                                                    "id": _marker.id,
+                                                    "after_row_id": _marker.after_row_id,
+                                                    "audio_cutoff": _marker.audio_cutoff,
+                                                    "db_name": db_path,
+                                                }
+                                            print(f"[CLEAR-DISPLAY] marker #{_marker.id} after row {_marker.after_row_id}, "
+                                                  f"audio cutoff {_marker.audio_cutoff:.1f}s", flush=True)
+                                        except Exception as clear_error:
+                                            # Never stop the captions over a failed clear; the route
+                                            # times out and says so.
+                                            print(f"[CLEAR-DISPLAY] Failed: {clear_error}", flush=True)
+                                            with _transcription_state_lock:
+                                                transcription_state["display_clear_error"] = str(clear_error)
                                     elif command["command"] == "start_calibration":
                                         # Handle calibration start command in inner loop - use local state
                                         calibration_mode = True

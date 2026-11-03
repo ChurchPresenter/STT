@@ -317,8 +317,11 @@
         // click act on an unrelated row. Drop everything when the session changes.
         let _lastKnownSessionId = null;
 
-        function checkSessionChanged(sessionId) {
+        // "Clear all screens" keeps the session but bumps display_epoch, so the
+        // identity compared here is both.
+        function checkSessionChanged(sessionId, displayEpoch) {
             if (sessionId === undefined || sessionId === null) return;
+            sessionId = sessionId + '#' + (displayEpoch || 0);
             if (_lastKnownSessionId !== null && sessionId !== _lastKnownSessionId) {
                 segments = {};
                 stagedSegs = [];
@@ -331,7 +334,7 @@
 
         // === Socket: Transcription ===
         socket.on("transcription_update", function(data) {
-            checkSessionChanged(data.session_id);
+            checkSessionChanged(data.session_id, data.display_epoch);
             updateStatusFromData(data);
             const segs = data.segments || [];
             if (data.delay_enabled !== undefined) { delayEnabled = data.delay_enabled; updateDelayBtn(); }
@@ -357,6 +360,10 @@
             });
             segOrder = Object.keys(segments).map(Number).sort((a, b) => a - b);
             render();
+        });
+
+        socket.on("display_cleared", function(data) {
+            checkSessionChanged(data.session_id, data.display_epoch);
         });
 
         socket.on("correction_applied", function(data) {

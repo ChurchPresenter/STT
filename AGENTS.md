@@ -117,6 +117,18 @@ somebody has to make, so the caller must say `keep` or `none`. The demo's own re
 just another file this reaches, which is why `Player.begin_session` re-reads its schedule
 every session instead of caching it for the life of the process.
 
+**Clearing the screens hides captions and never edits them.** `POST
+/api/transcription/clear-display` wipes every display (web viewers, translation, and
+ChurchPresenter, which replaces its list from each payload's `segments`) while the service
+stays one session file. That is the difference from `reset-session`, which splits the file.
+The worker writes a marker row to the session database's `display_clears` table
+(`stt/display_clear.py`), and `get_new_entries` shows only rows after it: `id > after_row_id`
+**and** `start_time >= audio_cutoff`. The second condition hides what was still in flight
+(rolling buffer, live hypothesis, held-back fragment), which finalises later with a higher id
+but an earlier start, within `CUTOFF_HORIZON_MS`. Payloads carry `display_epoch` (the marker
+id) and the pages treat a change like a new `session_id`. Nothing is deleted or denied, so
+exports and the File Manager keep the whole service.
+
 ## Configuration
 
 - `config/config.default.json` — defaults/schema. **New settings need a default entry here.**
