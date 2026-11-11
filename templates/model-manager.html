@@ -331,6 +331,49 @@
                 transition: none;
             }
         }
+
+        /* Design pass: card radii, underline tabs, quiet row actions */
+        .model-card,
+        .model-library,
+        .modal-content { border-radius: var(--radius-lg); }
+        .model-card { padding: 16px 18px; }
+        .model-library { padding: 16px 18px; }
+        .model-card.live { background: var(--success-bg); }
+        .model-list {
+            border-radius: var(--radius-md);
+            background: var(--bg-card);
+            overflow: hidden;
+        }
+        .model-item { padding: 12px 18px; }
+        .model-item:hover { background: var(--accent-subtle); }
+        .model-tabs { gap: 4px; overflow-x: auto; }
+        .model-tab {
+            padding: 0 12px;
+            min-height: 40px;
+            white-space: nowrap;
+            font-size: var(--fs-sm);
+            margin-bottom: -1px;
+            border-radius: 0;
+        }
+        .model-tab.active { background: none; color: var(--text-primary); font-weight: 600; }
+        .model-tab:hover { background: var(--overlay-hover); }
+        .model-details { font-family: var(--font-mono); font-size: 0.78em; color: var(--text-muted); }
+        .model-btn,
+        .sync-btn { border-radius: var(--radius-sm); min-height: 32px; font-weight: 600; }
+        .sync-btn:hover { transform: none; }
+        .model-btn.download,
+        .model-btn.remove {
+            background: var(--surface-2);
+            color: var(--text-primary);
+            border: 1px solid var(--border);
+        }
+        .model-btn.download:hover { background: var(--accent-subtle); color: var(--accent-text); }
+        .model-btn.remove { background: transparent; color: var(--text-secondary); }
+        .model-btn.remove:hover { background: var(--danger-bg); color: var(--danger); }
+        .model-btn:disabled { background: var(--surface-2); border-color: var(--border); }
+        .model-item--success { background: var(--success-bg); }
+        .model-item--warning { background: var(--warning-bg); }
+        .model-item--danger { background: var(--danger-bg); }
 {% endblock %}
 
 {% block content %}
@@ -606,7 +649,7 @@
                         <button class="sync-btn secondary" onclick="loadModelManager()">
                             ↻ Reload
                         </button>
-                        <button class="sync-btn" style="background: var(--warning); color: var(--text-primary);" onclick="restartApplication()">
+                        <button class="sync-btn" style="background: var(--warning-solid); color: #14161B;" onclick="restartApplication()">
                             🔄 Restart Application
                         </button>
                     </div>
@@ -677,7 +720,7 @@
                         <button class="model-tab" onclick="switchModelTab('audio_detection')">🎧 Audio Detection</button>
                         <button class="model-tab" onclick="switchModelTab('add')">📥 Add Models</button>
                         <button class="model-tab" onclick="switchModelTab('my_downloaded')">📦 Downloaded Models</button>
-                        <button id="refresh_faster_whisper_btn" class="model-btn" onclick="refreshFasterWhisperModels()" style="margin-left: auto; background: var(--warning); color: var(--text-primary); padding: 8px 16px; font-size: 0.85em;">🔄 Check for New Models</button>
+                        <button id="refresh_faster_whisper_btn" class="model-btn" onclick="refreshFasterWhisperModels()" style="margin-left: auto; background: var(--warning-solid); color: #14161B; padding: 8px 16px; font-size: 0.85em;">🔄 Check for New Models</button>
                         <button id="refresh_whisper_btn" class="model-btn" onclick="refreshWhisperModels()" style="margin-left: auto; background: var(--accent); color: var(--text-primary); padding: 8px 16px; font-size: 0.85em; display: none;">🔄 Check for New Models</button>
                     </div>
 
