@@ -507,7 +507,7 @@
         width: 7px;
         height: 7px;
         border-radius: 50%;
-        animation: pulse 2s infinite;
+        background: rgba(255, 255, 255, 0.35);
       }
 
       .status-dot.active {
@@ -529,7 +529,7 @@
       }
 
       .status-dot.inactive {
-        background: #cbd5e0;
+        background: rgba(255, 255, 255, 0.35);
       }
 
       @keyframes pulse {
@@ -887,7 +887,7 @@
     <!-- Status in Upper Right Corner (clickable to open settings) -->
     <button class="status-container" onclick="redirectBasedOnAuth()" style="cursor: pointer; background: none; border: none; padding: 0; text-align: left;" aria-label="Open settings">
       <div class="status-indicator">
-        <div style="display: flex; flex-direction: column; gap: 4px; font-size: 12px;">
+        <div style="display: flex; flex-direction: row; flex-wrap: nowrap; align-items: center; gap: 14px; font-size: 12.5px; white-space: nowrap;">
           <div style="display: flex; align-items: center; gap: 6px;">
             <div class="status-dot" id="server-status-dot"></div>
             <span id="server-status-text">Server</span>
