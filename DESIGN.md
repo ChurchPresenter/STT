@@ -62,7 +62,7 @@ All colours live as CSS variables in `templates/base.html` (`:root` for dark, `:
 
 ## Layout
 
-A sticky 248px **sidebar** (brand, grouped navigation, server and disk status, Light/Dark switch) beside a main column with an eyebrow label naming the group, then the page title. Navigation groups: **Operate** (Live, Corrections, File transcription), **Configure** (Live settings, Translation, Highlighting, Display & URLs), **Manage** (Models, Files, Server). Below 900px the sidebar becomes a top bar with a Menu button.
+A sticky 248px **sidebar** (brand, grouped navigation, server and disk status, Light/Dark switch) beside a main column that starts with the page title. Navigation groups: **Operate** (Live, Corrections, File transcription), **Configure** (Live settings, Translation, Highlighting, Display & URLs), **Manage** (Models, Files, Server). Below 900px the sidebar becomes a top bar with a Menu button.
 
 ## Components
 
