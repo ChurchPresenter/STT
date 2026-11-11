@@ -4,19 +4,7 @@
 {% block page_title %}Live Settings{% endblock %}
 
 {% block extra_css %}
-        /* Layout: live view first, settings column beside it (design: Live) */
-        .main-content {
-            grid-template-columns: minmax(0, 1fr) 380px;
-            padding: 0;
-            gap: 20px;
-            align-items: start;
-        }
-        .main-content > .preview-panel { order: 1; }
-        .main-content > .settings-panel { order: 2; }
-        @media (max-width: 1100px) {
-            .main-content { grid-template-columns: minmax(0, 1fr); }
-            .main-content > .settings-panel { order: 3; }
-        }
+        /* Layout: see the shared .main-content rule in base.html */
         .settings-panel,
         .status-card,
         .volume-meter {

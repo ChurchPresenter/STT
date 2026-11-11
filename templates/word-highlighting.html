@@ -412,12 +412,6 @@
             }
         }
 
-        /* Design: colour groups first (wide), add-words column beside */
-        @media (min-width: 1101px) {
-            .main-content { grid-template-columns: minmax(0, 1fr) 340px; align-items: start; }
-            .main-content > .highlighting-panel { order: 1; }
-            .main-content > .settings-panel { order: 2; }
-        }
 {% endblock %}
 
 {% block content %}

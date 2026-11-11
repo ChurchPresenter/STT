@@ -267,12 +267,6 @@
             .actions button:hover { transform: none; }
         }
 
-        /* Design: file + output first, settings aside on the right */
-        @media (min-width: 1101px) {
-            .main-content { grid-template-columns: minmax(0, 1fr) 340px; align-items: start; }
-            .main-content > .upload-panel { order: 1; }
-            .main-content > .settings-panel { order: 2; }
-        }
 {% endblock %}
 
 {% block content %}
