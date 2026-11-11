@@ -37,6 +37,32 @@
             border: 1px solid var(--border);
         }
 
+        /* Session summary strip (design: Live) */
+        .live-summary {
+            display: grid;
+            grid-template-columns: auto repeat(4, minmax(0, 1fr));
+            gap: 12px;
+            align-items: stretch;
+            margin-bottom: 20px;
+        }
+        .live-pill {
+            display: inline-flex; align-items: center; gap: 10px;
+            align-self: center; height: 40px; padding: 0 16px; border-radius: 999px; font-weight: 600; font-size: var(--fs-sm);
+            background: var(--surface-2); color: var(--text-secondary); border: 1px solid var(--border);
+        }
+        .live-pill-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--text-muted); }
+        .live-pill[data-state="running"] { background: var(--danger-bg); color: var(--danger); border-color: transparent; }
+        .live-pill[data-state="running"] .live-pill-dot { background: var(--danger-solid); animation: livePulse 1.6s infinite; }
+        .live-pill[data-state="starting"] { background: var(--warning-bg); color: var(--warning); border-color: transparent; }
+        .live-pill-time { font-family: var(--font-mono); font-weight: 500; color: var(--text-primary); }
+        @keyframes livePulse { 0% { box-shadow: 0 0 0 0 rgba(239, 68, 68, .55); } 70% { box-shadow: 0 0 0 7px rgba(239, 68, 68, 0); } 100% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0); } }
+        .sum-card { background: var(--bg-card); border: 1px solid var(--border); border-radius: var(--radius-lg); padding: 12px 16px; min-width: 0; }
+        .sum-label { font-size: var(--fs-xs); color: var(--text-muted); font-weight: 500; }
+        .sum-value { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        .sum-sub { font-size: var(--fs-xs); color: var(--text-secondary); min-height: 1em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        @media (max-width: 1100px) { .live-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); } .live-pill { grid-column: 1 / -1; min-height: 40px; } }
+        @media (prefers-reduced-motion: reduce) { .live-pill-dot { animation: none !important; } }
+
         /* Slider Styles */
         .slider-container {
             margin-bottom: 14px;
@@ -472,6 +498,13 @@
 {% endblock %}
 
 {% block content %}
+        <section class="live-summary" aria-label="Session summary">
+            <div class="live-pill" id="live_pill" data-state="stopped"><span class="live-pill-dot" aria-hidden="true"></span><span id="live_pill_text">Stopped</span><span class="live-pill-time" id="live_pill_time"></span></div>
+            <div class="sum-card"><div class="sum-label">Model</div><div class="sum-value" id="sum_model">—</div><div class="sum-sub" id="sum_model_sub"></div></div>
+            <div class="sum-card"><div class="sum-label">Microphone</div><div class="sum-value" id="sum_mic">—</div><div class="sum-sub">Selected input</div></div>
+            <div class="sum-card"><div class="sum-label">Language</div><div class="sum-value" id="sum_lang">—</div><div class="sum-sub">Transcription language</div></div>
+            <div class="sum-card"><div class="sum-label">Translation</div><div class="sum-value" id="sum_trans">—</div><div class="sum-sub" id="sum_trans_sub"></div></div>
+        </section>
         <div class="main-content">
             <!-- Settings Panel -->
             <div class="settings-panel">
@@ -1675,6 +1708,43 @@
                 console.error('Error fetching status:', error);
             }
         }
+
+        // Session summary strip: read what the page already knows (status
+        // poll, form selects) rather than adding endpoints.
+        (function () {
+            function txt(id) { var e = document.getElementById(id); return e ? e.textContent.trim() : ''; }
+            function sel(id) {
+                var e = document.getElementById(id);
+                return e && e.selectedIndex >= 0 && e.options[e.selectedIndex] ? e.options[e.selectedIndex].text : '';
+            }
+            function set(id, v) { var e = document.getElementById(id); if (e) e.textContent = v || '—'; }
+            function paint() {
+                var st = txt('status_text').toLowerCase();
+                var pill = document.getElementById('live_pill');
+                if (pill) {
+                    var state = st === 'running' ? 'running' : (st === 'starting' || st === 'stopping') ? 'starting' : 'stopped';
+                    pill.setAttribute('data-state', state);
+                    set('live_pill_text', state === 'running' ? 'Live' : st ? st.charAt(0).toUpperCase() + st.slice(1) : 'Stopped');
+                    var t = txt('running_timer');
+                    set('live_pill_time', state === 'running' && t !== '--:--' ? t : '');
+                    if (state !== 'running') set('live_pill_time', '');
+                }
+                set('sum_model', txt('status_model') === 'Not loaded' ? 'Not loaded' : txt('status_model'));
+                set('sum_model_sub', '');
+                set('sum_mic', sel('audio_device'));
+                set('sum_lang', sel('live_language'));
+            }
+            function paintTranslation() {
+                pollFetch('/api/translation/status').then(function (r) { return r.json(); }).then(function (d) {
+                    if (!d || !d.success) return;
+                    set('sum_trans', d.enabled ? (d.target_language_name || d.target_language) : 'Off');
+                    set('sum_trans_sub', d.enabled ? (d.model_loaded ? 'Model loaded' : d.model_loading ? 'Loading model' : 'Model not loaded') : 'Enable on Translation page');
+                }).catch(function () {});
+            }
+            paint(); paintTranslation();
+            setInterval(paint, 1000);
+            setInterval(paintTranslation, 5000);
+        })();
 
         // Show alert message
         function showAlert(message, type) {
