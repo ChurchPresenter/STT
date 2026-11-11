@@ -241,14 +241,11 @@
             width: 34px;
             height: 34px;
             border-radius: var(--radius-md);
-            background: var(--accent);
-            color: #fff;
+            overflow: hidden;
             display: flex;
-            align-items: center;
-            justify-content: center;
             flex: none;
         }
-        .brand-mark svg { width: 18px; height: 18px; }
+        .brand-mark img { width: 100%; height: 100%; display: block; }
         .brand-text { display: flex; flex-direction: column; line-height: 1.2; }
         .brand-name { font-weight: 650; font-size: 15px; letter-spacing: -0.01em; }
         .brand-ver { font-family: var(--font-mono); font-size: 11.5px; color: var(--text-muted); }
@@ -1065,7 +1062,7 @@
     <div class="app-shell">
         <aside class="sidebar" id="sidebar">
             <a class="brand" href="/">
-                <span class="brand-mark"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="M4 10v4M8 6v12M12 3v18M16 7v10M20 10v4"/></svg></span>
+                <span class="brand-mark"><img src="{{ url_for('static', filename='favicon.svg') }}" alt="" width="34" height="34"></span>
                 <span class="brand-text"><span class="brand-name">STT</span></span>
             </a>
             <button type="button" class="nav-toggle" aria-expanded="false" aria-controls="side-nav" onclick="toggleSideNav(this)">Menu</button>
