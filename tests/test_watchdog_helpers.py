@@ -784,6 +784,47 @@ class TestStepDepsGitGuard:
         assert "pip" in seen["cmd"]
 
 
+class TestStepDepsAppControlBlock:
+    """Windows Application Control blocks the interpreter uv builds sdists in
+    (os error 4551, STT-2W). openai-whisper is sdist-only, so the install must
+    retry building it in the project venv instead of failing for good."""
+
+    BLOCKED = ("command failed (1): uv pip install -r requirements.txt — last output: "
+               "error: Failed to build `openai-whisper==20250625` | cause: blocked (os error 4551)")
+
+    def _run_deps(self, tmp_path, monkeypatch, fail_with):
+        monkeypatch.setattr(watchdog, "SOURCE_DIR", str(tmp_path))
+        (tmp_path / "requirements.txt").write_text("openai-whisper==20250625\n")
+        calls = []
+
+        def fake_run(cmd, desc=None, check=True, timeout=3600, extra_env=None):
+            calls.append(list(cmd))
+            if len(calls) == 1 and fail_with:
+                raise watchdog.ProvisionError(fail_with)
+            return 0
+
+        p = watchdog.Provisioner(log=lambda m: None)
+        p._uv = "uv"
+        p._run = fake_run
+        return p, calls
+
+    def test_block_retries_without_build_isolation(self, tmp_path, monkeypatch):
+        p, calls = self._run_deps(tmp_path, monkeypatch, self.BLOCKED)
+        p._step_deps()
+        assert len(calls) == 3
+        assert "setuptools" in calls[1]
+        assert calls[2][-2:] == ["--no-build-isolation-package", "openai-whisper"]
+
+    def test_other_failures_still_raise(self, tmp_path, monkeypatch):
+        p, calls = self._run_deps(tmp_path, monkeypatch, "command failed (1): no matching wheel")
+        try:
+            p._step_deps()
+            raise AssertionError("expected ProvisionError")
+        except watchdog.ProvisionError:
+            pass
+        assert len(calls) == 1
+
+
 class TestUpdateWindowOpen:
     def test_startup_applies_at_any_hour(self):
         # A machine that just booted (missed the 1am window) catches up now.

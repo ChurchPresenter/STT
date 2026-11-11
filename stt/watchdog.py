@@ -838,6 +838,15 @@ def _static_ffmpeg_platform():
 _MINGIT_DIR = os.path.join(DATA_DIR, "git")
 
 
+def _is_app_control_block(message):
+    """True when a failed command was refused by Windows Application Control.
+
+    os error 4551 is ERROR_APPHOST_BLOCKED / "an application control policy has
+    blocked this file", whatever language Windows reports it in.
+    """
+    return "os error 4551" in message
+
+
 class ProvisionError(Exception):
     pass
 
@@ -1976,7 +1985,23 @@ class Provisioner:
             self.log("  Apple Silicon — installing MPS/CPU wheels")
         else:
             self.log("  no NVIDIA GPU — installing CPU wheels")
-        self._run(cmd, desc="uv pip install -r requirements.txt", timeout=7200)
+        try:
+            self._run(cmd, desc="uv pip install -r requirements.txt", timeout=7200)
+        except ProvisionError as e:
+            if not _is_app_control_block(str(e)):
+                raise
+            # Windows Application Control (WDAC/AppLocker) refused to run the
+            # throwaway interpreter uv creates under its cache to build
+            # openai-whisper, which has no wheel on PyPI. The venv's own python
+            # is the one the app runs as, so it is allowed: build there instead
+            # of in uv's isolated build environment.
+            self.log("  Application Control blocked uv's build environment — "
+                     "retrying with openai-whisper built in the project venv")
+            self._run([self._uv, "pip", "install", "--python", py, "setuptools", "wheel"],
+                      desc="uv pip install build tools", timeout=1800)
+            self._run([*cmd, "--no-build-isolation-package", "openai-whisper"],
+                      desc="uv pip install -r requirements.txt (no build isolation)",
+                      timeout=7200)
 
     # -- download helpers ----------------------------------------------------
 
