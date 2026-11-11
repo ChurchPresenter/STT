@@ -343,6 +343,7 @@
             flex-wrap: wrap;
             padding: 0 0 20px;
         }
+        .header-eyebrow { font-size: 12.5px; font-weight: 500; color: var(--text-muted); margin-bottom: 4px; }
         .header h1 {
             font-size: var(--fs-lg);
             line-height: 1.15;
@@ -1075,8 +1076,10 @@
         </aside>
 
     <div class="container">
+        {% set section = {'/': 'Operate', '/corrections': 'Operate', '/file': 'Operate', '/live-settings': 'Configure', '/translation': 'Configure', '/word-highlighting': 'Configure', '/url-builder': 'Configure', '/model-manager': 'Manage', '/file-manager': 'Manage', '/server-settings': 'Manage'}.get(request.path) %}
         <div class="header">
             <div>
+                {% if section %}<div class="header-eyebrow">{{ section }}</div>{% endif %}
                 <h1>{% block page_title %}Speech to Text{% endblock %}</h1>
                 {% block page_subtitle %}{% endblock %}
             </div>
