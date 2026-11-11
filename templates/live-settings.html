@@ -4,6 +4,39 @@
 {% block page_title %}Live Settings{% endblock %}
 
 {% block extra_css %}
+        /* Layout: live view first, settings column beside it (design: Live) */
+        .main-content {
+            grid-template-columns: minmax(0, 1fr) 380px;
+            padding: 0;
+            gap: 20px;
+            align-items: start;
+        }
+        .main-content > .preview-panel { order: 1; }
+        .main-content > .settings-panel { order: 2; }
+        @media (max-width: 1100px) {
+            .main-content { grid-template-columns: minmax(0, 1fr); }
+            .main-content > .settings-panel { order: 3; }
+        }
+        .settings-panel,
+        .status-card,
+        .volume-meter {
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: var(--radius-lg);
+        }
+        .settings-panel { padding: 16px 18px; }
+        .status-card { padding: 16px 18px; }
+        .volume-meter { padding: 16px 18px; }
+        .control-btn { border-radius: var(--radius-md); min-height: 40px; }
+        .btn-force-reset:hover:not(:disabled),
+        .btn-start:hover:not(:disabled),
+        .btn-stop:hover:not(:disabled) { transform: none; }
+        .control-btn:not(.btn-start):not(.btn-stop):not(.btn-force-reset):not(:disabled) {
+            background: var(--bg-card);
+            color: var(--text-primary);
+            border: 1px solid var(--border);
+        }
+
         /* Slider Styles */
         .slider-container {
             margin-bottom: 14px;
