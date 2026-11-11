@@ -190,6 +190,10 @@
                 transform: none;
             }
         }
+
+        /* Design: preview, then link, then profiles */
+        .url-builder-panel > .preview-section { order: -1; }
+        .url-builder-panel > .settings-card:first-of-type { order: 1; }
 {% endblock %}
 
 {% block content %}

@@ -235,6 +235,28 @@
         .review-bar-collapsible { transition: none; }
         .toolbar button, .seg-card, .seg-original, .seg-translated, .alt-pill { transition: none; }
       }
+
+      /* Design: segments beside a standing review queue (wide screens) */
+      @media (min-width: 1101px) {
+        .content {
+          display: grid;
+          grid-template-columns: minmax(0, 1fr) 340px;
+          grid-template-rows: auto auto minmax(0, 1fr) auto;
+          grid-template-areas: "alert alert" "toolbar toolbar" "main review" "hint hint";
+          gap: 0 20px;
+        }
+        #filter-alert { grid-area: alert; }
+        .toolbar { grid-area: toolbar; }
+        .corrections-main-content { grid-area: main; }
+        .review-bar { grid-area: review; display: flex; flex-direction: column; min-height: 0; overflow: hidden; border: 1px solid var(--border); border-radius: var(--radius-lg); background: var(--bg-card); }
+        .review-bar.collapsed .review-bar-collapsible,
+        .review-bar-collapsible { grid-template-rows: 1fr; flex: 1; min-height: 0; overflow: hidden; }
+        .review-bar-items { overflow-y: auto; min-height: 0; }
+        .review-bar-items-inner { max-height: none; flex-direction: column; flex-wrap: nowrap; }
+        .review-item { max-width: none; }
+        #review-toggle-icon { display: none; }
+        .shortcuts-hint { grid-area: hint; }
+      }
 {% endblock %}
 
 {% block content %}
