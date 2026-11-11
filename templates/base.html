@@ -1021,6 +1021,19 @@
            otherwise the row still reads as active even though it's disabled. */
         .a-locked + label { opacity: 0.5; pointer-events: none; }
 
+        /* Design pass for pages that keep their own markup: one card language,
+           no hover lift, accent-subtle hover rows. Page CSS below may refine. */
+        .section, .settings-panel, .preview-section, .stat-card, .dropzone,
+        .word-list, .file-table, .language-grid, .transcription-output,
+        .seg-card, .review-bar, .file-info, .output-format { border-radius: var(--radius-md); }
+        .settings-panel, .preview-section, .stat-card, .word-list, .transcription-output { background: var(--bg-card); border-color: var(--border); }
+        .dropzone { border-color: var(--accent); background: var(--accent-subtle); }
+        .format-btn.active, .preset-btn.active { background: var(--accent); color: #fff; border-color: var(--accent); }
+        .format-btn, .preset-btn, .actions button { border-radius: var(--radius-md); }
+        .actions button:hover, .preset-btn:hover { transform: none; }
+        .word-item:hover, .file-table tbody tr:hover, .duplicate-item:hover { background: var(--accent-subtle); }
+        .stat-card .value, .language-search, .word-info code { font-family: var(--font-mono); }
+
         {% block extra_css %}{% endblock %}
     </style>
 </head>
