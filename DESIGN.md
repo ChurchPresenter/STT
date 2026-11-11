@@ -50,7 +50,7 @@ rounded:
 
 # STT design
 
-The operator console for live events: calm, dense, readable across a room. Two themes, **dark** and **light**, share one layout. The caption display (`templates/index.html`) is a separate register with its own palette and is never restyled by this system.
+The operator console for live events: calm, dense, readable across a room. Two themes, **dark** and **light**, share one layout. The caption display (`templates/index.html`) is a separate register with its own palette: only its status pill follows this system (translucent pill, 7px status dots); the operator's colours, fonts and layout parameters are never overridden.
 
 ## Tokens
 
