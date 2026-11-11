@@ -374,6 +374,40 @@
         .model-item--success { background: var(--success-bg); }
         .model-item--warning { background: var(--warning-bg); }
         .model-item--danger { background: var(--danger-bg); }
+        /* Assigned-model cards sit above the form, as in the design */
+        .config-layout { display: flex; flex-direction: column; gap: 18px; }
+        .config-display {
+            order: -1;
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+            gap: 14px;
+        }
+        .config-display .model-card.compact { margin: 0; padding: 14px 16px; }
+        .config-display .model-card h4 { margin-bottom: 8px; }
+        .storage-strip {
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: var(--radius-lg);
+            padding: 12px 18px;
+            margin-bottom: 18px;
+            display: flex;
+            flex-wrap: wrap;
+            justify-content: space-between;
+            align-items: center;
+            gap: 10px 24px;
+            font-size: var(--fs-sm);
+            color: var(--text-primary);
+        }
+        .storage-strip > div:first-child { display: flex; flex-wrap: wrap; gap: 6px 20px; align-items: center; }
+        .storage-strip > div:first-child span { font-family: var(--font-mono); font-size: var(--fs-xs); }
+        .storage-strip strong { font-family: var(--font-sans); font-weight: 600; }
+        .lib-toolbar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; justify-content: flex-end; margin-bottom: 8px; }
+        .lib-seg { display: inline-flex; padding: 3px; border-radius: 9px; background: var(--surface-2); border: 1px solid var(--border); }
+        .lib-seg-btn { height: 30px; padding: 0 12px; border: none; border-radius: 7px; background: transparent; color: var(--text-secondary); font-size: var(--fs-xs); font-weight: 500; cursor: pointer; }
+        .lib-seg-btn.active { background: var(--bg-card); color: var(--text-primary); font-weight: 600; box-shadow: 0 1px 2px rgba(0, 0, 0, 0.18); }
+        .lib-search input { min-height: 38px; width: 220px; padding: 0 12px; background: var(--inset); }
+        .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+        .model-item[data-filtered-out="1"] { display: none; }
 {% endblock %}
 
 {% block content %}
@@ -683,7 +717,7 @@
                 </div>
 
                 <!-- Disk Space Display (Compact) -->
-                <div style="background: var(--bg-card); border: 1px solid var(--border); padding: 8px 15px; border-radius: var(--radius-sm); margin-bottom: 15px; display: flex; justify-content: space-between; align-items: center; font-size: 0.85em; color: var(--text-primary);">
+                <div class="storage-strip">
                     <div style="display: flex; gap: 20px; align-items: center;">
                         <span><strong>💾 Disk:</strong> <span id="disk-space-path">-</span></span>
                         <span><strong>Total:</strong> <span id="disk-space-total">-</span></span>
@@ -710,6 +744,17 @@
 
                     <div id="transcription-warning" class="warning-box" style="display: none;">
                         ⚠️ <strong>Transcription is running.</strong> Stop transcription to download models. Downloading models while transcription is active will cause GPU memory errors.
+                    </div>
+
+                    <div class="lib-toolbar" role="search">
+                        <div class="lib-seg" role="group" aria-label="Language filter">
+                            <button type="button" class="lib-seg-btn active" aria-pressed="true" data-lang-filter="all">All</button>
+                            <button type="button" class="lib-seg-btn" aria-pressed="false" data-lang-filter="english">English-only</button>
+                            <button type="button" class="lib-seg-btn" aria-pressed="false" data-lang-filter="multi">Multilingual</button>
+                        </div>
+                        <label class="lib-search"><span class="sr-only">Search models</span>
+                            <input type="search" id="lib_search" placeholder="Search models" autocomplete="off">
+                        </label>
                     </div>
 
                     <div class="model-tabs" style="display: flex; align-items: center; gap: 10px;">
@@ -2364,6 +2409,47 @@
         }
 
         // Model Library Functions
+        // Library search + language filter. Works on whatever the active list
+        // renders, so no renderer needs to know about it.
+        (function () {
+            var lang = 'all';
+            var box = document.getElementById('lib_search');
+            if (!box) return;
+            function apply() {
+                var q = box.value.trim().toLowerCase();
+                document.querySelectorAll('.model-library .model-list .model-item').forEach(function (it) {
+                    if (it.classList.contains('model-item--header')) return;
+                    var t = (it.textContent || '').toLowerCase();
+                    var ok = !q || t.indexOf(q) !== -1;
+                    if (ok && lang === 'english') ok = t.indexOf('english') !== -1 && t.indexOf('multilingual') === -1;
+                    if (ok && lang === 'multi') ok = t.indexOf('multilingual') !== -1;
+                    if (ok) it.removeAttribute('data-filtered-out'); else it.setAttribute('data-filtered-out', '1');
+                });
+            }
+            var busy = false;
+            function schedule() {
+                if (busy) return;
+                busy = true;
+                setTimeout(function () { busy = false; apply(); }, 50);
+            }
+            box.addEventListener('input', apply);
+            document.querySelectorAll('[data-lang-filter]').forEach(function (b) {
+                b.addEventListener('click', function () {
+                    lang = b.getAttribute('data-lang-filter');
+                    document.querySelectorAll('[data-lang-filter]').forEach(function (x) {
+                        var on = x === b;
+                        x.classList.toggle('active', on);
+                        x.setAttribute('aria-pressed', on ? 'true' : 'false');
+                    });
+                    apply();
+                });
+            });
+            // Lists re-render after downloads/refreshes; re-apply (attribute
+            // changes from apply() itself are not observed, so no loop).
+            var lib = document.querySelector('.model-library');
+            if (lib) new MutationObserver(schedule).observe(lib, { childList: true, subtree: true });
+        })();
+
         function switchModelTab(tabName) {
             // Update tab buttons. The clicked tab comes from the implicit event
             // when a user clicks; when called programmatically there is none, so
