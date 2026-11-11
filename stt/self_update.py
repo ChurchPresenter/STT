@@ -24,7 +24,6 @@ import shutil
 import subprocess
 import sys
 import tempfile
-from datetime import datetime, timedelta
 from typing import Sequence, Tuple
 
 from stt import owner_exec as _owner_exec
@@ -438,18 +437,24 @@ def restart_via_execv() -> None:
     os.execv(sys.executable, [sys.executable, *sys.argv])
 
 
-def seconds_until_hour(now: datetime, target_hour: int) -> float:
-    """Seconds from ``now`` to the next local occurrence of ``target_hour``:00.
+class IdleGate:
+    """Says when the server has been idle long enough to be restarted.
 
-    Used to schedule the auto-update at a fixed nightly hour (default 1 am)
-    instead of a flat interval, so a live box updates during off-hours rather
-    than restarting every hour. ``now`` is injected so the schedule math is
-    deterministic and testable. ``target_hour`` is clamped to 0-23; when ``now``
-    is exactly on the hour the next occurrence is tomorrow (a full day away, so
-    it doesn't re-fire immediately).
+    Replaces a fixed nightly hour: a machine switched on only for services is
+    never up at 1am. ``due`` is fed one observation per poll and answers True
+    once ``settle_s`` seconds have passed with no activity in between; activity
+    restarts the count, since an operator pausing between parts of a service is
+    not done for the day. ``now`` is injected so the logic is deterministic.
     """
-    target_hour = max(0, min(23, int(target_hour)))
-    target = now.replace(hour=target_hour, minute=0, second=0, microsecond=0)
-    if target <= now:
-        target += timedelta(days=1)
-    return (target - now).total_seconds()
+
+    def __init__(self, settle_s: float) -> None:
+        self.settle_s = settle_s
+        self._idle_since: "float | None" = None
+
+    def due(self, active: bool, now: float) -> bool:
+        if active:
+            self._idle_since = None
+            return False
+        if self._idle_since is None:
+            self._idle_since = now
+        return now - self._idle_since >= self.settle_s

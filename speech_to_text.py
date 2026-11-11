@@ -24609,28 +24609,32 @@ def _run_optional_dep_preflight():
 
 
 def _self_update_loop():
-    """Nightly git self-update at a fixed hour; only applies while idle.
+    """Git self-update, applied once the server has been idle for a while.
 
-    Runs at auto_update.update_hour (local, default 1 = 1am) rather than a flat
-    interval, so a live box updates during off-hours instead of restarting every
-    hour. The one-shot startup check still catches a box up at boot."""
+    Checks hourly, but only once nothing has been transcribing for
+    auto_update.idle_minutes (default 10): the idle gate replaced a fixed 1am hour
+    that a box switched on only for services never reached. The one-shot startup
+    check still catches a box up at boot."""
     import time
-    from datetime import datetime
-    from stt.self_update import git_self_update, seconds_until_hour
+    from stt.self_update import IdleGate, git_self_update
     try:
-        update_hour = int(config.get("auto_update", {}).get("update_hour", 1))
+        idle_minutes = float(config.get("auto_update", {}).get("idle_minutes", 10))
     except (TypeError, ValueError):
-        update_hour = 1
+        idle_minutes = 10.0
+    gate = IdleGate(max(0.0, idle_minutes) * 60)
+    check_interval = 3600
+    poll = 60
+    next_check = time.monotonic() + check_interval
+    print(f"[AUTO-UPDATE] Checking hourly; applies after {idle_minutes:g} min idle")
     while True:
-        delay = seconds_until_hour(datetime.now(), update_hour)
-        print(f"[AUTO-UPDATE] Next update check at {update_hour:02d}:00 "
-              f"(in {delay / 3600:.1f}h)")
-        time.sleep(delay)
+        time.sleep(poll)
         if _server_shutting_down.is_set():
             return
+        now = time.monotonic()
+        if not gate.due(bool(_ts_get("running")), now) or now < next_check:
+            continue
+        next_check = now + check_interval
         try:
-            if _ts_get("running"):
-                continue  # idle-gate: never restart mid-transcription
             updated, reason = git_self_update(BUNDLE_DIR, allow_reset=_self_update_allow_reset())
             if not updated and reason == "not-fast-forwardable":
                 # Otherwise the only trace is one startup line, and a box can sit

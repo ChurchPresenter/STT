@@ -5,7 +5,7 @@ STT Watchdog — crash recovery and auto-updater for speech_to_text.py
 Responsibilities:
   - Starts speech_to_text.py as a managed child process
   - Restarts it on crash with exponential backoff
-  - Checks GitHub releases at 1am daily; applies updates while preserving config.json
+  - Checks GitHub releases hourly; applies updates after 10 minutes of idle while preserving config.json
   - Supports headless daemon mode and desktop GUI (tkinter)
   - Cross-platform: Linux, macOS, Windows
 
@@ -220,10 +220,10 @@ _LAUNCH_HEAD = None
 
 BACKOFF = [5, 10, 30, 60]       # seconds between crash restarts; capped at last entry
 STABLE_RUN_THRESHOLD = 30        # seconds of uptime before resetting crash counter
-UPDATE_HOUR = 1                  # hour (24h) at which daily update check fires
-STARTUP_UPDATE_DELAY_S = 120     # grace after boot before a startup catch-up apply
-CATCHUP_IDLE_SETTLE_S = 600      # idle needed before a deferred catch-up applies
-CATCHUP_POLL_S = 60              # how often a deferred catch-up looks for idle
+UPDATE_CHECK_INTERVAL_S = 3600   # how often the channel is checked for a newer version
+STARTUP_UPDATE_DELAY_S = 120     # grace after boot before the first update check
+CATCHUP_IDLE_SETTLE_S = 600      # idle needed before a pending update applies
+CATCHUP_POLL_S = 60              # how often a pending update looks for idle
 
 # Files/dirs inside SOURCE never replaced wholesale by the zipball-fallback
 # update path. "config" is never swapped as a directory — live user settings
@@ -583,26 +583,17 @@ def _watchdog_control_loop(state, pm, updater):
         time.sleep(2)
 
 
-def _update_window_open(startup, hour, update_hour=UPDATE_HOUR):
-    """Whether the scheduler may APPLY a pending update now: once on startup
-    (catch-up for machines that were powered off at update_hour and would
-    otherwise never update), otherwise only at update_hour."""
-    return bool(startup) or hour == update_hour
-
-
 class _DeferredCatchup:
-    """A startup catch-up that found transcription running, still owed.
+    """A pending update that waits for the server to go idle before applying.
 
-    A machine switched on only for services boots, starts transcribing within
-    the startup grace, and is off again before 1am, so a catch-up that gives up
-    on its first deferral never applies anything there. Seen in the field: an
-    install logged a watchdog error for days after its fix was on main, because
-    it never got past the deferral to pull it.
-
-    Once armed, the catch-up applies after the server has been idle for
-    ``settle_s`` without a break. The settle is there because an operator
-    stopping between parts of a service is not done for the day, and the
-    restart that follows an update is not something to spring on them then.
+    Updates apply once the server has been idle for ``settle_s`` without a
+    break, at whatever hour that happens. The settle is there because an
+    operator stopping between parts of a service is not done for the day, and
+    the restart that follows an update is not something to spring on them then.
+    It replaced a fixed 1am window, which a machine switched on only for
+    services never reached: it booted, transcribed, and was off again before
+    1am, so an install logged a watchdog error for days after its fix was on
+    main.
     """
 
     def __init__(self, settle_s: float = CATCHUP_IDLE_SETTLE_S) -> None:
@@ -2377,7 +2368,7 @@ class AutoUpdater:
 
         Without this the permanent condition reads as a transient dependency
         failure: apply stops the server, resets the checkout, fails on uv, rolls
-        back and restarts — every boot and every 1am, forever. Checked here
+        back and restarts — every boot and every check, forever. Checked here
         rather than in Provisioner._preflight() alone because preflight only
         runs once the server is already down and the checkout already moved."""
         reason = _unsupported_platform_reason()
@@ -2499,7 +2490,7 @@ class AutoUpdater:
         self._apply_git_update(remote, zipball_url)
 
     def check_and_update(self):
-        """Check for update and immediately apply if one is found (manual update / 1am)."""
+        """Check for update and immediately apply if one is found (manual update)."""
         self.check_for_update()
         self.apply_pending_update()
 
@@ -2559,7 +2550,7 @@ class AutoUpdater:
         One attempt per release, not one per launch. A dependency failure is
         usually a property of the machine (a wheel that does not exist for its
         platform), not of the moment, so retrying the same commit on every boot
-        and every 1am buys nothing and costs a stop/reset/rollback/restart each
+        and every check buys nothing and costs a stop/reset/rollback/restart each
         time. Any new commit on the channel clears the block and is tried
         normally — the next release is exactly what might fix it.
         """
@@ -2781,46 +2772,34 @@ class AutoUpdater:
         t.start()
 
     def _scheduler_loop(self):
-        # Startup catch-up: a machine powered off at UPDATE_HOUR never applies its
-        # pending update; do it once shortly after boot instead (idle-gated, same
-        # as 1am). Grace first so pm.start() (which runs right after run_scheduler)
-        # has launched the server before we might restart it.
+        # Grace first so pm.start() (which runs right after run_scheduler) has
+        # launched the server before we might restart it.
         for _ in range(STARTUP_UPDATE_DELAY_S // 5):
             if self.state.get("stop_requested"):
                 return
             time.sleep(5)
 
-        startup = True
-        catchup = _DeferredCatchup()
+        # An update applies after the server has been idle for CATCHUP_IDLE_SETTLE_S,
+        # whatever the hour; the channel is re-checked every UPDATE_CHECK_INTERVAL_S.
+        idle = _DeferredCatchup()
+        next_check = 0.0
         while not self.state.get("stop_requested"):
-            self.check_for_update()
-            if _update_window_open(startup, datetime.datetime.now().hour) and self._pending_update:
-                if self._transcription_active():
-                    if startup:
-                        catchup.arm()
-                        logging.info("[AU] Update pending but transcription active — "
-                                     "deferring until idle")
-                    else:
-                        logging.info("[AU] Update pending but transcription active — deferring")
-                else:
-                    logging.info("[AU] %s auto-apply triggered",
-                                 "startup catch-up" if startup else "1am")
+            now = time.monotonic()
+            if now >= next_check:
+                self.check_for_update()
+                next_check = now + UPDATE_CHECK_INTERVAL_S
+            if self._pending_update:
+                if not idle.armed:
+                    idle.arm()
+                    logging.info("[AU] Update pending — applying once idle for %d min",
+                                 CATCHUP_IDLE_SETTLE_S // 60)
+                if idle.due(self._transcription_active(), time.monotonic()):
+                    logging.info("[AU] idle auto-apply triggered")
                     self.apply_pending_update()
-                    catchup.disarm()
-            if not self._pending_update:
-                catchup.disarm()  # applied, or nothing newer on the channel
-            startup = False
-            # Wait an hour for the next check, polling for idle while a deferred
-            # catch-up is owed; stop_requested is checked every poll either way.
-            for _ in range(3600 // CATCHUP_POLL_S):
-                if self.state.get("stop_requested"):
-                    return
-                time.sleep(CATCHUP_POLL_S)
-                if catchup.armed and self._pending_update and \
-                        catchup.due(self._transcription_active(), time.monotonic()):
-                    logging.info("[AU] deferred startup catch-up auto-apply triggered")
-                    self.apply_pending_update()
-                    catchup.disarm()
+                    idle.disarm()
+            else:
+                idle.disarm()  # applied, or nothing newer on the channel
+            time.sleep(CATCHUP_POLL_S)
 
 
 # ---------------------------------------------------------------------------
