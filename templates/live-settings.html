@@ -28,7 +28,7 @@
         /* Session summary strip (design: Live) */
         .live-summary {
             display: grid;
-            grid-template-columns: repeat(4, minmax(0, 1fr));
+            grid-template-columns: repeat(3, minmax(0, 1fr));
             gap: 12px;
             align-items: stretch;
             margin-bottom: 20px;
@@ -475,7 +475,6 @@
 
 {% block content %}
         <section class="live-summary" aria-label="Session summary">
-            <div class="sum-card"><div class="sum-label">Model</div><div class="sum-value" id="sum_model">—</div><div class="sum-sub" id="sum_model_sub"></div></div>
             <div class="sum-card"><div class="sum-label">Microphone</div><div class="sum-value" id="sum_mic">—</div><div class="sum-sub">Selected input</div></div>
             <div class="sum-card"><div class="sum-label">Language</div><div class="sum-value" id="sum_lang">—</div><div class="sum-sub">Transcription language</div></div>
             <div class="sum-card"><div class="sum-label">Translation</div><div class="sum-value" id="sum_trans">—</div><div class="sum-sub" id="sum_trans_sub"></div></div>
@@ -1687,15 +1686,12 @@
         // Session summary strip: read what the page already knows (status
         // poll, form selects) rather than adding endpoints.
         (function () {
-            function txt(id) { var e = document.getElementById(id); return e ? e.textContent.trim() : ''; }
             function sel(id) {
                 var e = document.getElementById(id);
                 return e && e.selectedIndex >= 0 && e.options[e.selectedIndex] ? e.options[e.selectedIndex].text : '';
             }
             function set(id, v) { var e = document.getElementById(id); if (e) e.textContent = v || '—'; }
             function paint() {
-                set('sum_model', txt('status_model') === 'Not loaded' ? 'Not loaded' : txt('status_model'));
-                set('sum_model_sub', '');
                 set('sum_mic', sel('audio_device'));
                 set('sum_lang', sel('live_language'));
             }
