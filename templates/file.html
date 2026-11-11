@@ -218,7 +218,7 @@
         }
 
         .btn-copy { background: var(--accent); color: #ffffff; }
-        .btn-download { background: var(--success); color: #ffffff; }
+        .btn-download { background: var(--success-solid); color: #ffffff; }
         .btn-new { background: var(--bg-elevated); color: var(--text-primary); }
 
         .actions button:hover {
@@ -456,7 +456,7 @@
                     <button onclick="reloadSettings()" style="flex: 1; padding: 10px; background: var(--accent); color: #ffffff; border: none; border-radius: var(--radius-sm); cursor: pointer; font-size: 0.9em; font-weight: 500; transition: background 0.2s;">
                         ↻ Reload Settings
                     </button>
-                    <button onclick="saveSettings()" style="flex: 1; padding: 10px; background: var(--success); color: #ffffff; border: none; border-radius: var(--radius-sm); cursor: pointer; font-size: 0.9em; font-weight: 500; transition: background 0.2s;">
+                    <button onclick="saveSettings()" style="flex: 1; padding: 10px; background: var(--success-solid); color: #ffffff; border: none; border-radius: var(--radius-sm); cursor: pointer; font-size: 0.9em; font-weight: 500; transition: background 0.2s;">
                         💾 Save Settings
                     </button>
                 </div>
@@ -521,7 +521,7 @@
                     <button class="primary" id="cancelBtn" disabled style="flex: 1;">
                         ✖️ Cancel
                     </button>
-                    <button class="primary" onclick="forceResetTranscription()" style="flex: 1; background: var(--danger);">
+                    <button class="primary" onclick="forceResetTranscription()" style="flex: 1; background: var(--danger-solid);">
                         🔄 Force Reset
                     </button>
                 </div>
@@ -568,7 +568,7 @@
                         <div class="transcription-output" id="translationOutput" style="border-color: var(--success);" aria-live="polite" aria-label="Translation output"></div>
                         <iframe id="translationHtmlPreview" title="Translation HTML Preview" style="display: none; width: 100%; height: 500px; border: 1px solid var(--success); border-radius: 8px; background: var(--bg-base);"></iframe>
                         <div class="actions" style="margin-top: 10px;">
-                            <button class="btn-copy" id="copyTranslationBtn" style="background: var(--success);">📋 Copy Translation</button>
+                            <button class="btn-copy" id="copyTranslationBtn" style="background: var(--success-solid);">📋 Copy Translation</button>
                             <button class="btn-download" id="downloadTranslationBtn" style="background: #16A34A;">💾 Download Translation</button>
                             <button id="toggleTranslationViewBtn" style="display: none; padding: 10px 16px; background: var(--border); color: var(--text-primary); border: none; border-radius: var(--radius-sm); cursor: pointer;">👁️ View Source</button>
                         </div>

@@ -360,8 +360,8 @@
 
                 <button id="main-save-btn" type="submit" class="btn-save" style="background: var(--accent);">💾 Save Settings</button>
                 <button type="button" onclick="updateServer()" class="btn-save" style="background: var(--accent); margin-top: 10px; width: 100%;">⬇️ Update &amp; Restart</button>
-                <button type="button" onclick="restartServer()" class="btn-save" style="background: var(--danger); margin-top: 10px; width: 100%;">🔄 Restart Server</button>
-                <button type="button" onclick="resetAllToDefaults()" class="btn-save" style="background: var(--danger); margin-top: 10px; width: 100%;">⚠️ Reset ALL Settings to Default (Nuclear)</button>
+                <button type="button" onclick="restartServer()" class="btn-save" style="background: var(--danger-solid); margin-top: 10px; width: 100%;">🔄 Restart Server</button>
+                <button type="button" onclick="resetAllToDefaults()" class="btn-save" style="background: var(--danger-solid); margin-top: 10px; width: 100%;">⚠️ Reset ALL Settings to Default (Nuclear)</button>
                 <button type="button" onclick="logout()" class="btn-save" style="background: var(--warning); margin-top: 10px; width: 100%;">🚪 Logout</button>
             </form>
             </div>
@@ -441,8 +441,8 @@
                         <label for="tunnel_auto_stop_enabled">Close automatically after transcription ends</label>
                     </div>
                     <div style="display: flex; gap: 8px; margin-bottom: 10px; flex-wrap: wrap;">
-                        <button type="button" id="tunnel-start-btn" onclick="startTunnel()" class="btn-save" style="background: var(--success); flex: 0 0 auto; width: auto; margin: 0; padding: 6px 14px;">▶️ Start</button>
-                        <button type="button" id="tunnel-stop-btn" onclick="stopTunnel()" class="btn-save" style="background: var(--danger); flex: 0 0 auto; width: auto; margin: 0; padding: 6px 14px;" disabled>⏹ Stop</button>
+                        <button type="button" id="tunnel-start-btn" onclick="startTunnel()" class="btn-save" style="background: var(--success-solid); flex: 0 0 auto; width: auto; margin: 0; padding: 6px 14px;">▶️ Start</button>
+                        <button type="button" id="tunnel-stop-btn" onclick="stopTunnel()" class="btn-save" style="background: var(--danger-solid); flex: 0 0 auto; width: auto; margin: 0; padding: 6px 14px;" disabled>⏹ Stop</button>
                         <button type="button" id="tunnel-copy-btn" onclick="copyTunnelUrl(this)" class="btn-save" style="background: var(--accent); flex: 0 0 auto; width: auto; margin: 0; padding: 6px 14px;" disabled>📋 Copy URL</button>
                     </div>
                     <div id="tunnel-url-row" style="display: none; align-items: center; gap: 8px; margin-bottom: 10px;">

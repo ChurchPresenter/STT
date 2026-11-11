@@ -227,7 +227,7 @@
         }
 
         .model-btn.download {
-            background: var(--success);
+            background: var(--success-solid);
             color: white;
         }
 
@@ -236,7 +236,7 @@
         }
 
         .model-btn.remove {
-            background: var(--danger);
+            background: var(--danger-solid);
             color: white;
         }
 
@@ -709,7 +709,7 @@
                         <div style="margin-bottom: 15px;">
                             <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px;">
                                 <h5 style="margin: 0; color: var(--text-primary);">🌐 Translation Models (NLLB &amp; MADLAD)</h5>
-                                <button class="model-btn" onclick="refreshNLLBModels()" style="background: var(--success); padding: 5px 10px; font-size: 0.8em;">🔄 Check for Updates</button>
+                                <button class="model-btn" onclick="refreshNLLBModels()" style="background: var(--success-solid); padding: 5px 10px; font-size: 0.8em;">🔄 Check for Updates</button>
                             </div>
                             <div id="nllb_models_list" aria-live="polite" aria-label="Translation model list">
                                 <div class="model-item model-item--success">
@@ -1099,7 +1099,7 @@
                         const modelNameCap = model.name.charAt(0).toUpperCase() + model.name.slice(1);
 
                         const statusBadge = isDownloaded
-                            ? '<span style="background: var(--success); color: var(--text-primary); padding: 2px 8px; border-radius: 12px; font-size: 0.75em; margin-left: 8px;">✓ Downloaded</span>'
+                            ? '<span style="background: var(--success-bg); color: var(--success); padding: 2px 8px; border-radius: 12px; font-size: 0.75em; margin-left: 8px;">✓ Downloaded</span>'
                             : '<span style="background: var(--bg-elevated); color: var(--text-secondary); padding: 2px 8px; border-radius: 12px; font-size: 0.75em; margin-left: 8px;">Available</span>';
 
                         whisperList.innerHTML += `
@@ -1194,7 +1194,7 @@
                         const modelNameCap = model.name.charAt(0).toUpperCase() + model.name.slice(1);
 
                         const statusBadge = isDownloaded
-                            ? '<span style="background: var(--success); color: var(--text-primary); padding: 2px 8px; border-radius: 12px; font-size: 0.75em; margin-left: 8px;">✓ Downloaded</span>'
+                            ? '<span style="background: var(--success-bg); color: var(--success); padding: 2px 8px; border-radius: 12px; font-size: 0.75em; margin-left: 8px;">✓ Downloaded</span>'
                             : isIncomplete
                             ? `<span style="background: var(--warning-bg); color: var(--warning); padding: 2px 8px; border-radius: 12px; font-size: 0.75em; margin-left: 8px;">Incomplete${model.missing_text ? ' — missing ' + escapeHtml(model.missing_text) : ''}</span>`
                             : '<span style="background: var(--bg-elevated); color: var(--text-secondary); padding: 2px 8px; border-radius: 12px; font-size: 0.75em; margin-left: 8px;">Available</span>';
@@ -2418,7 +2418,7 @@
 
                         // Check if this is the recommended model
                         const isRecommended = model.model_id === 'facebook/nllb-200-distilled-600M';
-                        const recommendedBadge = isRecommended ? '<span style="background: var(--success); color: var(--text-primary); padding: 1px 6px; border-radius: var(--radius-sm); font-size: 0.7em; margin-left: 8px;">Recommended</span>' : '';
+                        const recommendedBadge = isRecommended ? '<span style="background: var(--success-bg); color: var(--success); padding: 1px 6px; border-radius: var(--radius-sm); font-size: 0.7em; margin-left: 8px;">Recommended</span>' : '';
 
                         html += `
                             <div class="model-item model-item--success">
@@ -2646,7 +2646,7 @@
                 for (const model of data.models) {
                     const isDownloaded = model.downloaded;
                     const badge = isDownloaded
-                        ? '<span style="background: var(--success); color: var(--text-primary); padding: 2px 8px; border-radius: 10px; font-size: 0.75em; margin-left: 8px;">Downloaded</span>'
+                        ? '<span style="background: var(--success-bg); color: var(--success); padding: 2px 8px; border-radius: 10px; font-size: 0.75em; margin-left: 8px;">Downloaded</span>'
                         : '<span style="background: var(--border); color: var(--text-secondary); padding: 2px 8px; border-radius: 10px; font-size: 0.75em; margin-left: 8px;">Available</span>';
                     const langBadge = `<span style="background: var(--bg-elevated); color: var(--info); padding: 1px 6px; border-radius: var(--radius-sm); font-size: 0.7em;">${model.language}</span>`;
                     const btnId = 'tts_btn_' + model.id.replace(/[^a-zA-Z0-9]/g, '_');
@@ -2759,7 +2759,7 @@
                             <div class="model-info">
                                 <div class="model-name" style="color: ${isAvailable ? 'var(--success)' : 'var(--danger)'};">
                                     🔊 Silero VAD
-                                    <span style="background: var(--success); color: var(--text-primary); padding: 1px 6px; border-radius: var(--radius-sm); font-size: 0.7em; margin-left: 8px;">Voice Activity Detection</span>
+                                    <span style="background: var(--success-bg); color: var(--success); padding: 1px 6px; border-radius: var(--radius-sm); font-size: 0.7em; margin-left: 8px;">Voice Activity Detection</span>
                                 </div>
                                 <div class="model-details">Detects speech segments in audio for improved transcription accuracy</div>
                                 <div class="model-details" style="margin-top: 4px;">
@@ -2821,7 +2821,7 @@
                         <div class="model-info">
                             <div class="model-name" style="color: ${ready ? 'var(--success)' : 'var(--danger)'};">
                                 🎵 PANNs CNN14
-                                <span style="background: var(--success); color: var(--text-primary); padding: 1px 6px; border-radius: var(--radius-sm); font-size: 0.7em; margin-left: 8px;">Music / Speech Detection</span>
+                                <span style="background: var(--success-bg); color: var(--success); padding: 1px 6px; border-radius: var(--radius-sm); font-size: 0.7em; margin-left: 8px;">Music / Speech Detection</span>
                             </div>
                             <div class="model-details">Labels each segment as Speaking / Music / Quiet for reliable music handling</div>
                             <div id="panns_dl_progress" class="model-details" style="margin-top: 4px; display: none;"></div>

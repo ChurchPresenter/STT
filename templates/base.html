@@ -58,6 +58,10 @@
             --warning-bg: rgba(242, 176, 66, 0.12);
             --danger: #F87171;
             --danger-solid: #D93A3A;
+            --danger-solid-hover: #C02F2F;
+            --success-solid: #178A5A;
+            --success-solid-hover: #11724A;
+            --warning-solid: #F2B042;
             --danger-bg: rgba(248, 113, 113, 0.13);
             --info: #6EA8FF;
             --info-bg: rgba(110, 168, 255, 0.12);
@@ -101,7 +105,7 @@
             --bg-deep: #F4F5F7;
             --bg-base: #F4F5F7;
             --bg-side: #FBFBFC;
-            --bg-elevated: #FFFFFF;
+            --bg-elevated: #F2F3F6;
             --bg-card: #FFFFFF;
             --bg-input: #FFFFFF;
             --surface-2: #F2F3F6;
@@ -124,6 +128,10 @@
             --warning-bg: rgba(217, 138, 0, 0.14);
             --danger: #B42323;
             --danger-solid: #D13434;
+            --danger-solid-hover: #B52A2A;
+            --success-solid: #12A06A;
+            --success-solid-hover: #0B7A50;
+            --warning-solid: #D98A00;
             --danger-bg: #FDECEC;
             --info: #2563EB;
             --info-bg: rgba(59, 130, 246, 0.12);
@@ -144,11 +152,11 @@
         @media (prefers-color-scheme: light) {
             :root:not([data-theme="dark"]) {
                 color-scheme: light;
-                --bg-deep: #F4F5F7; --bg-base: #F4F5F7; --bg-side: #FBFBFC; --bg-elevated: #FFFFFF;
+                --bg-deep: #F4F5F7; --bg-base: #F4F5F7; --bg-side: #FBFBFC; --bg-elevated: #F2F3F6;
                 --bg-card: #FFFFFF; --bg-input: #FFFFFF; --surface-2: #F2F3F6; --inset: #F7F8FA; --track: #D3D6DD;
                 --text-primary: #14161B; --text-secondary: #555B68; --text-muted: #676D7B;
                 --accent: #4F46E5; --accent-hover: #4338CA; --accent-text: #4338CA; --accent-subtle: #EFEFFE;
-                --success: #0B7A50; --warning: #8F5600; --danger: #B42323; --danger-solid: #D13434; --info: #2563EB;
+                --success: #0B7A50; --warning: #8F5600; --danger: #B42323; --danger-solid: #D13434; --danger-solid-hover: #B52A2A; --success-solid: #12A06A; --success-solid-hover: #0B7A50; --warning-solid: #D98A00; --info: #2563EB;
                 --success-bg: rgba(18, 160, 106, 0.12); --warning-bg: rgba(217, 138, 0, 0.14); --danger-bg: #FDECEC;
                 --border: #E2E4E9; --border-hover: #C9CDD5; --border-subtle: #ECEEF1;
                 --overlay-hover: rgba(0, 0, 0, 0.05); --overlay-active: rgba(0, 0, 0, 0.10);
@@ -542,7 +550,7 @@
         button, .btn {
             padding: 8px 16px;
             border: none;
-            border-radius: var(--radius-sm);
+            border-radius: var(--radius-md);
             font-size: var(--fs-sm);
             font-weight: 600;
             cursor: pointer;
@@ -562,7 +570,7 @@
 
         .btn-primary:hover {
             background: var(--accent-hover);
-            transform: translateY(-1px);
+            transform: none;
             box-shadow: 0 4px 16px var(--accent-glow);
         }
 
@@ -573,44 +581,44 @@
 
         .btn-secondary:hover {
             background: var(--overlay-active);
-            transform: translateY(-1px);
+            transform: none;
         }
 
         .btn-success {
-            background: var(--success);
+            background: var(--success-solid);
             color: #fff;
         }
 
         .btn-success:hover {
-            background: #16A34A;
-            transform: translateY(-1px);
-            box-shadow: 0 4px 16px rgba(34, 197, 94, 0.25);
+            background: var(--success-solid-hover);
+            transform: none;
+            box-shadow: none;
         }
 
         .btn-danger {
-            background: var(--danger);
+            background: var(--danger-solid);
             color: white;
         }
 
         .btn-danger:hover {
-            background: #DC2626;
-            transform: translateY(-1px);
+            background: var(--danger-solid-hover);
+            transform: none;
         }
 
         .btn-warning {
-            background: var(--warning);
+            background: var(--warning-solid);
             color: #0a0a0c;
         }
 
         .btn-warning:hover {
             background: #D97706;
-            transform: translateY(-1px);
+            transform: none;
         }
 
         .btn-save {
             width: 100%;
             padding: 11px;
-            background: var(--success);
+            background: var(--success-solid);
             color: white;
             border: none;
             border-radius: var(--radius-sm);
@@ -622,9 +630,9 @@
         }
 
         .btn-save:hover {
-            background: #16A34A;
-            transform: translateY(-1px);
-            box-shadow: 0 4px 16px rgba(34, 197, 94, 0.25);
+            background: var(--success-solid-hover);
+            transform: none;
+            box-shadow: none;
         }
 
         .btn-save:disabled {

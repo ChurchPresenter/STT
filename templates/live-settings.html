@@ -131,12 +131,12 @@
         }
 
         .btn-force-reset {
-            background: var(--danger);
+            background: var(--danger-solid);
             color: white;
         }
 
         .btn-force-reset:hover:not(:disabled) {
-            background: #DC2626;
+            background: var(--danger-solid-hover);
             transform: translateY(-1px);
         }
 
@@ -151,22 +151,22 @@
         }
 
         .btn-start {
-            background: var(--success);
+            background: var(--success-solid);
             color: white;
         }
 
         .btn-start:hover:not(:disabled) {
-            background: #16A34A;
+            background: var(--success-solid-hover);
             transform: translateY(-1px);
         }
 
         .btn-stop {
-            background: var(--danger);
+            background: var(--danger-solid);
             color: white;
         }
 
         .btn-stop:hover:not(:disabled) {
-            background: #DC2626;
+            background: var(--danger-solid-hover);
             transform: translateY(-1px);
         }
 
@@ -203,7 +203,7 @@
 
         .volume-fill {
             height: 100%;
-            background: linear-gradient(90deg, var(--success) 0%, #16A34A 50%, var(--warning) 75%, var(--danger) 100%);
+            background: linear-gradient(90deg, var(--success) 0%, var(--success) 50%, var(--warning) 75%, var(--danger) 100%);
             border-radius: 12px;
             display: flex;
             align-items: center;

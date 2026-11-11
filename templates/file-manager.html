@@ -131,7 +131,7 @@
         }
 
         .action-delete {
-            background: var(--danger);
+            background: var(--danger-solid);
             color: white;
         }
 
@@ -289,12 +289,12 @@
         }
 
         .notification.success {
-            background: var(--success);
+            background: var(--success-solid);
             color: white;
         }
 
         .notification.error {
-            background: var(--danger);
+            background: var(--danger-solid);
             color: white;
         }
 
@@ -467,7 +467,7 @@
             <div class="filter-bar" id="bulkBar" style="display: none;">
                 <span id="bulkCount" style="color: var(--text-primary); font-weight: 600;"></span>
                 <button class="btn btn-primary" onclick="bulkDownload()">⬇ Download</button>
-                <button class="btn" style="background: var(--danger); color: white;" onclick="bulkDelete()">🗑 Delete</button>
+                <button class="btn" style="background: var(--danger-solid); color: white;" onclick="bulkDelete()">🗑 Delete</button>
                 <button class="btn btn-secondary" onclick="bulkHide()">🙈 Hide</button>
             </div>
 
@@ -496,7 +496,7 @@
                     <button class="btn btn-secondary" id="devPickOrphan" onclick="devSelectVerdict('orphan')">☑ Orphan</button>
                     <button class="btn btn-secondary" id="devPickService" onclick="devSelectVerdict('service')" style="border-color: var(--danger);" title="Real services. Selectable, but this is the one that loses a recording you cannot get back.">☑ Service</button>
                     <button class="btn btn-secondary" id="devClearBtn" onclick="devClearSelection()">✕ Clear selection</button>
-                    <button class="btn" style="background: var(--danger); color: white;" onclick="devDelete()">🗑 Delete selected</button>
+                    <button class="btn" style="background: var(--danger-solid); color: white;" onclick="devDelete()">🗑 Delete selected</button>
                     <span id="devSelectionInfo" style="color: var(--text-secondary); font-size: 0.85em;"></span>
                 </div>
             </div>
@@ -1051,7 +1051,7 @@
 
                 // Hide/Unhide button based on current state (only for local view)
                 const hideButton = !isRemote && item.is_hidden
-                    ? `<button class="action-btn" style="background: var(--success); color: white;" onclick="unhideItem('${item.path.replace(/\\/g, '\\\\')}')">Unhide</button>`
+                    ? `<button class="action-btn" style="background: var(--success-solid); color: white;" onclick="unhideItem('${item.path.replace(/\\/g, '\\\\')}')">Unhide</button>`
                     : !isRemote ? `<button class="action-btn" style="background: var(--text-secondary); color: white;" onclick="hideItem('${item.path.replace(/\\/g, '\\\\')}')">Hide</button>` : '';
 
                 // Download and Preview buttons (only for files, not folders)
