@@ -75,6 +75,7 @@ a = Analysis(
         "stt.fd_limit",
         "stt.server_port",
         "stt.owner_exec",
+        "stt.env_errors",
         "stt.server_restart",
         "stt.coercion",
     ],

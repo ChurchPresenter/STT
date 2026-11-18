@@ -95,6 +95,7 @@ try:
     from stt.wheel_policy import only_binary_args
     from stt.server_port import DEFAULT_PORT
     from stt import owner_exec as _owner_exec
+    from stt.env_errors import environment_problem as _environment_problem
     from stt.server_restart import RESTART_EXIT_CODE
 except ImportError:  # pragma: no cover - depends on how the process was started
     # deploy/stt-watchdog.service and com.stt.watchdog.plist run this file as a
@@ -107,6 +108,7 @@ except ImportError:  # pragma: no cover - depends on how the process was started
     from stt.wheel_policy import only_binary_args
     from stt.server_port import DEFAULT_PORT
     from stt import owner_exec as _owner_exec
+    from stt.env_errors import environment_problem as _environment_problem
     from stt.server_restart import RESTART_EXIT_CODE
 
 try:
@@ -2131,7 +2133,12 @@ class ProcessManager:
             logging.info(f"[PM] STT started (PID {proc.pid})")
             return True
         except Exception as e:
-            logging.error(f"[PM] Failed to start STT: {e}")
+            # A policy block on this machine (STT-2X) is the operator's to fix;
+            # at error it becomes a Sentry issue nobody can act on in the code.
+            if _environment_problem(e):
+                logging.warning(f"[PM] Failed to start STT: {e} — {_environment_problem(e)}")
+            else:
+                logging.error(f"[PM] Failed to start STT: {e}")
             self.state.set(status="stopped")
             return False
 

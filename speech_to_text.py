@@ -87,6 +87,7 @@ for _mig_name in ("config.json", "custom_dictionary.json", "word_highlighting.js
 # Path-containment guards live in stt/paths.py (importable, unit-tested);
 # safe_model_path is re-imported and safe_managed_path keeps its APP_DIR default.
 from stt import paths as _paths
+from stt.env_errors import environment_problem as _environment_problem
 from stt.paths import safe_model_path  # noqa: F401
 from stt.coercion import coerce_bool, coerce_float, coerce_int
 from stt.server_port import DEFAULT_PORT as _DEFAULT_PORT
@@ -8607,6 +8608,13 @@ def save_translation_settings():
                 except _model_disk.ModelUnavailable as e:
                     # The operator's to fix in the Model Manager, not a crash.
                     print(f"[LIVE-TRANSLATION] {e}", flush=True)
+                except OSError as e:
+                    # A native library the machine cannot load (STT-2Y) is the
+                    # operator's to fix; anything else still reaches Sentry.
+                    problem = _environment_problem(e)
+                    if problem is None:
+                        raise
+                    print(f"[LIVE-TRANSLATION] {problem} ({e})", flush=True)
             threading.Thread(target=reload_translation_model, daemon=True).start()
 
     # Clear cache on model or method change (stale tokenizer/model).
